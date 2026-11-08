@@ -1,7 +1,13 @@
-import { realpath } from 'node:fs/promises';
-import { resolve } from 'node:path';
+import { mkdir, realpath } from 'node:fs/promises';
+import { basename, dirname, join, resolve } from 'node:path';
 
-import { isMissingFileError, readConfigJson, writeConfigJsonAtomic } from './jsonFile.ts';
+import { withConfigFileLock } from './fileLock.ts';
+import {
+  isMissingFileError,
+  pathExists,
+  readConfigJson,
+  writeConfigJsonAtomic,
+} from './jsonFile.ts';
 import { formatModelRef, isTowerRole, modelKey, parseModelRef } from './modelRef.ts';
 import { PRIMARY_MODEL_CHOICE } from './resolve.ts';
 import { isPlainObject, modelAliasProblem, parseTowerConfig, TowerConfigError } from './schema.ts';
@@ -46,34 +52,40 @@ export async function updateTowerConfigModel(
     ref = parsed.ref;
   }
 
-  const target = await writeTarget(update.path);
-  const current = (await readConfigJson(target, source)).value;
-  if (!isPlainObject(current)) {
-    throw configError(source, undefined, 'expected a JSON object — fix the file by hand first');
+  const target = await canonicalPath(update.path);
+  if (ref === undefined && !(await pathExists(target))) {
+    return { path: update.path, field, changed: false };
   }
-  const next: Record<string, unknown> = { ...current };
-  if (role !== undefined) {
-    applyEntry(next, role, ref);
-  } else {
-    const pool = next['models'];
-    if (pool !== undefined && !isPlainObject(pool)) {
-      throw configError(
-        source,
-        'models',
-        'expected an object mapping alias to model spec — fix the file by hand first',
-      );
+  await mkdir(dirname(target), { recursive: true });
+  return withConfigFileLock(target, async () => {
+    const current = (await readConfigJson(target, source)).value;
+    if (!isPlainObject(current)) {
+      throw configError(source, undefined, 'expected a JSON object — fix the file by hand first');
     }
-    const models: Record<string, unknown> = { ...pool };
-    applyEntry(models, key, ref);
-    if (Object.keys(models).length === 0) delete next['models'];
-    else next['models'] = models;
-  }
+    const next: Record<string, unknown> = { ...current };
+    if (role !== undefined) {
+      applyEntry(next, role, ref);
+    } else {
+      const pool = next['models'];
+      if (pool !== undefined && !isPlainObject(pool)) {
+        throw configError(
+          source,
+          'models',
+          'expected an object mapping alias to model spec — fix the file by hand first',
+        );
+      }
+      const models: Record<string, unknown> = { ...pool };
+      applyEntry(models, key, ref);
+      if (Object.keys(models).length === 0) delete next['models'];
+      else next['models'] = models;
+    }
 
-  const config = parseTowerConfig(next, source);
-  const value = role !== undefined ? config[role] : config.models?.[key];
-  const changed = JSON.stringify(next) !== JSON.stringify(current);
-  if (changed) await writeConfigJsonAtomic(target, next);
-  return { path: update.path, field, changed, ...(value === undefined ? {} : { value }) };
+    const config = parseTowerConfig(next, source);
+    const value = role !== undefined ? config[role] : ownEntry(config.models, key);
+    const changed = JSON.stringify(next) !== JSON.stringify(current);
+    if (changed) await writeConfigJsonAtomic(target, next);
+    return { path: update.path, field, changed, ...(value === undefined ? {} : { value }) };
+  });
 }
 
 function applyEntry(
@@ -85,7 +97,7 @@ function applyEntry(
     delete container[key];
     return;
   }
-  const existing = container[key];
+  const existing = ownEntry(container, key);
   if (!isPlainObject(existing)) {
     container[key] = formatModelRef(ref);
     return;
@@ -96,12 +108,24 @@ function applyEntry(
   container[key] = entry;
 }
 
-async function writeTarget(path: string): Promise<string> {
-  try {
-    return await realpath(path);
-  } catch (error) {
-    if (isMissingFileError(error)) return resolve(path);
-    throw error;
+function ownEntry<T>(record: Readonly<Record<string, T>> | undefined, key: string): T | undefined {
+  return record !== undefined && Object.hasOwn(record, key) ? record[key] : undefined;
+}
+
+async function canonicalPath(path: string): Promise<string> {
+  const absolute = resolve(path);
+  const missing: string[] = [];
+  let existing = absolute;
+  for (;;) {
+    try {
+      return join(await realpath(existing), ...missing);
+    } catch (error) {
+      if (!isMissingFileError(error)) throw error;
+      const parent = dirname(existing);
+      if (parent === existing) return absolute;
+      missing.unshift(basename(existing));
+      existing = parent;
+    }
   }
 }
 

@@ -1,6 +1,20 @@
-import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import {
+  chmod,
+  lstat,
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  rm,
+  stat,
+  symlink,
+  utimes,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { promisify } from 'node:util';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
@@ -10,6 +24,8 @@ import {
   updateTowerConfigModel,
 } from '../../src/config/index.ts';
 import type { TowerConfigModelUpdate } from '../../src/config/index.ts';
+
+const execFileAsync = promisify(execFile);
 
 let root: string;
 let file: string;
@@ -180,6 +196,7 @@ describe('updateTowerConfigModel', () => {
       'expected a JSON object — fix the file by hand first',
     );
     expect(await readFile(file, 'utf8')).toBe('[]');
+    expect(await readdir(dirname(file))).toEqual(['tower.json']);
   });
 
   it('round-trips through loadTowerConfig for the global and project files', async () => {
@@ -208,15 +225,84 @@ describe('updateTowerConfigModel', () => {
     });
   });
 
-  it('replaces the file atomically without leaving temporary files', async () => {
+  it('keeps every concurrent in-process update and leaves no temporary or lock files', async () => {
     await writeRaw(file, '{}');
+    const aliases = Array.from({ length: 12 }, (_, index) => `alias${String(index)}`);
+    await Promise.all([
+      ...aliases.map((alias) => updateTowerConfigModel({ path: file, key: alias, ref: `provider/${alias}` })),
+      updateTowerConfigModel({ path: file, key: 'worker', ref: 'openai/gpt-5.1' }),
+      updateTowerConfigModel({ path: join(root, 'agent', '..', 'agent', 'tower.json'), key: 'reviewer', ref: 'google/gemini-2.5-pro' }),
+    ]);
+    const saved = (await readJson(file)) as { models: Record<string, string>; worker: string; reviewer: string };
+    expect(Object.keys(saved.models).sort()).toEqual([...aliases].sort());
+    expect(saved.models['alias7']).toBe('provider/alias7');
+    expect(saved.worker).toBe('openai/gpt-5.1');
+    expect(saved.reviewer).toBe('google/gemini-2.5-pro');
+    expect(await readdir(dirname(file))).toEqual(['tower.json']);
+  });
+
+  it('keeps every update from concurrent processes', async () => {
+    await writeRaw(file, '{}');
+    const moduleUrl = new URL('../../src/config/index.ts', import.meta.url).href;
+    const script = [
+      `const { updateTowerConfigModel } = await import(${JSON.stringify(moduleUrl)});`,
+      'const [path, prefix] = process.argv.slice(1);',
+      'for (let index = 0; index < 5; index += 1) {',
+      '  await updateTowerConfigModel({ path, key: `${prefix}${index}`, ref: `provider/${prefix}${index}` });',
+      '}',
+    ].join('\n');
+    const prefixes = ['p0-', 'p1-', 'p2-', 'p3-'];
     await Promise.all(
-      ['a', 'b', 'c', 'd'].map((alias) =>
-        updateTowerConfigModel({ path: file, key: alias, ref: `provider/${alias}` }),
+      prefixes.map((prefix) =>
+        execFileAsync(process.execPath, [
+          '--experimental-strip-types',
+          '--no-warnings',
+          '--input-type=module',
+          '-e',
+          script,
+          file,
+          prefix,
+        ]),
       ),
     );
+    const saved = (await readJson(file)) as { models: Record<string, string> };
+    const expected = prefixes.flatMap((prefix) => [0, 1, 2, 3, 4].map((index) => `${prefix}${String(index)}`));
+    expect(Object.keys(saved.models).sort()).toEqual(expected.sort());
     expect(await readdir(dirname(file))).toEqual(['tower.json']);
-    expect(await readJson(file)).toMatchObject({ models: expect.any(Object) });
+  }, 30_000);
+
+  it('recovers from a stale lock left behind by a crashed writer', async () => {
+    await writeRaw(file, '{}');
+    const lock = `${file}.lock`;
+    await writeFile(lock, 'pid=999999 host=another-host since=2020-01-01T00:00:00.000Z token=crashed\n', 'utf8');
+    const old = new Date(Date.now() - 60_000);
+    await utimes(lock, old, old);
+    await updateTowerConfigModel({ path: file, key: 'worker', ref: 'openai/gpt-5.1' });
+    expect(await readJson(file)).toStrictEqual({ worker: 'openai/gpt-5.1' });
+    expect(await readdir(dirname(file))).toEqual(['tower.json']);
+  });
+
+  it('returns only own entries for prototype-named aliases', async () => {
+    await writeRaw(file, '{"models":{"keep":"a/b"}}');
+    for (const alias of ['constructor', 'toString', 'hasOwnProperty', 'valueOf']) {
+      expect(await updateTowerConfigModel({ path: file, key: alias })).toStrictEqual({
+        path: file,
+        field: `models.${alias}`,
+        changed: false,
+      });
+    }
+    const set = await updateTowerConfigModel({ path: file, key: 'constructor', ref: 'openai/gpt-5.1' });
+    expect(set).toStrictEqual({
+      path: file,
+      field: 'models.constructor',
+      changed: true,
+      value: { provider: 'openai', modelId: 'gpt-5.1' },
+    });
+    const saved = (await readJson(file)) as { models: Record<string, unknown> };
+    expect(Object.entries(saved.models)).toEqual([
+      ['keep', 'a/b'],
+      ['constructor', 'openai/gpt-5.1'],
+    ]);
   });
 
   it('writes through a symlinked config and keeps the file mode', async () => {

@@ -12,7 +12,7 @@ import type {
 } from '../../src/config/index.ts';
 
 const GLOBAL: TowerConfigSource = { kind: 'file', scope: 'global', path: '/u/.pi/agent/tower.json' };
-const SESSION = { model: 'anthropic/claude-sonnet-4-5', thinkingLevel: 'high' } as const;
+const SESSION = { provider: 'anthropic', modelId: 'claude-sonnet-4-5', thinkingLevel: 'high' } as const;
 
 interface FakeModel {
   readonly provider: string;
@@ -111,6 +111,21 @@ describe('validateModelBindings', () => {
     const problems = validateModelBindings(one, registry(['openai/gpt-5.1'], ['openai']));
     expect(problems).toHaveLength(1);
     expect(problems[0]?.message.endsWith('; reviewer falls back to it')).toBe(true);
+  });
+
+  it('hints at a mistyped thinking level when an unknown model id ends in :<word>', () => {
+    const models = resolveTowerModels(
+      config({
+        roles: { worker: value('openai/gpt-5.1:ultra'), reviewer: value('openai/gpt-5.1:HIGH') },
+        models: { local: value('ollama/qwen2.5-coder:7b') },
+      }),
+      SESSION,
+    );
+    expect(validateModelBindings(models, registry([], [])).map((problem) => problem.message)).toEqual([
+      'worker: model "openai/gpt-5.1:ultra" (set by /u/.pi/agent/tower.json (global)) is not in pi\'s model registry — check the provider/modelId (pi --list-models shows them); if ":ultra" was meant as a thinking level, use one of off, minimal, low, medium, high, xhigh, max',
+      'reviewer: model "openai/gpt-5.1:HIGH" (set by /u/.pi/agent/tower.json (global)) is not in pi\'s model registry — check the provider/modelId (pi --list-models shows them); thinking levels are lowercase — did you mean ":high"?',
+      'models.local: model "ollama/qwen2.5-coder:7b" (set by /u/.pi/agent/tower.json (global)) is not in pi\'s model registry — check the provider/modelId (pi --list-models shows them)',
+    ]);
   });
 
   it('does not second-guess the live session model', () => {

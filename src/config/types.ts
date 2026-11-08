@@ -51,10 +51,7 @@ export interface TowerConfig {
   readonly files: readonly TowerConfigFileState[];
 }
 
-export interface TowerPrimaryModel {
-  readonly model: string;
-  readonly thinkingLevel?: TowerThinkingLevel;
-}
+export type TowerPrimaryModel = TowerModelRef;
 
 export interface TowerModelBinding {
   readonly model: string;

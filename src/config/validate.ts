@@ -1,4 +1,4 @@
-import { TOWER_ROLES } from './modelRef.ts';
+import { isThinkingLevel, TOWER_ROLES, TOWER_THINKING_LEVELS } from './modelRef.ts';
 import { unresolvedModelHint } from './resolve.ts';
 import { formatModelOrigin } from './source.ts';
 import type { TowerResolvedModel, TowerResolvedModels, TowerRole } from './types.ts';
@@ -62,7 +62,7 @@ function checkModel<TModel>(
       kind: 'not-found',
       model: binding.model,
       message: withDependents(
-        `${subject} is not in pi's model registry — check the provider/modelId (pi --list-models shows them)`,
+        `${subject} is not in pi's model registry — check the provider/modelId (pi --list-models shows them)${thinkingSuffixHint(binding.modelId)}`,
         dependents,
       ),
     };
@@ -79,6 +79,15 @@ function checkModel<TModel>(
     };
   }
   return undefined;
+}
+
+function thinkingSuffixHint(modelId: string): string {
+  const suffix = /:([A-Za-z]+)$/.exec(modelId)?.[1];
+  if (suffix === undefined) return '';
+  const lower = suffix.toLowerCase();
+  return isThinkingLevel(lower)
+    ? `; thinking levels are lowercase — did you mean ":${lower}"?`
+    : `; if ":${suffix}" was meant as a thinking level, use one of ${TOWER_THINKING_LEVELS.join(', ')}`;
 }
 
 function withDependents(message: string, dependents: readonly TowerRole[]): string {

@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'vitest';
+import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
+import { describe, expect, expectTypeOf, it } from 'vitest';
 
 import {
   parseModelRef,
@@ -12,13 +13,14 @@ import type {
   TowerConfigSource,
   TowerConfigValue,
   TowerModelSpec,
+  TowerPrimaryModel,
   TowerResolvedModels,
   TowerSpawnKind,
 } from '../../src/config/index.ts';
 
 const GLOBAL: TowerConfigSource = { kind: 'file', scope: 'global', path: '/u/.pi/agent/tower.json' };
 const PROJECT: TowerConfigSource = { kind: 'file', scope: 'project', path: '/repo/.pi/tower.json' };
-const SESSION = { model: 'anthropic/claude-sonnet-4-5', thinkingLevel: 'high' } as const;
+const SESSION = { provider: 'anthropic', modelId: 'claude-sonnet-4-5', thinkingLevel: 'high' } as const;
 
 function value(
   text: string,
@@ -67,7 +69,7 @@ describe('resolveTowerModels', () => {
   it('lets unset worker and reviewer inherit the configured orchestrator binding with its level', () => {
     const models = resolveTowerModels(
       config({ roles: { orchestrator: value('anthropic/claude-opus-4-5:xhigh') } }),
-      { model: 'openai/gpt-5.1', thinkingLevel: 'low' },
+      { provider: 'openai', modelId: 'gpt-5.1', thinkingLevel: 'low' },
     );
     const binding = {
       model: 'anthropic/claude-opus-4-5',
@@ -127,14 +129,38 @@ describe('resolveTowerModels', () => {
     expect(models.roles.reviewer.binding?.model).toBe('openai/gpt-5.1');
   });
 
-  it('takes the session model id verbatim without parsing a suffix', () => {
-    const models = resolveTowerModels(config(), { model: 'openrouter/qwen/qwen3-coder:high' });
+  it('takes the session provider and model id verbatim, without splitting or suffix parsing', () => {
+    const models = resolveTowerModels(config(), {
+      provider: 'openrouter',
+      modelId: 'qwen/qwen3-coder:high',
+    });
     expect(models.roles.orchestrator.binding).toStrictEqual({
       model: 'openrouter/qwen/qwen3-coder:high',
       provider: 'openrouter',
       modelId: 'qwen/qwen3-coder:high',
     });
-    expect(() => resolveTowerModels(config(), { model: 'sonnet' })).toThrow(TypeError);
+  });
+
+  it('keeps a session provider id that itself contains a slash', () => {
+    const models = resolveTowerModels(config(), {
+      provider: 'my/proxy',
+      modelId: 'model-x',
+      thinkingLevel: 'medium',
+    });
+    const binding = { model: 'my/proxy/model-x', provider: 'my/proxy', modelId: 'model-x', thinkingLevel: 'medium' };
+    expect(models.roles.orchestrator).toStrictEqual({ binding, origin: { kind: 'session' } });
+    expect(models.roles.worker.binding).toStrictEqual(binding);
+    expect(models.roles.reviewer.binding).toStrictEqual(binding);
+    expect(resolveSpawnModel(models, 'reviewer').binding).toStrictEqual(binding);
+    expect(resolveSpawnModel(models, 'worker', 'primary').binding.provider).toBe('my/proxy');
+  });
+
+  it("maps pi's live model and thinking level onto the session input field by field", () => {
+    const fromPi = (
+      model: NonNullable<ExtensionContext['model']>,
+      thinkingLevel: ReturnType<ExtensionAPI['getThinkingLevel']>,
+    ): TowerPrimaryModel => ({ provider: model.provider, modelId: model.id, thinkingLevel });
+    expectTypeOf(fromPi).returns.toEqualTypeOf<TowerPrimaryModel>();
   });
 
   it('resolves pool aliases and keeps descriptions only on configured entries', () => {

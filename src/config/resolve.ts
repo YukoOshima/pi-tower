@@ -1,5 +1,5 @@
 import { TOWER_MODEL_ENV, TOWER_MODEL_FLAGS } from './load.ts';
-import { isTowerRole, modelKey, splitModelKey } from './modelRef.ts';
+import { isTowerRole, modelKey } from './modelRef.ts';
 import type {
   TowerConfig,
   TowerConfigValue,
@@ -115,12 +115,7 @@ function configuredModel(value: TowerConfigValue<TowerModelSpec>): TowerResolved
 function sessionModel(primary: TowerPrimaryModel | undefined): TowerResolvedModel {
   const origin = { kind: 'session' } as const;
   if (primary === undefined) return { origin };
-  const split = splitModelKey(primary.model);
-  if (!split.ok) throw new TypeError(`session model ${split.error}`);
-  return {
-    binding: toBinding(split.ref.provider, split.ref.modelId, primary.thinkingLevel),
-    origin,
-  };
+  return { binding: toBinding(primary.provider, primary.modelId, primary.thinkingLevel), origin };
 }
 
 function inheritOrchestrator(orchestrator: TowerResolvedModel): TowerResolvedModel {

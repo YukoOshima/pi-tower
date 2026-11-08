@@ -20,7 +20,7 @@ const GLOBAL_PATH = '/u/.pi/agent/tower.json';
 const PROJECT_PATH = '/repo/.pi/tower.json';
 const GLOBAL: TowerConfigSource = { kind: 'file', scope: 'global', path: GLOBAL_PATH };
 const PROJECT: TowerConfigSource = { kind: 'file', scope: 'project', path: PROJECT_PATH };
-const SESSION = { model: 'anthropic/claude-sonnet-4-5', thinkingLevel: 'high' } as const;
+const SESSION = { provider: 'anthropic', modelId: 'claude-sonnet-4-5', thinkingLevel: 'high' } as const;
 
 function value(
   text: string,
@@ -174,9 +174,11 @@ describe('source labels', () => {
     expect(describeThinking(models.roles.orchestrator)).toBe('high (session)');
     expect(describeThinking(models.roles.worker)).toBe('high (inherited from orchestrator)');
     expect(describeThinking(models.roles.reviewer)).toBe('low (configured)');
-    expect(describeThinking(resolveTowerModels({ roles: {}, models: {}, files: [] }, { model: 'a/b' }).roles.worker)).toBe(
-      'pi default',
+    const levelless = resolveTowerModels(
+      { roles: {}, models: {}, files: [] },
+      { provider: 'a', modelId: 'b' },
     );
+    expect(describeThinking(levelless.roles.worker)).toBe('pi default');
     expect(describeThinking({ origin: { kind: 'session' } })).toBe('-');
   });
 });
