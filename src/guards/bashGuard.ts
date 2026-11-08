@@ -243,12 +243,14 @@ function analyzeNestedShell(
   if (ctx.state.startupRedirected) return vetoed(UNANALYZABLE_VETO);
   let command = false;
   let stdin = false;
-  let longOptions = shell === 'bash';
+  let longOptions = shell === 'bash' || shell === 'sh';
   let index = 0;
   for (; index < args.length; index += 1) {
     const word = args[index]!.literal ?? args[index]!.value;
     if (word === undefined) return vetoed(UNANALYZABLE_VETO);
-    const arg = longOptions && BASH_SINGLE_DASH_LONG_OPTIONS.has(word) ? `-${word}` : word;
+    const long = longOptions && BASH_SINGLE_DASH_LONG_OPTIONS.has(word);
+    if (long && shell === 'sh') return vetoed(UNANALYZABLE_VETO);
+    const arg = long ? `-${word}` : word;
     if (arg === '--' || arg === '-') {
       index += 1;
       break;

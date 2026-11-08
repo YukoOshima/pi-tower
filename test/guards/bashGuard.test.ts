@@ -605,6 +605,13 @@ describe('shell startup files', () => {
     expect(guard("bash -e -rcfile 'rm -rf .tower/comms' x")).toBe(rmVeto('.tower/comms'));
     expect(guard("zsh -rcfile 'rm -rf .tower/comms' x")).toBe(rmVeto('.tower/comms'));
   });
+
+  it('vetoes a leading single-dash bash long option for sh, which may be bash or dash', () => {
+    expect(guard("sh -login /dev/stdin x <<< 'rm -rf .tower/comms'")).toBe(UNANALYZABLE_VETO);
+    expect(guard("sh -posix errexit <<< 'rm -rf .tower/comms'")).toBe(UNANALYZABLE_VETO);
+    expect(guard('sh -norc scripts/clean.sh; rm -f x')).toBe(UNANALYZABLE_VETO);
+    expect(guard('sh -e scripts/clean.sh && rm -rf dist')).toBeUndefined();
+  });
 });
 
 describe('quoting and parsing', () => {
