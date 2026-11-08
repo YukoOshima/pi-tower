@@ -11,7 +11,7 @@ The first release. It ports the Tower multi-agent mode of [Kimi Code](https://gi
   - Thinking levels are set with a `:level` suffix or `thinkingLevel`.
   - An unset worker or reviewer inherits the orchestrator, including its thinking level. An unset orchestrator falls back to the session model.
   - `maxRunningAgents` (default 256) and `agentTimeoutMs` (default 2 hours) set the limits.
-- **Session model switching.** `/tower on` switches the main session to the orchestrator model, and `/tower off` switches back.
+- **Session model switching.** `/tower on` switches the main session to the orchestrator model, and `/tower off` switches back. If the configuration does not load, the session start and `/tower on` warn and the session keeps its model.
 - **`/tower models`.** Shows, sets and clears role and pool models in the global or the project file, and warns when a write is shadowed or the project is untrusted.
 - **Per-spawn model choice.** `TowerSpawn` accepts `orchestrator`/`primary`, `worker`, `reviewer` or a pool alias.
   - A spawn is refused when its model is unknown to pi or has no credentials.
@@ -24,7 +24,7 @@ The first release. It ports the Tower multi-agent mode of [Kimi Code](https://gi
   - the merge gate and `--no-ff` merges, rebases inside mission worktrees, and teardown;
   - recovery after a lost `state.json`.
 - **17 tools.** The 13 Kimi Code Tower tools are ported with their descriptions and refusals. `TowerResume`, `TowerTasks`, `TowerTaskOutput` and `TowerTaskStop` take the place of Kimi Code's generic agent and task tools.
-- **`/tower` command.** Subcommands: `on`, `off`, `status`, `teardown`, `<base-branch>`, `models`, `agents` and `stop <agent>`, with tab completion.
+- **`/tower` command.** Subcommands: `on`, `off`, `status`, `teardown`, `<base-branch>`, `models`, `agents`, `stop <agent>` and `help`, with tab completion. Near-miss words and stray arguments are refused with a hint instead of becoming a base branch, and the interactive UI asks before `/tower <base-branch>` creates a new branch.
 - **Worker and reviewer sessions** run as in-process pi sessions with the ported briefings and role prompt.
   - Workers work in their worktree. Reviewers work read-only in the main checkout.
   - Transcripts are stored in `.tower/agents/`.
@@ -36,4 +36,5 @@ The first release. It ports the Tower multi-agent mode of [Kimi Code](https://gi
   - read-only reviewers;
   - todo and subagent tool vetoes while tower mode is on.
 - **Ownership.** There is one tower per workspace across pi processes. Tower mode is restored with the pi session, and a dead owner is taken over.
+- **Diagnostics.** pi-tower writes its diagnostics to `.tower/pi-tower.log`, or to `pi-tower.log` in the pi agent directory before `.tower/` exists.
 - **Docs and license.** README in English and Simplified Chinese, an example `tower.json`, and the MIT license with the Kimi Code notice.

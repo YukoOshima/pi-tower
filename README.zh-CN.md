@@ -116,7 +116,7 @@ git status
 
 请在仓库的顶层目录中启动 pi。Tower 会在 pi 的工作目录中创建它的工作区（`.tower/`）。
 
-Tower 只能合并到本地 branch，不能合并到 remote-tracking ref 或 tag。如果 `/tower <base-branch>` 指定的 branch 不存在，Tower 会基于当前 checkout 创建它。使用已有 branch 并保持工作区干净，是最稳妥的做法。
+Tower 只能合并到本地 branch，不能合并到 remote-tracking ref 或 tag。如果 `/tower <base-branch>` 指定的 branch 不存在，Tower 会基于当前 checkout 创建它；在交互界面中，创建前会先请你确认。使用已有 branch 并保持工作区干净，是最稳妥的做法。
 
 > [!WARNING]
 > Tower 可能把未提交和未跟踪的文件快照到 worker branch 中；创建新的 base branch 时，会把这些改动提交到该 branch。对于还不是 Git 仓库的目录，Tower 会执行 `git init`，并把现有文件纳入初始 commit。开始前请确认其中没有机密文件或超大文件。Tower 会把 `.tower/` 加入 `.git/info/exclude`，因此它自己的状态永远不会被提交。
@@ -143,6 +143,7 @@ Tower 只能合并到本地 branch，不能合并到 remote-tracking ref 或 tag
 - **调整任务方向。** Tower 开启期间，直接发送普通消息即可补充约束、调整优先级或要求总结。Tower 把消息转给正在运行的 worker 后，worker 会在下一步看到它，正在执行的工具调用不会被打断。
 - **检查或停止 Agent。** `/tower agents` 列出本会话的 worker 和 reviewer，以及它们的状态、模型、思考等级和 mission。`/tower stop <agent>` 停止一个正在运行的 Agent。你主动停止的 worker 或 reviewer 视为有意终止：除非你另有指示，Tower 不会恢复、改派或替换它。
 - **切换 base。** 再次输入 `/tower <base-branch>`。Tower 会按新 base 重新检查现有 mission，只有落后的 branch 需要 rebase。合并之前，主 checkout 必须位于记录的 base 上。
+- **查看诊断日志。** pi-tower 会把自己的诊断信息（例如通知发送失败、Agent 会话中扩展报出的错误）写入 `.tower/pi-tower.log`；在 `.tower/` 创建之前，则写入 pi agent 目录下的 `pi-tower.log`。
 
 每个工作区只能有一个 Tower。如果另一个正在运行的 pi 进程已经拥有本工作区的 Tower，`/tower on` 会被拒绝，并显示对方的会话和进程号。请先在那个进程中关闭 Tower 模式，或者退出那个进程。拥有者进程结束后，下一次 `/tower on` 会接管该工作区。
 
@@ -256,9 +257,13 @@ pi-tower 从 `tower.json` 读取配置。下面是 [`examples/tower.json`](examp
 PI_TOWER_WORKER_MODEL=anthropic/claude-haiku-5-5 pi --tower-reviewer-model openai/gpt-5.5:xhigh
 ```
 
-pi-tower 在会话启动时读取配置，此后每次运行 `/tower models` 都会重新读取。手动编辑 `tower.json` 之后，运行一次 `/tower models` 即可重新加载，之后的派发无需重启就会使用新配置。
+pi-tower 会在会话启动时、每次 `/tower on` 时以及每次运行 `/tower models` 时读取配置。手动编辑 `tower.json` 之后，运行一次 `/tower models` 即可重新加载，之后的派发无需重启就会使用新配置。
 
-所有来源会一起校验。只要其中任何一处有无效值（例如命令行参数、环境变量或任一配置文件中的拼写错误），整个配置都会加载失败。在修正之前，所有派发都会被拒绝，`/tower models` 会显示错误信息。
+所有来源会一起校验。只要其中任何一处有无效值（例如命令行参数、环境变量或任一配置文件中的拼写错误），整个配置都会加载失败。在修正之前：
+
+- 所有派发都会被拒绝，`/tower models` 会显示错误信息；
+- 会话启动和 `/tower on` 时会警告 "Tower model configuration could not be loaded: …"；
+- `/tower on` 仍会开启 Tower 模式，但会话保持当前模型。
 
 ### `/tower models`
 
@@ -294,7 +299,7 @@ project config: /home/you/work/shop/.pi/tower.json (not found)
 
 如果通过配置文件、环境变量或命令行参数配置了 orchestrator，`/tower on` 会把主会话切换到该模型及其思考等级；`/tower off` 会切换回之前的模型和思考等级。如果你在此期间用 `/model` 自行换过模型，pi-tower 会尊重你的选择，不做切换。
 
-- 如果 orchestrator 模型不在 pi 的注册表中或没有凭据，Tower 模式仍会开启，但会给出警告，会话保持当前模型。
+- 如果 orchestrator 模型不在 pi 的注册表中、没有凭据，或者配置无法加载，Tower 模式仍会开启，但会给出警告，会话保持当前模型。
 - 如果没有配置 orchestrator，会话本身的模型就是 orchestrator，不会发生切换。
 
 ### 为单次派发选择模型
@@ -340,7 +345,7 @@ Agent 在整个生命周期内都使用同一个模型；恢复后的 worker 会
 | --- | --- |
 | `/tower` 或 `/tower status` | 显示精简的 Tower 状态，不触发模型轮次 |
 | `/tower on` | 开启 Tower 模式：激活 Tower 工具、接管已有的 `.tower/` 工作区，并切换到 orchestrator 模型。不会发送任务目标。 |
-| `/tower <base-branch>` | 若 Tower 模式未开启则开启它，并把该本地 branch 设为 base：新工作区会以它初始化，已有工作区会重新锚定到它。branch 不存在时会基于当前 checkout 创建，并把未提交的改动提交到该 branch。 |
+| `/tower <base-branch>` | 若 Tower 模式未开启则开启它，并把该本地 branch 设为 base：新工作区会以它初始化，已有工作区会重新锚定到它。branch 不存在时会基于当前 checkout 创建，并把未提交的改动提交到该 branch。在交互界面中，创建 branch 之前会先征求你的确认。 |
 | `/tower off` | 关闭 Tower 模式并切换回之前的模型。Agent 继续运行，`.tower/` 保留。Tower 工具仍然可用，但在重新开启之前，`TowerInit`、`TowerPlan` 和 `TowerSpawn` 会拒绝执行。 |
 | `/tower teardown` | 以普通消息请 Tower 执行 `TowerTeardown` 并报告结果。Tower 模式保持开启。 |
 | `/tower models` | 显示角色和模型池的模型、来源、配置文件状态以及存在的问题 |
@@ -348,8 +353,11 @@ Agent 在整个生命周期内都使用同一个模型；恢复后的 worker 会
 | `/tower models <role\|alias> --clear [--project]` | 移除角色或模型池模型 |
 | `/tower agents` | 列出本会话的 worker 和 reviewer（包括已结束的），以及状态、模型和 mission |
 | `/tower stop <agent>` | 停止一个正在运行的 worker 或 reviewer，可以传入 roster 名称、agent id 或 task id。这是人为停止：除非你另有指示，Tower 不会恢复、改派或替换它。 |
+| `/tower help` | 显示所有子命令的用法（也可以用 `--help` 或 `-h`） |
 
 子命令不区分大小写，base branch 保留原有大小写。Tab 补全支持子命令、Agent 名称、模型目标以及 `--clear`/`--project` 选项。
+
+常见的输入失误会被拒绝并给出 "did you mean" 提示，而不会被当作 branch 名称：例如 `/tower model`、`/tower agent`、`/tower start`、`/tower kill` 这类相近的词，在不接受参数的子命令后面多写的内容，以及含有空格的 base branch 名称。
 
 只有你可以开启 Tower 模式，模型无法自行开启。
 

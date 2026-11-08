@@ -116,7 +116,7 @@ git status
 
 Start pi in the top-level directory of the repository. Tower creates its workspace (`.tower/`) in pi's working directory.
 
-Tower merges only into a local branch, never into a remote-tracking ref or a tag. If the branch you pass to `/tower <base-branch>` does not exist, Tower creates it from the current checkout. The safest choice is an existing branch with a clean working tree.
+Tower merges only into a local branch, never into a remote-tracking ref or a tag. If the branch you pass to `/tower <base-branch>` does not exist, Tower creates it from the current checkout; in the interactive UI it asks you to confirm first. The safest choice is an existing branch with a clean working tree.
 
 > [!WARNING]
 > Tower may snapshot uncommitted and untracked files into worker branches. When it creates a new base branch, it commits those changes to that branch. In a directory that is not a git repository yet, Tower runs `git init` and makes an initial commit with the existing files. Check for secrets and large files first. Tower adds `.tower/` to `.git/info/exclude`, so its own state is never committed.
@@ -143,6 +143,7 @@ You do not need to know the worker protocol to watch and steer Tower.
 - **Redirect work.** While Tower is on, send a normal message to add constraints, change priorities, or ask for a summary. When the tower relays a message to a running worker, the worker sees it at its next step boundary. The tool call in flight is never interrupted.
 - **Inspect or stop an agent.** `/tower agents` lists the workers and reviewers of this session with their status, model, thinking level and mission. `/tower stop <agent>` stops a running one. A worker or reviewer you stop is *dead by intent*: the tower does not resume, reassign, or replace it unless you say so.
 - **Change the base.** Run `/tower <base-branch>` again. Tower re-checks the open missions against the new base, and only stale branches need a rebase. The main checkout must be on the recorded base before anything is merged.
+- **Read the diagnostics.** pi-tower writes its own diagnostics, such as failed notifications and errors from extensions inside agent sessions, to `.tower/pi-tower.log`. Before `.tower/` exists they go to `pi-tower.log` in the pi agent directory.
 
 Each workspace has exactly one tower. If another running pi process owns this workspace's tower, `/tower on` is refused and names that session and its process id. Turn tower mode off in that process first, or quit it. Once the owning process is gone, the next `/tower on` takes the workspace over.
 
@@ -256,9 +257,13 @@ For example, this run takes the orchestrator and worker from `tower.json` but ov
 PI_TOWER_WORKER_MODEL=anthropic/claude-haiku-5-5 pi --tower-reviewer-model openai/gpt-5.5:xhigh
 ```
 
-pi-tower reads the configuration when the session starts and again each time you run `/tower models`. After editing `tower.json` by hand, run `/tower models` to reload it. Spawns then use the new settings without a restart.
+pi-tower reads the configuration when the session starts, on every `/tower on`, and each time you run `/tower models`. After editing `tower.json` by hand, run `/tower models` to reload it. Spawns then use the new settings without a restart.
 
-The sources are checked together. One invalid value in any of them, such as a typo in a flag, an environment variable or either file, makes the whole configuration fail to load. Until you fix it, every spawn is refused and `/tower models` shows the error.
+The sources are checked together. One invalid value in any of them, such as a typo in a flag, an environment variable or either file, makes the whole configuration fail to load. Until you fix it:
+
+- every spawn is refused, and `/tower models` shows the error;
+- the session start and `/tower on` warn "Tower model configuration could not be loaded: …";
+- `/tower on` still turns tower mode on, but the session keeps its current model.
 
 ### `/tower models`
 
@@ -294,7 +299,7 @@ You can also change the configuration from inside pi:
 
 If an orchestrator is configured by a file, an environment variable or a flag, `/tower on` switches the main session to that model and its thinking level. `/tower off` switches back to the model and thinking level you had before. If you changed the model yourself with `/model` in the meantime, pi-tower leaves your choice alone.
 
-- If the orchestrator model is not in pi's registry or has no credentials, tower mode still turns on. You get a warning, and the session keeps its current model.
+- If the orchestrator model is not in pi's registry or has no credentials, or the configuration does not load, tower mode still turns on. You get a warning, and the session keeps its current model.
 - Without a configured orchestrator, the session's own model is the orchestrator and nothing is switched.
 
 ### Choosing a model for one spawn
@@ -340,7 +345,7 @@ With Kimi Code, you cannot give reviewers a model different from the tower's wit
 | --- | --- |
 | `/tower` or `/tower status` | Shows the compact tower status without a model turn |
 | `/tower on` | Turns tower mode on: activates the tower tools, adopts an existing `.tower/` workspace, and switches to the orchestrator model. It sends no objective. |
-| `/tower <base-branch>` | Turns tower mode on if it is off, and makes this local branch the base: a new workspace is initialized with it, an existing one is re-anchored to it. A missing branch is created from the current checkout, and uncommitted changes are committed onto it. |
+| `/tower <base-branch>` | Turns tower mode on if it is off, and makes this local branch the base: a new workspace is initialized with it, an existing one is re-anchored to it. A missing branch is created from the current checkout, and uncommitted changes are committed onto it. In the interactive UI, pi-tower asks before it creates a branch. |
 | `/tower off` | Turns tower mode off and switches back to the previous model. Agents keep running and `.tower/` stays. The tower tools remain available, but `TowerInit`, `TowerPlan` and `TowerSpawn` refuse until tower mode is on again. |
 | `/tower teardown` | Asks the tower, in a normal message, to run `TowerTeardown` and report what it did. Tower mode stays on. |
 | `/tower models` | Shows the role and pool models, their sources, the config files and any problems |
@@ -348,8 +353,11 @@ With Kimi Code, you cannot give reviewers a model different from the tower's wit
 | `/tower models <role\|alias> --clear [--project]` | Removes a role or pool model |
 | `/tower agents` | Lists this session's workers and reviewers, including finished ones, with status, model and mission |
 | `/tower stop <agent>` | Stops a running worker or reviewer, given its roster name, agent id or task id. This is a human stop: the tower never resumes, reassigns or replaces it unless you say so. |
+| `/tower help` | Shows the usage of every subcommand (`--help` and `-h` work too) |
 
 Subcommands are case-insensitive. The base branch keeps its case. Tab completion covers subcommands, agent names, model targets and the `--clear`/`--project` options.
+
+Common slips are refused with a "did you mean" hint instead of being taken as a branch name: near-miss words such as `/tower model`, `/tower agent`, `/tower start` or `/tower kill`, extra words after a subcommand that takes none, and base branch names with spaces.
 
 Only you can turn tower mode on. The model cannot enable it by itself.
 
