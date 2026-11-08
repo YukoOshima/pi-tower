@@ -64,7 +64,7 @@ pi install git:github.com/YukoOshima/pi-tower
 ```
 
 - 加上 `-l` 则只为当前项目安装。这会写入 `.pi/settings.json`，pi 要在你信任该项目之后才会加载它。
-- 如果只想试用一次、不做任何安装，可以运行 `pi -e git:github.com/YukoOshima/pi-tower`。
+- 如果只想试用一次、不写入设置，可以运行 `pi -e git:github.com/YukoOshima/pi-tower`。
 
 从本地 checkout 运行：
 

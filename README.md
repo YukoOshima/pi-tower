@@ -64,7 +64,7 @@ pi install git:github.com/YukoOshima/pi-tower
 ```
 
 - Add `-l` to install it for the current project only. That writes `.pi/settings.json`, which pi loads after you trust the project.
-- To try it for one run without installing anything, use `pi -e git:github.com/YukoOshima/pi-tower`.
+- To try it for one run without adding it to your settings, use `pi -e git:github.com/YukoOshima/pi-tower`.
 
 To run it from a local checkout:
 
