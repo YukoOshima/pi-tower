@@ -1,0 +1,58 @@
+{
+  "name": "pi-tower",
+  "version": "0.1.0",
+  "description": "Tower multi-agent collaboration mode for the pi coding agent: an orchestrator splits work into missions, workers build them in isolated git worktrees, independent reviewers gate every merge. Orchestrator, worker and reviewer models are configured separately.",
+  "type": "module",
+  "license": "MIT",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-extension",
+    "multi-agent",
+    "tower",
+    "git-worktree",
+    "code-review"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/YukoOshima/pi-tower.git"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "files": [
+    "src",
+    "README.md",
+    "README.zh-CN.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "node --experimental-strip-types --no-warnings test/run-protocol-e2e.ts",
+    "test:e2e:pi": "node --experimental-strip-types --no-warnings test/run-pi-e2e.ts"
+  },
+  "dependencies": {
+    "picomatch": "^4.0.3"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "1.5.0",
+    "@earendil-works/pi-coding-agent": "1.5.0",
+    "@earendil-works/pi-tui": "1.5.0",
+    "@types/node": "^24.10.0",
+    "@types/picomatch": "^4.0.2",
+    "typebox": "^1.3.27",
+    "typescript": "^5.9.3"
+  }
+}
