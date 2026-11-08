@@ -30,6 +30,25 @@ async function exitedPid(): Promise<number> {
   return child.pid;
 }
 
+async function withLiveProcess<T>(fn: (pid: number) => Promise<T>): Promise<T> {
+  const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+  try {
+    if (child.pid === undefined) throw new Error('child process has no pid');
+    return await fn(child.pid);
+  } finally {
+    child.kill();
+  }
+}
+
+function holderLine(pid: number, since: Date = new Date(), host = hostname()): string {
+  return `pid=${String(pid)} host=${host} since=${since.toISOString()}`;
+}
+
+async function age(path: string, ms: number): Promise<void> {
+  const past = new Date(Date.now() - ms);
+  await utimes(path, past, past);
+}
+
 describe('withConfigFileLock', () => {
   it('runs callers for the same file one at a time while holding <file>.lock', async () => {
     const events: string[] = [];
@@ -67,7 +86,7 @@ describe('withConfigFileLock', () => {
   });
 
   it('waits for a live holder and then fails with a message naming the lock and its holder', async () => {
-    const holder = `pid=${String(process.pid)} host=${hostname()} since=2026-11-09T00:00:00.000Z`;
+    const holder = holderLine(process.pid);
     await writeFile(lock, `${holder} token=someone-else\n`, 'utf8');
     await expect(
       withConfigFileLock(file, async () => 'ran', { timeoutMs: 150, retryMs: 10 }),
@@ -82,6 +101,53 @@ describe('withConfigFileLock', () => {
     await expect(
       withConfigFileLock(file, async () => 'ran', { timeoutMs: 100, retryMs: 10 }),
     ).rejects.toThrow(/^timed out after 100ms/);
+  });
+
+  it('never takes over a live holder on this host, however old its lock is', async () => {
+    await withLiveProcess(async (pid) => {
+      const holder = holderLine(pid, new Date(Date.now() - 3_600_000));
+      await writeFile(lock, `${holder} token=slow\n`, 'utf8');
+      await age(lock, 60_000);
+      await expect(
+        withConfigFileLock(file, async () => 'ran', { timeoutMs: 150, retryMs: 10 }),
+      ).rejects.toThrow(`(held by ${holder})`);
+      expect(await readFile(lock, 'utf8')).toBe(`${holder} token=slow\n`);
+    });
+  });
+
+  it('reclaims a lock left by an earlier process that had this same pid', async () => {
+    const beforeThisProcess = new Date(Date.now() - process.uptime() * 1000 - 60_000);
+    await writeFile(lock, `${holderLine(process.pid, beforeThisProcess)} token=previous-run\n`, 'utf8');
+    expect(await withConfigFileLock(file, async () => 'ran', { timeoutMs: 1000 })).toBe('ran');
+    expect(await readdir(root)).toEqual([]);
+  });
+
+  it('leaves a stale lock alone while another process holds the reaper guard', async () => {
+    await withLiveProcess(async (pid) => {
+      await writeFile(lock, `${holderLine(await exitedPid())} token=crashed\n`, 'utf8');
+      await writeFile(`${lock}.reaper`, `${holderLine(pid)} token=reaping\n`, 'utf8');
+      await expect(
+        withConfigFileLock(file, async () => 'ran', { timeoutMs: 150, retryMs: 10 }),
+      ).rejects.toThrow(/^timed out after 150ms/);
+      expect((await readdir(root)).sort()).toEqual(['tower.json.lock', 'tower.json.lock.reaper']);
+    });
+  });
+
+  it('clears a reaper guard whose holder died, then reclaims the stale lock', async () => {
+    await writeFile(lock, `${holderLine(await exitedPid())} token=crashed\n`, 'utf8');
+    await writeFile(`${lock}.reaper`, `${holderLine(await exitedPid())} token=crashed-reaper\n`, 'utf8');
+    expect(await withConfigFileLock(file, async () => 'ran', { timeoutMs: 1000, retryMs: 5 })).toBe('ran');
+    expect(await readdir(root)).toEqual([]);
+  });
+
+  it('clears a reaper guard older than a few seconds even when its holder is alive', async () => {
+    await withLiveProcess(async (pid) => {
+      await writeFile(lock, `${holderLine(await exitedPid())} token=crashed\n`, 'utf8');
+      await writeFile(`${lock}.reaper`, `${holderLine(pid)} token=stuck-reaper\n`, 'utf8');
+      await age(`${lock}.reaper`, 10_000);
+      expect(await withConfigFileLock(file, async () => 'ran', { timeoutMs: 1000, retryMs: 5 })).toBe('ran');
+      expect(await readdir(root)).toEqual([]);
+    });
   });
 
   it('proceeds as soon as the holder releases the lock', async () => {

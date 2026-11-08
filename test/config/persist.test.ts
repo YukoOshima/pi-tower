@@ -1,4 +1,6 @@
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
+import type { ChildProcessWithoutNullStreams } from 'node:child_process';
+import { once } from 'node:events';
 import {
   chmod,
   lstat,
@@ -12,8 +14,9 @@ import {
   utimes,
   writeFile,
 } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { hostname, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { createInterface } from 'node:readline';
 import { promisify } from 'node:util';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -26,6 +29,7 @@ import {
 import type { TowerConfigModelUpdate } from '../../src/config/index.ts';
 
 const execFileAsync = promisify(execFile);
+const RACE_ROUNDS = 20;
 
 let root: string;
 let file: string;
@@ -56,6 +60,70 @@ async function updateError(update: TowerConfigModelUpdate): Promise<TowerConfigE
     throw error;
   }
   throw new Error('expected updateTowerConfigModel to throw');
+}
+
+const RACING_WRITER = [
+  `const { updateTowerConfigModel } = await import(${JSON.stringify(new URL('../../src/config/index.ts', import.meta.url).href)});`,
+  "const { createInterface } = await import('node:readline');",
+  'const [path] = process.argv.slice(1);',
+  "process.stdout.write('ready\\n');",
+  'for await (const line of createInterface({ input: process.stdin })) {',
+  "  const [startAt, alias] = line.split(' ');",
+  '  while (Date.now() < Number(startAt)) {}',
+  '  await updateTowerConfigModel({ path, key: alias, ref: `provider/${alias}` });',
+  "  process.stdout.write('done\\n');",
+  '}',
+].join('\n');
+
+interface RacingWriter {
+  send(line: string): void;
+  nextLine(): Promise<string>;
+  close(): Promise<void>;
+  kill(): void;
+}
+
+function startRacingWriter(path: string): RacingWriter {
+  const child: ChildProcessWithoutNullStreams = spawn(process.execPath, [
+    '--experimental-strip-types',
+    '--no-warnings',
+    '--input-type=module',
+    '-e',
+    RACING_WRITER,
+    path,
+  ]);
+  let stderr = '';
+  child.stderr.on('data', (chunk: Buffer) => {
+    stderr += chunk.toString();
+  });
+  const exited = new Promise<number | null>((resolve) => {
+    child.on('close', resolve);
+  });
+  const lines = createInterface({ input: child.stdout })[Symbol.asyncIterator]();
+  return {
+    send(line) {
+      child.stdin.write(`${line}\n`);
+    },
+    async nextLine() {
+      const next = await lines.next();
+      if (next.done === true) throw new Error(`writer exited early: ${stderr}`);
+      return next.value;
+    },
+    async close() {
+      child.stdin.end();
+      const code = await exited;
+      if (code !== 0) throw new Error(`writer exited with ${String(code)}: ${stderr}`);
+    },
+    kill() {
+      child.kill();
+    },
+  };
+}
+
+async function exitedPid(): Promise<number> {
+  const child = spawn(process.execPath, ['-e', ''], { stdio: 'ignore' });
+  await once(child, 'exit');
+  if (child.pid === undefined) throw new Error('child process has no pid');
+  return child.pid;
 }
 
 describe('updateTowerConfigModel', () => {
@@ -281,6 +349,38 @@ describe('updateTowerConfigModel', () => {
     expect(await readJson(file)).toStrictEqual({ worker: 'openai/gpt-5.1' });
     expect(await readdir(dirname(file))).toEqual(['tower.json']);
   });
+
+  it('keeps every update when simultaneous writers reclaim a dead holder\'s lock', async () => {
+    const deadPid = await exitedPid();
+    const writers = Array.from({ length: 4 }, () => startRacingWriter(file));
+    try {
+      expect(await Promise.all(writers.map((writer) => writer.nextLine()))).toEqual(
+        writers.map(() => 'ready'),
+      );
+      for (let round = 0; round < RACE_ROUNDS; round += 1) {
+        await writeRaw(file, '{}');
+        await writeFile(
+          `${file}.lock`,
+          `pid=${String(deadPid)} host=${hostname()} since=${new Date().toISOString()} token=crashed\n`,
+          'utf8',
+        );
+        const aliases = writers.map((_, index) => `w${String(index)}-${String(round)}`);
+        const startAt = Date.now() + 20;
+        writers.forEach((writer, index) => {
+          writer.send(`${String(startAt)} ${aliases[index]!}`);
+        });
+        expect(await Promise.all(writers.map((writer) => writer.nextLine()))).toEqual(
+          writers.map(() => 'done'),
+        );
+        const saved = (await readJson(file)) as { models?: Record<string, string> };
+        expect(Object.keys(saved.models ?? {}).sort(), `round ${String(round)}`).toEqual([...aliases].sort());
+        expect(await readdir(dirname(file)), `round ${String(round)}`).toEqual(['tower.json']);
+      }
+      await Promise.all(writers.map((writer) => writer.close()));
+    } finally {
+      for (const writer of writers) writer.kill();
+    }
+  }, 60_000);
 
   it('returns only own entries for prototype-named aliases', async () => {
     await writeRaw(file, '{"models":{"keep":"a/b"}}');

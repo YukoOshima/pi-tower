@@ -17,9 +17,17 @@ interface LockSnapshot {
   readonly mtimeMs: number;
 }
 
+interface LockHolder {
+  readonly pid: number;
+  readonly host: string;
+  readonly sinceMs: number;
+}
+
 const DEFAULT_TIMEOUT_MS = 15_000;
 const DEFAULT_RETRY_MS = 25;
 const DEFAULT_STALE_MS = 10_000;
+const REAPER_STALE_MS = 5_000;
+const PROCESS_START_SLACK_MS = 1_000;
 
 const queues = new Map<string, Promise<void>>();
 
@@ -59,7 +67,7 @@ async function withLockFile<T>(
   const token = randomUUID();
   const deadline = Date.now() + timeoutMs;
   while (!(await tryCreateLock(lockPath, token))) {
-    if (await removeStaleLock(lockPath, staleMs)) continue;
+    if (await reapStaleLock(lockPath, staleMs)) continue;
     if (Date.now() >= deadline) throw new Error(await lockTimeoutMessage(lockPath, timeoutMs));
     await delay(retryMs);
   }
@@ -97,15 +105,38 @@ async function releaseLock(lockPath: string, token: string): Promise<void> {
   if (content?.includes(`token=${token}`) === true) await rm(lockPath, { force: true });
 }
 
-async function removeStaleLock(lockPath: string, staleMs: number): Promise<boolean> {
+async function reapStaleLock(lockPath: string, staleMs: number): Promise<boolean> {
   const seen = await snapshot(lockPath);
   if (seen === undefined) return true;
-  if (!isStale(seen, staleMs)) return false;
-  const again = await snapshot(lockPath);
-  if (again === undefined) return true;
-  if (again.content !== seen.content || again.mtimeMs !== seen.mtimeMs) return false;
-  await rm(lockPath, { force: true });
-  return true;
+  if (!lockIsStale(seen, staleMs)) return false;
+  const reaperPath = `${lockPath}.reaper`;
+  const guard = randomUUID();
+  if (!(await tryCreateLock(reaperPath, guard))) {
+    await removeAbandonedReaper(reaperPath);
+    return false;
+  }
+  try {
+    const confirmed = await snapshot(lockPath);
+    if (confirmed === undefined) return true;
+    if (!lockIsStale(confirmed, staleMs)) return false;
+    await rm(lockPath, { force: true });
+    return true;
+  } finally {
+    await releaseLock(reaperPath, guard);
+  }
+}
+
+async function removeAbandonedReaper(reaperPath: string): Promise<void> {
+  const seen = await snapshot(reaperPath);
+  if (seen === undefined || !reaperIsAbandoned(seen)) return;
+  if (!sameSnapshot(await snapshot(reaperPath), seen)) return;
+  await rm(reaperPath, { force: true });
+}
+
+function sameSnapshot(current: LockSnapshot | undefined, seen: LockSnapshot): boolean {
+  return (
+    current !== undefined && current.content === seen.content && current.mtimeMs === seen.mtimeMs
+  );
 }
 
 async function snapshot(lockPath: string): Promise<LockSnapshot | undefined> {
@@ -118,17 +149,28 @@ async function snapshot(lockPath: string): Promise<LockSnapshot | undefined> {
   }
 }
 
-function isStale(lock: LockSnapshot, staleMs: number): boolean {
-  if (Date.now() - lock.mtimeMs > staleMs) return true;
-  const pid = Number(/\bpid=(\d+)/.exec(lock.content)?.[1]);
-  const host = /\bhost=(\S+)/.exec(lock.content)?.[1];
-  return (
-    host === hostname() &&
-    Number.isSafeInteger(pid) &&
-    pid > 0 &&
-    pid !== process.pid &&
-    !isProcessAlive(pid)
-  );
+function lockIsStale(lock: LockSnapshot, staleMs: number): boolean {
+  const holder = lockHolder(lock.content);
+  if (holder !== undefined && holder.host === hostname()) return holderIsGone(holder);
+  return Date.now() - lock.mtimeMs > staleMs;
+}
+
+function reaperIsAbandoned(reaper: LockSnapshot): boolean {
+  const holder = lockHolder(reaper.content);
+  if (holder !== undefined && holder.host === hostname() && holderIsGone(holder)) return true;
+  return Date.now() - reaper.mtimeMs > REAPER_STALE_MS;
+}
+
+function lockHolder(content: string): LockHolder | undefined {
+  const pid = Number(/\bpid=(\d+)/.exec(content)?.[1]);
+  const host = /\bhost=(\S+)/.exec(content)?.[1];
+  if (!Number.isSafeInteger(pid) || pid <= 0 || host === undefined) return undefined;
+  return { pid, host, sinceMs: Date.parse(/\bsince=(\S+)/.exec(content)?.[1] ?? '') };
+}
+
+function holderIsGone(holder: LockHolder): boolean {
+  if (holder.pid !== process.pid) return !isProcessAlive(holder.pid);
+  return holder.sinceMs < Date.now() - process.uptime() * 1000 - PROCESS_START_SLACK_MS;
 }
 
 function isProcessAlive(pid: number): boolean {
