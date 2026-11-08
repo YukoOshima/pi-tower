@@ -505,12 +505,39 @@ export interface FakeUi {
   readonly statuses: Map<string, string | undefined>;
 }
 
+export interface FakeModel {
+  readonly provider: string;
+  readonly id: string;
+}
+
+export class FakeModelRegistry {
+  private readonly models = new Map<string, FakeModel>();
+  private readonly credentials = new Set<string>();
+
+  add(provider: string, id: string, options: { readonly auth?: boolean } = {}): FakeModel {
+    const model: FakeModel = { provider, id };
+    this.models.set(`${provider}/${id}`, model);
+    if (options.auth !== false) this.credentials.add(`${provider}/${id}`);
+    return model;
+  }
+
+  find(provider: string, modelId: string): FakeModel | undefined {
+    return this.models.get(`${provider}/${modelId}`);
+  }
+
+  hasConfiguredAuth(model: FakeModel): boolean {
+    return this.credentials.has(`${model.provider}/${model.id}`);
+  }
+}
+
 export class FakeContext {
   cwd: string;
   idle = true;
   hasUI = true;
   mode: 'tui' | 'rpc' | 'print' | 'json' = 'tui';
   trusted = true;
+  model: FakeModel | undefined;
+  readonly modelRegistry = new FakeModelRegistry();
   readonly sessionManager: FakeSessionManager;
   readonly ui: FakeUi & {
     notify(message: string, level?: string): void;
@@ -570,7 +597,9 @@ export class FakePi implements TowerExtensionApi {
   readonly flags = new Map<string, string | boolean>();
   readonly modelChanges: unknown[] = [];
   thinkingLevel = 'medium';
+  setModelResult = true;
   session: FakeSessionManager | undefined;
+  context: FakeContext | undefined;
   sendFailure: Error | undefined;
 
   appendEntry: TowerExtensionApi['appendEntry'] = (customType, data) => {
@@ -595,6 +624,8 @@ export class FakePi implements TowerExtensionApi {
 
   setModel: TowerExtensionApi['setModel'] = async (model) => {
     this.modelChanges.push(model);
+    if (!this.setModelResult) return false;
+    if (this.context !== undefined) this.context.model = model;
     return true;
   };
 

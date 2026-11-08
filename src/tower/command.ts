@@ -9,7 +9,7 @@ import { renderTowerTasks } from '../tools/tasks/tasksTool.ts';
 import { towerEnterFailureMessage, type TowerController } from './controller.ts';
 
 export const TOWER_COMMAND_DESCRIPTION =
-  'Tower multi-agent mode: /tower on | off | status | teardown | <base-branch> | models [<role|alias> <provider/model[:thinking]> | --clear] | agents | stop <agent>';
+  'Tower multi-agent mode: /tower on | off | status | teardown | <base-branch> | models [<role|alias> <provider/model[:thinking]>|--clear] [--project] | agents | stop <agent>';
 
 export const TOWER_SUBCOMMANDS: readonly { readonly value: string; readonly description: string }[] = [
   { value: 'on', description: 'Turn tower mode on (the main agent becomes the tower)' },
@@ -24,13 +24,13 @@ export const TOWER_SUBCOMMANDS: readonly { readonly value: string; readonly desc
 export interface TowerCommandUi {
   notice(title: string, body?: string): void;
   status(text: string): void;
+  warn(text: string): void;
   error(text: string): void;
 }
 
 export interface TowerCommandDeps {
   readonly sendUserMessage: (text: string, options?: { readonly deliverAs?: 'steer' | 'followUp' }) => void;
   readonly models?: (args: readonly string[], ui: TowerCommandUi) => Promise<void>;
-  readonly modelTargets?: () => readonly string[];
 }
 
 export function commandUi(ctx: ExtensionCommandContext): TowerCommandUi {
@@ -46,6 +46,7 @@ export function commandUi(ctx: ExtensionCommandContext): TowerCommandUi {
   return {
     notice: (title, body) => emit(body === undefined ? title : `${title}\n${body}`, 'info'),
     status: (text) => emit(text, 'info'),
+    warn: (text) => emit(text, 'warning'),
     error: (text) => emit(text, 'error'),
   };
 }
@@ -122,7 +123,14 @@ export function towerCommandCompletions(
   }
   if (head.toLowerCase() === 'models') {
     if (rest.length <= 1) return completeWord(`${head} `, partial, options.modelTargets?.() ?? []);
-    if (rest.length === 2) return completeWord(`${head} ${rest[0] ?? ''} `, rest[1] ?? '', ['--clear']);
+    const last = rest.at(-1) ?? '';
+    const typed = rest.slice(0, -1);
+    const flags = rest.length === 2 ? ['--clear', '--project'] : ['--project'];
+    return completeWord(
+      prefix.slice(0, prefix.length - last.length),
+      last,
+      flags.filter((flag) => !typed.includes(flag)),
+    );
   }
   return null;
 }
@@ -226,7 +234,7 @@ async function humanStop(controller: TowerController, ui: TowerCommandUi, ref: s
       );
       return;
     }
-    if (result === 'idle') {
+    if (result === 'idle' || (result === 'missing' && info.status !== 'running')) {
       ui.status(`${info.name} is not running — nothing was stopped.`);
       return;
     }

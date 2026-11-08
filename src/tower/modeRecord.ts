@@ -11,6 +11,7 @@ export interface TowerModeRecord {
   readonly pid?: number;
   readonly previousModel?: TowerSessionModel;
   readonly previousThinkingLevel?: string;
+  readonly orchestratorModel?: TowerSessionModel;
 }
 
 interface SessionEntryLike {
@@ -36,6 +37,7 @@ export function parseTowerModeRecord(data: unknown): TowerModeRecord | undefined
   const raw = data as Record<string, unknown>;
   if (typeof raw['active'] !== 'boolean') return undefined;
   const previousModel = parseSessionModel(raw['previousModel']);
+  const orchestratorModel = parseSessionModel(raw['orchestratorModel']);
   return {
     active: raw['active'],
     ...(typeof raw['sessionId'] === 'string' ? { sessionId: raw['sessionId'] } : {}),
@@ -44,6 +46,7 @@ export function parseTowerModeRecord(data: unknown): TowerModeRecord | undefined
     ...(typeof raw['previousThinkingLevel'] === 'string'
       ? { previousThinkingLevel: raw['previousThinkingLevel'] }
       : {}),
+    ...(orchestratorModel === undefined ? {} : { orchestratorModel }),
   };
 }
 

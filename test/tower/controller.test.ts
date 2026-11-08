@@ -20,6 +20,8 @@ import {
   todoToolDenied,
 } from '../../src/prompts/index.ts';
 import { STATE_FILE, TowerStore, type TowerState } from '../../src/protocol/index.ts';
+import { ORCHESTRATOR_CALLER } from '../../src/tools/support.ts';
+import { createTowerTaskStopTool } from '../../src/tools/taskStop/taskStopTool.ts';
 import {
   HUMAN_STOP_REASON,
   TOWER_AGENT_NOTIFICATION_MESSAGE,
@@ -1054,6 +1056,22 @@ describe('background agent notifications', () => {
     expect(h.controller.agentOutput(h.agentId)?.lastAssistantText).toBe('Review submitted: clean.');
     expect(h.controller.listAgents(false).map((agent) => agent.agentId)).toContain(h.agentId);
     expect(h.controller.listAgents(true)).toEqual([]);
+  });
+
+  it('reports a disposed reviewer to TowerTaskStop as not running rather than unknown', async () => {
+    const h = await withAgent('reviewer');
+    h.runtime.finish(h.agentId, 'idle', { summary: 'Review submitted: clean.' });
+    await vi.waitFor(() => expect(h.runtime.disposed).toEqual([h.agentId]));
+
+    const result = await createTowerTaskStopTool(h.controller, ORCHESTRATOR_CALLER).run(
+      { agent: h.agentId },
+      { toolCallId: 'call_stop' },
+    );
+
+    expect(result).toEqual({
+      output: `tower agent "reviewer-a" (agent_id: ${h.agentId}) is not running — its last run ended with status: completed; nothing was stopped`,
+    });
+    expect(h.runtime.stops).toEqual([]);
   });
 
   it('sends no notification for a launch that was aborted after a persistence failure', async () => {

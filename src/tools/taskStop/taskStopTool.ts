@@ -55,7 +55,7 @@ export function createTowerTaskStopTool(
             ].join('\n'),
           };
         }
-        if (result === 'idle') {
+        if (result === 'idle' || (result === 'missing' && after.status !== 'running')) {
           return {
             output: `tower agent "${after.name}" (agent_id: ${after.agentId}) is not running — its last run ended with status: ${displayStatus(after)}; nothing was stopped`,
           };

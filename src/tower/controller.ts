@@ -11,6 +11,7 @@ import type {
 } from '@earendil-works/pi-coding-agent';
 
 import {
+  TOWER_WORKER_ROLE,
   formatGateDigestLine,
   renderAgentNotification,
   renderInboxWake,
@@ -32,16 +33,22 @@ import {
   resolveTowerRepoRoot,
   type TowerAgentKind,
 } from '../protocol/index.ts';
-import type {
-  TowerInboxSentPayload,
-  TowerLaunchRequest,
-  TowerOwner,
-  TowerSpawnModelResolution,
-  TowerToolHost,
+import { createTowerSpawnTool } from '../tools/spawn/spawnTool.ts';
+import {
+  ORCHESTRATOR_CALLER,
+  toToolDefinition,
+  type TowerInboxSentPayload,
+  type TowerLaunchRequest,
+  type TowerOwner,
+  type TowerSpawnModelResolution,
+  type TowerToolHost,
 } from '../tools/support.ts';
 import {
+  DEFAULT_AGENT_TIMEOUT_MS,
   HUMAN_STOP_REASON,
   SHUTDOWN_STOP_REASON,
+  TOWER_REVIEWER_BASE_TOOLS,
+  TOWER_WORKER_BASE_TOOLS,
   isHumanStopReason,
   isTowerStopReason,
   TOWER_AGENT_NOTIFICATION_MESSAGE,
@@ -53,7 +60,8 @@ import {
 } from './constants.ts';
 import { BranchLeases } from './leases.ts';
 import { isForeignLiveOwner, isOwnerLive, isProcessAlive } from './liveness.ts';
-import { latestTowerModeRecord, type TowerModeRecord } from './modeRecord.ts';
+import { latestTowerModeRecord, type TowerModeRecord, type TowerSessionModel } from './modeRecord.ts';
+import { towerPrimaryModel, type TowerModels } from './models.ts';
 import { selectReminderForContext } from './reminders.ts';
 import type {
   TowerAgentEvent,
@@ -121,15 +129,18 @@ const DEFAULT_RATE_LIMIT_SNAPSHOT: TowerRateLimitSnapshot = {
 export interface TowerControllerOptions {
   readonly pi: TowerExtensionApi;
   readonly createRuntime?: (controller: TowerController) => TowerRuntime;
+  readonly models?: TowerModels;
   readonly isProcessAlive?: (pid: number) => boolean;
   readonly log?: TowerLog;
 }
 
 export class TowerController implements TowerToolHost {
+  readonly models: TowerModels | undefined;
   private readonly pi: TowerExtensionApi;
   private readonly createRuntime: ((controller: TowerController) => TowerRuntime) | undefined;
   private readonly alive: (pid: number) => boolean;
   private readonly log: TowerLog;
+  private spawnDescription: string | undefined;
   private readonly leases = new BranchLeases();
   private readonly wakes = new InboxWakeQueue();
   private readonly retired = new Set<string>();
@@ -152,6 +163,7 @@ export class TowerController implements TowerToolHost {
 
   constructor(options: TowerControllerOptions) {
     this.pi = options.pi;
+    this.models = options.models;
     this.createRuntime = options.createRuntime;
     this.alive = options.isProcessAlive ?? isProcessAlive;
     this.log = options.log ?? SILENT_LOG;
@@ -240,11 +252,46 @@ export class TowerController implements TowerToolHost {
     return runtime.steer(agentId, text);
   }
 
-  resolveSpawnModel(
-    _kind: TowerAgentKind,
-    _choice: string | undefined,
+  async resolveSpawnModel(
+    kind: TowerAgentKind,
+    choice: string | undefined,
   ): Promise<TowerSpawnModelResolution> {
-    return Promise.resolve({ ok: true });
+    const models = this.models;
+    if (models === undefined) return { ok: true };
+    if (models.config === undefined && models.loadError === undefined && this.ctx !== undefined) {
+      await models.load(this.modelsContext(this.ctx));
+    }
+    return models.resolveSpawn(kind, choice, this.primaryModel(), this.ctx?.modelRegistry);
+  }
+
+  primaryModel(): ReturnType<typeof towerPrimaryModel> {
+    let thinkingLevel: string | undefined;
+    try {
+      thinkingLevel = this.pi.getThinkingLevel();
+    } catch {
+      thinkingLevel = undefined;
+    }
+    return towerPrimaryModel(this.ctx?.model, thinkingLevel);
+  }
+
+  modelsContext(ctx: ExtensionContext): { readonly cwd: string; readonly projectTrusted: boolean } {
+    return { cwd: ctx.cwd, projectTrusted: ctx.isProjectTrusted() };
+  }
+
+  async reloadModels(): Promise<void> {
+    if (this.models === undefined || this.ctx === undefined) return;
+    await this.models.load(this.modelsContext(this.ctx));
+    this.refreshSpawnTool();
+  }
+
+  refreshSpawnTool(): void {
+    const lines = this.models?.spawnModelLines(this.primaryModel());
+    const tool = createTowerSpawnTool(this, ORCHESTRATOR_CALLER, lines);
+    if (tool.description === this.spawnDescription) return;
+    this.spawnDescription = tool.description;
+    this.pi.registerTool(
+      toToolDefinition(tool, { defaultActive: false, onContext: (ctx) => this.observe(ctx) }),
+    );
   }
 
   async launchAgent(request: TowerLaunchRequest): Promise<TowerRunStartResult> {
@@ -258,6 +305,9 @@ export class TowerController implements TowerToolHost {
       description: request.description,
       cwd: request.cwd,
       prompt: request.prompt,
+      appendSystemPrompt: TOWER_WORKER_ROLE,
+      tools: request.kind === 'reviewer' ? TOWER_REVIEWER_BASE_TOOLS : TOWER_WORKER_BASE_TOOLS,
+      timeoutMs: this.models?.agentTimeoutMs ?? DEFAULT_AGENT_TIMEOUT_MS,
       ...(request.binding === undefined ? {} : { model: request.binding.model }),
       ...(request.binding?.thinkingLevel === undefined
         ? {}
@@ -328,25 +378,113 @@ export class TowerController implements TowerToolHost {
     await this.adoptTowerRoster();
     this.activateTowerTools();
     this.active = true;
-    this.persistMode({ active: true, sessionId: this.boundSessionId, pid: process.pid });
+    const switched = await this.applyOrchestratorModel();
+    this.persistMode({
+      active: true,
+      sessionId: this.boundSessionId,
+      pid: process.pid,
+      ...(switched ?? {}),
+    });
     this.renderStatus();
     return { entered: true };
   }
 
   async exit(reason: TowerExitReason = 'user'): Promise<void> {
     if (!this.active) return;
+    const record = this.persistedRecord();
+    this.persistMode({ active: false });
     this.active = false;
     this.dropInboxWake();
-    this.persistMode({ active: false });
     this.renderStatus();
     this.log.info('tower: exit', { reason, sessionId: this.boundSessionId });
+    await this.restoreSessionModel(record);
     this.releasing = this.releaseTowerOwnership();
     await this.releasing;
   }
 
   async onSessionStart(_event: SessionStartEvent, ctx: ExtensionContext): Promise<void> {
     this.observe(ctx);
+    if (this.models !== undefined) {
+      await this.models.load(this.modelsContext(ctx));
+      this.refreshSpawnTool();
+    }
     await this.restoreTowerMode(ctx);
+  }
+
+  onModelChanged(ctx: ExtensionContext): void {
+    this.observe(ctx);
+    this.refreshSpawnTool();
+  }
+
+  private async applyOrchestratorModel(): Promise<
+    | Pick<TowerModeRecord, 'previousModel' | 'previousThinkingLevel' | 'orchestratorModel'>
+    | undefined
+  > {
+    const ctx = this.ctx;
+    const binding = this.models?.orchestratorBinding(this.primaryModel());
+    if (ctx === undefined || binding === undefined) return undefined;
+    const current = ctx.model;
+    const currentThinking = this.currentThinkingLevel();
+    const sameModel = current?.provider === binding.provider && current.id === binding.modelId;
+    if (sameModel && (binding.thinkingLevel === undefined || binding.thinkingLevel === currentThinking)) {
+      return undefined;
+    }
+    if (!sameModel) {
+      const target = ctx.modelRegistry.find(binding.provider, binding.modelId);
+      if (target === undefined) {
+        this.notify(
+          `Tower orchestrator model ${binding.model} is not in pi's model registry — staying on ${describeSessionModel(current)}.`,
+          'warning',
+        );
+        return undefined;
+      }
+      if (!(await this.pi.setModel(target))) {
+        this.notify(
+          `Tower orchestrator model ${binding.model} has no configured credentials — staying on ${describeSessionModel(current)}.`,
+          'warning',
+        );
+        return undefined;
+      }
+    }
+    if (binding.thinkingLevel !== undefined) this.pi.setThinkingLevel(binding.thinkingLevel);
+    this.refreshSpawnTool();
+    return {
+      ...(current === undefined ? {} : { previousModel: { provider: current.provider, modelId: current.id } }),
+      ...(currentThinking === undefined ? {} : { previousThinkingLevel: currentThinking }),
+      orchestratorModel: { provider: binding.provider, modelId: binding.modelId },
+    };
+  }
+
+  private async restoreSessionModel(record: TowerModeRecord | undefined): Promise<void> {
+    const ctx = this.ctx;
+    if (ctx === undefined || record?.active !== true || record.orchestratorModel === undefined) return;
+    const current = ctx.model;
+    if (current?.provider !== record.orchestratorModel.provider || current.id !== record.orchestratorModel.modelId) {
+      return;
+    }
+    const previous = record.previousModel;
+    if (previous !== undefined && (previous.provider !== current.provider || previous.modelId !== current.id)) {
+      const target = ctx.modelRegistry.find(previous.provider, previous.modelId);
+      if (target === undefined || !(await this.pi.setModel(target))) {
+        this.notify(
+          `Could not restore the previous model ${previous.provider}/${previous.modelId} — staying on ${describeSessionModel(current)}.`,
+          'warning',
+        );
+        return;
+      }
+    }
+    if (record.previousThinkingLevel !== undefined) {
+      this.pi.setThinkingLevel(record.previousThinkingLevel as Parameters<TowerExtensionApi['setThinkingLevel']>[0]);
+    }
+    this.refreshSpawnTool();
+  }
+
+  private currentThinkingLevel(): string | undefined {
+    try {
+      return this.pi.getThinkingLevel();
+    } catch {
+      return undefined;
+    }
   }
 
   async onSessionShutdown(): Promise<void> {
@@ -417,8 +555,8 @@ export class TowerController implements TowerToolHost {
   }
 
   private persistMode(record: TowerModeRecord): void {
-    this.modeRecord = record;
     this.pi.appendEntry(TOWER_MODE_ENTRY, record);
+    this.modeRecord = record;
   }
 
   private async restoreTowerMode(ctx: ExtensionContext): Promise<void> {
@@ -429,6 +567,7 @@ export class TowerController implements TowerToolHost {
     const foreign = owner?.sessionId !== undefined && owner.sessionId !== this.boundSessionId;
     if (foreign && this.isOwnerLive(owner)) {
       await this.reconcileForeign(
+        record,
         `another live session owns the workspace tower (session ${owner.sessionId ?? '?'}${owner.pid === undefined ? '' : `, pid ${String(owner.pid)}`}) — tower mode was turned off in this session`,
       );
       return;
@@ -439,7 +578,7 @@ export class TowerController implements TowerToolHost {
       this.log.warn('tower: failed to adopt the tower workspace roster on restore', {
         error: errorText(error),
       });
-      await this.reconcileForeign(errorText(error));
+      await this.reconcileForeign(record, errorText(error));
       return;
     }
     this.active = true;
@@ -450,11 +589,12 @@ export class TowerController implements TowerToolHost {
     this.renderStatus();
   }
 
-  private async reconcileForeign(reason: string): Promise<void> {
+  private async reconcileForeign(record: TowerModeRecord, reason: string): Promise<void> {
     this.active = false;
     this.persistMode({ active: false });
     this.renderStatus();
     this.notify(`Tower mode: OFF — ${reason}`, 'warning');
+    await this.restoreSessionModel(record);
     this.releasing = this.releaseTowerOwnership();
     await this.releasing;
   }
@@ -815,3 +955,9 @@ async function createBaseBranch(repoRoot: string, base: string): Promise<void> {
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
+
+function describeSessionModel(model: { readonly provider: string; readonly id: string } | undefined): string {
+  return model === undefined ? 'the current model' : `${model.provider}/${model.id}`;
+}
+
+export type { TowerSessionModel };
