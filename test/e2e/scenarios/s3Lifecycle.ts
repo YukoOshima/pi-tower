@@ -150,6 +150,9 @@ export const s3Lifecycle: ScenarioDefinition = {
       ordered && mergeCommits.length >= 2,
       [`successful TowerMerge calls in order: ${mergeOrder.join(' → ')}`, ...mergeCommits.map((line) => `merge commit ${line}`)],
     );
+    for (const run of [...runsOf(runs, 'TowerMerge').filter((candidate) => candidate.isError), ...runsOf(runs, 'TowerRebase')]) {
+      report.note(`${run.toolName} ${JSON.stringify(run.args)} → ${run.isError ? 'refused' : 'ok'}: ${clip(run.output, 260)}`);
+    }
     report.note(`git log --graph --oneline main:\n${git(repo, ['log', '--graph', '--oneline', '--decorate', 'main', '-n', '14'])}`);
     const notes = git(repo, ['show', 'main:notes.txt']).split('\n');
     const numbers = git(repo, ['show', 'main:numbers.txt']).split('\n');

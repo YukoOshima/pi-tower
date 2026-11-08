@@ -83,14 +83,31 @@ export function readJsonl(path: string): JsonLine[] {
     });
 }
 
+export interface ToolCallRecord {
+  readonly id: string;
+  readonly name: string;
+  readonly arguments: Record<string, unknown>;
+}
+
+export interface ToolResultRecord {
+  readonly toolCallId: string;
+  readonly toolName: string;
+  readonly isError: boolean;
+  readonly text: string;
+}
+
+export function resultOf(summary: TranscriptSummary, call: ToolCallRecord): ToolResultRecord | undefined {
+  return summary.toolResults.find((result) => result.toolCallId === call.id);
+}
+
 export interface TranscriptSummary {
   readonly path: string;
   readonly cwd: string | undefined;
   readonly modelChanges: readonly string[];
   readonly thinkingLevels: readonly string[];
   readonly assistantModels: readonly string[];
-  readonly toolResults: readonly { readonly toolName: string; readonly isError: boolean; readonly text: string }[];
-  readonly toolCalls: readonly { readonly name: string; readonly arguments: Record<string, unknown> }[];
+  readonly toolResults: readonly ToolResultRecord[];
+  readonly toolCalls: readonly ToolCallRecord[];
   readonly tools: readonly string[];
   readonly firstAt: number;
   readonly lastAt: number;
@@ -124,8 +141,8 @@ export function summarizeTranscript(path: string): TranscriptSummary {
     modelChanges: [] as string[],
     thinkingLevels: [] as string[],
     assistantModels: [] as string[],
-    toolResults: [] as { toolName: string; isError: boolean; text: string }[],
-    toolCalls: [] as { name: string; arguments: Record<string, unknown> }[],
+    toolResults: [] as ToolResultRecord[],
+    toolCalls: [] as ToolCallRecord[],
     tools: [] as string[],
     firstAt: Number.POSITIVE_INFINITY,
     lastAt: 0,
@@ -157,11 +174,11 @@ export function summarizeTranscript(path: string): TranscriptSummary {
       usage.total += part.total ?? 0;
       usage.cost += part.cost ?? 0;
       for (const block of Array.isArray(message.content) ? (message.content as JsonLine[]) : []) {
-        if (block?.type === 'toolCall') summary.toolCalls.push({ name: String(block.name), arguments: (block.arguments ?? {}) as Record<string, unknown> });
+        if (block?.type === 'toolCall') summary.toolCalls.push({ id: String(block.id), name: String(block.name), arguments: (block.arguments ?? {}) as Record<string, unknown> });
       }
     }
     if (message.role === 'toolResult') {
-      summary.toolResults.push({ toolName: String(message.toolName), isError: message.isError === true, text: contentText(message.content) });
+      summary.toolResults.push({ toolCallId: String(message.toolCallId), toolName: String(message.toolName), isError: message.isError === true, text: contentText(message.content) });
     }
   }
   return summary;
