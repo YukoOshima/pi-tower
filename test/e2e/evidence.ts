@@ -109,6 +109,7 @@ export interface TranscriptSummary {
   readonly toolResults: readonly ToolResultRecord[];
   readonly toolCalls: readonly ToolCallRecord[];
   readonly tools: readonly string[];
+  readonly prompt: string;
   readonly firstAt: number;
   readonly lastAt: number;
   readonly usage: Usage;
@@ -144,6 +145,7 @@ export function summarizeTranscript(path: string): TranscriptSummary {
     toolResults: [] as ToolResultRecord[],
     toolCalls: [] as ToolCallRecord[],
     tools: [] as string[],
+    prompt: '',
     firstAt: Number.POSITIVE_INFINITY,
     lastAt: 0,
     usage,
@@ -177,6 +179,7 @@ export function summarizeTranscript(path: string): TranscriptSummary {
         if (block?.type === 'toolCall') summary.toolCalls.push({ id: String(block.id), name: String(block.name), arguments: (block.arguments ?? {}) as Record<string, unknown> });
       }
     }
+    if (message.role === 'user' && summary.prompt.length === 0) summary.prompt = contentText(message.content);
     if (message.role === 'toolResult') {
       summary.toolResults.push({ toolCallId: String(message.toolCallId), toolName: String(message.toolName), isError: message.isError === true, text: contentText(message.content) });
     }
