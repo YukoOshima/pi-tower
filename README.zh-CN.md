@@ -258,6 +258,8 @@ PI_TOWER_WORKER_MODEL=anthropic/claude-haiku-5-5 pi --tower-reviewer-model opena
 
 pi-tower 在会话启动时读取配置，此后每次运行 `/tower models` 都会重新读取。手动编辑 `tower.json` 之后，运行一次 `/tower models` 即可重新加载，之后的派发无需重启就会使用新配置。
 
+所有来源会一起校验。只要其中任何一处有无效值（例如命令行参数、环境变量或任一配置文件中的拼写错误），整个配置都会加载失败。在修正之前，所有派发都会被拒绝，`/tower models` 会显示错误信息。
+
 ### `/tower models`
 
 `/tower models` 会列出每个角色和模型池别名的模型、思考等级和来源，还会显示两个配置文件的状态，并列出存在的问题，例如模型不在 pi 的模型注册表中，或者 provider 没有凭据。如果文件无法解析，则会显示解析错误。下面的示例中，`examples/tower.json` 是全局文件，同时设置了 `PI_TOWER_REVIEWER_MODEL=openai/gpt-5.5:high`：

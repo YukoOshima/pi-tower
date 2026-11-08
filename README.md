@@ -258,6 +258,8 @@ PI_TOWER_WORKER_MODEL=anthropic/claude-haiku-5-5 pi --tower-reviewer-model opena
 
 pi-tower reads the configuration when the session starts and again each time you run `/tower models`. After editing `tower.json` by hand, run `/tower models` to reload it. Spawns then use the new settings without a restart.
 
+The sources are checked together. One invalid value in any of them, such as a typo in a flag, an environment variable or either file, makes the whole configuration fail to load. Until you fix it, every spawn is refused and `/tower models` shows the error.
+
 ### `/tower models`
 
 `/tower models` shows the model, thinking level and source of every role and pool alias. It also shows the status of both config files and lists problems, such as a model that is not in pi's model registry or a provider without credentials. If a file does not parse, it shows the error instead. Here, `examples/tower.json` is the global file and `PI_TOWER_REVIEWER_MODEL=openai/gpt-5.5:high` is set:
