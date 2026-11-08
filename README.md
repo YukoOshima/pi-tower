@@ -363,7 +363,7 @@ Common slips are refused with a "did you mean" hint instead of being taken as a 
 - extra words after a subcommand that takes none, such as `/tower on now`;
 - base branch names with spaces.
 
-As a consequence, a branch named like one of these words cannot be passed to `/tower <base-branch>`. Check it out and run `/tower on` instead. For a workspace that already records another base, ask the tower to re-anchor to that branch: its `TowerInit` tool accepts an explicit base.
+As a consequence, a branch whose name is one of these words cannot be passed to `/tower <base-branch>`. Check it out and run `/tower on` instead. For a workspace that already records another base, ask the tower to re-anchor to that branch: its `TowerInit` tool accepts an explicit base.
 
 Only you can turn tower mode on. The model cannot enable it by itself.
 
