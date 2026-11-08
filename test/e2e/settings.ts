@@ -80,23 +80,18 @@ function readPiDefault(agentDir: string): E2eSettings['piDefault'] {
 
 export function discriminationNotes(settings: E2eSettings): string[] {
   const { orchestrator: A, worker: B, reviewer: C, session: P, piDefault } = settings;
-  const fallback = piDefault.model === undefined ? 'unknown' : `${piDefault.model} (thinking ${piDefault.thinking ?? 'pi default'})`;
-  const notes = [`pi global default model (a dropped role binding falls back to it): ${fallback}`];
-  for (const [label, role] of [['orchestrator A', A], ['worker B', B], ['reviewer C', C]] as const) {
-    const clashes: string[] = [];
-    if (role.model === piDefault.model) clashes.push("pi's global default model");
-    if (label !== 'orchestrator A' && role.model === P.model) clashes.push('the starting session model P');
-    if (clashes.length === 0) {
-      notes.push(`${label} ${role.spec}: differs from pi's default and from P, so its model-id checks discriminate`);
-      continue;
-    }
-    const thinkingSaves = role.thinking !== undefined && role.thinking !== (role.model === piDefault.model ? piDefault.thinking : P.thinking);
-    notes.push(
-      `WARNING ${label} ${role.spec} equals ${clashes.join(' and ')}: its model-id checks cannot catch a binding that silently fell back there; ` +
-        (thinkingSaves ? `the thinking-level assertions (configured ${String(role.thinking)}) still discriminate` : 'pick another model or thinking level for this role to make the checks discriminating'),
-    );
-  }
-  return notes;
+  const compare = (role: RoleModel, model: string | undefined, thinking: string | undefined, label: string): string => {
+    if (role.model !== model) return `vs ${label}: discriminates (different model)`;
+    if (role.thinking !== undefined && role.thinking !== thinking) return `vs ${label}: WARNING same model, discriminates only via the thinking-level assertions (${role.thinking} vs ${thinking ?? 'pi default'})`;
+    return `vs ${label}: WARNING does not discriminate (same model and thinking) — pick another model or thinking level for this role`;
+  };
+  const fallback = `pi's global default ${piDefault.model ?? 'unknown'} (thinking ${piDefault.thinking ?? 'pi default'}), where a dropped role binding lands`;
+  const starting = `the starting model P ${P.spec}, which only an agent wrongly inheriting the startup session model would get`;
+  return [A, B, C].map((role, index) => {
+    const label = ['orchestrator A', 'worker B', 'reviewer C'][index] ?? '';
+    const versusP = role === A ? 'vs P: discriminates (A ≠ P is enforced)' : compare(role, P.model, P.thinking, starting);
+    return `${label} ${role.spec} — ${compare(role, piDefault.model, piDefault.thinking, fallback)}; ${versusP}`;
+  });
 }
 
 export function loadSettings(argv: readonly string[]): E2eSettings {

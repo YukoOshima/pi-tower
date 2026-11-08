@@ -12,6 +12,7 @@ import { RunRoot, tryGit } from './e2e/workspace.ts';
 const settings = loadSettings(process.argv.slice(2));
 const selfCheck = await selfCheckWakeParser(settings.checkout);
 console.log(`wake parser self-check: ${selfCheck.ok ? 'ok' : 'FAILED'}\n${selfCheck.lines.map((line) => `  - ${line}`).join('\n')}`);
+if (process.argv.includes('--selfcheck')) console.log(`role-model discrimination:\n${discriminationNotes(settings).map((note) => `  - ${note}`).join('\n')}`);
 if (!selfCheck.ok || process.argv.includes('--selfcheck')) process.exit(selfCheck.ok ? 0 : 1);
 const startedAt = Date.now();
 const root = new RunRoot();
