@@ -363,7 +363,7 @@ Agent 在整个生命周期内都使用同一个模型；恢复后的 worker 会
 - 在不接受参数的子命令后面多写的内容，例如 `/tower on now`；
 - 含有空格的 base branch 名称。
 
-因此，与上述词同名的 branch 无法通过 `/tower <base-branch>` 指定。请先检出该 branch，再运行 `/tower on`。如果工作区已经记录了另一个 base，可以让 Tower 重新锚定到该 branch：它的 `TowerInit` 工具可以接受明确指定的 base。
+如果相近的词正是一个已存在的本地 branch 的名称，则不会被拒绝。例如本地已有 `config` branch 时，`/tower config` 会像其他 `/tower <base-branch>` 一样把 `config` 设为 base；如果工作区已经记录了另一个 base，则重新锚定到 `config`。只有不存在同名本地 branch 的相近词才会被拒绝，因此输入失误不会创建新的 branch。
 
 只有你可以开启 Tower 模式，模型无法自行开启。
 
@@ -489,7 +489,54 @@ npm run typecheck
 npm test
 ```
 
+`npm test` 运行离线的 vitest 测试套件，不需要模型或网络，也不会启动 pi。其中唯一的 live runtime 测试只有在设置 `PI_TOWER_LIVE=1` 时才会运行（模型由 `PI_TOWER_LIVE_MODEL` 指定），否则跳过。
+
 扩展入口是 `src/index.ts`，在 `package.json` 的 `pi.extensions` 中声明。
+
+### 端到端实测
+
+`npm run test:e2e:pi` 用真实模型检验 pi-tower。它以 RPC 模式启动真实的 `pi` 进程，加载本 checkout 中的扩展，并在临时运行目录（`pi-tower-e2e-*`）里用一次性的 git 仓库驱动它们。
+
+| 场景 | 检查内容 | 报告标记 |
+| --- | --- | --- |
+| S1 | 三个角色各用一个不同的模型 | mandatory（必选） |
+| S2 | 命令接口与模式生命周期 | mandatory（必选） |
+| S3 | 一个目标从开始到结束的完整生命周期 | mandatory（必选） |
+| S8 | 防护与拦截 | mandatory（必选） |
+| S4 | 审查返工循环 | optional（可选） |
+| S7 | 通过 `/tower stop` 进行人工停止 | optional（可选） |
+| S13 | `maxRunningAgents=1` 的并发预算 | optional（可选） |
+
+默认运行全部七个场景。任一选中的场景失败或你的 pi 设置被改动时，退出码为 1；达到全局超时时退出码为 2。
+
+```sh
+npm run test:e2e:pi -- --selfcheck
+npm run test:e2e:pi
+PI_TOWER_E2E_SCENARIOS=S1,S2,S3,S8 npm run test:e2e:pi -- --report=e2e-report.md
+```
+
+`--selfcheck` 只执行离线检查，不启动任何会话。它仍会调用 `pi --version`，所以 `pi` 必须在 `PATH` 中。它会基于本 checkout 检查 wake 解析器，并输出每个角色的模型能否与 pi 的默认模型以及起始会话模型区分开。
+
+| 变量 | 默认值 | 含义 |
+| --- | --- | --- |
+| `PI_TOWER_E2E_CHECKOUT` | 本 checkout | 要加载其 `src/index.ts` 的 pi-tower checkout |
+| `PI_TOWER_E2E_PI` | `pi` | pi 可执行文件 |
+| `PI_TOWER_E2E_ORCHESTRATOR_MODEL` | `byteplus-gateway/claude-sonnet-5-5:low` | orchestrator 模型 |
+| `PI_TOWER_E2E_WORKER_MODEL` | `byteplus-gateway/claude-haiku-5-5:low` | worker 模型 |
+| `PI_TOWER_E2E_REVIEWER_MODEL` | `byteplus-gateway/claude-opus-5-5:low` | reviewer 模型 |
+| `PI_TOWER_E2E_SESSION_MODEL` | `byteplus-gateway/claude-haiku-5-5:low` | `/tower on` 之前的会话模型。必须与 orchestrator 模型不同，才能观察到模型切换。 |
+| `PI_TOWER_E2E_SCENARIOS` | `all` | 逗号分隔的场景编号，例如 `S1,S3`。`--scenarios=S1,S3` 的效果相同。 |
+| `PI_TOWER_E2E_TIMEOUT_MS` | `4500000`（75 分钟） | 整次运行的超时时间 |
+| `PI_TOWER_E2E_SCENARIO_TIMEOUT_MS` | `1200000`（20 分钟） | 每个场景的超时时间 |
+| `PI_TOWER_E2E_KEEP` | 未设置 | 设为 `1` 时保留运行目录及其中的仓库和日志。`--keep` 的效果相同。 |
+| `PI_TOWER_E2E_VERBOSE` | 未设置 | 设为 `1` 时回显各 pi 进程的输出。`--verbose` 的效果相同。 |
+| `PI_TOWER_E2E_REPORT` | 未设置 | 把 Markdown 报告写到该路径。`--report=<path>` 的效果相同。 |
+
+模型采用 `provider/modelId[:thinking]` 格式。orchestrator、worker 和 reviewer 的模型必须是三个不同的 provider/model id，否则运行不会开始。默认值使用名为 `byteplus-gateway` 的 provider，请把这些模型变量设成你的 pi 配置能访问的模型；运行时使用该配置中的 provider 和凭据。
+
+每次运行都会消耗真实的 token：使用默认的 sonnet、haiku 和 opus 模型（low thinking）时，一次完整运行约需 6 分钟，花费约 1.1–1.3 美元。
+
+端到端实测不会修改你的 pi 设置。每个 pi 进程都在运行目录中拥有自己的 `tower.json`（通过 `PI_TOWER_CONFIG` 指定）和会话目录，并以 `--no-extensions`、`--no-skills`、`--no-prompt-templates`、`--no-context-files` 和 `--offline` 启动。运行前后，runner 会记录 agent 目录（`~/.pi/agent`，或 `PI_CODING_AGENT_DIR`）中 `settings.json` 和 `tower.json` 的指纹；任一文件发生变化，本次运行即判为失败。
 
 ## 许可证与致谢
 
