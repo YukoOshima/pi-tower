@@ -363,7 +363,7 @@ Common slips are refused with a "did you mean" hint instead of being taken as a 
 - extra words after a subcommand that takes none, such as `/tower on now`;
 - base branch names with spaces.
 
-As a consequence, a branch whose name is one of these words cannot be passed to `/tower <base-branch>`. Check it out and run `/tower on` instead. For a workspace that already records another base, ask the tower to re-anchor to that branch: its `TowerInit` tool accepts an explicit base.
+A near-miss word that names an existing local branch is not refused. With a local `config` branch, `/tower config` makes `config` the base like any other `/tower <base-branch>`, and re-anchors a workspace that records another base. Only a near-miss word without such a branch is refused, so a slip never creates a new branch.
 
 Only you can turn tower mode on. The model cannot enable it by itself.
 
@@ -489,7 +489,54 @@ npm run typecheck
 npm test
 ```
 
+`npm test` runs the offline vitest suite. It needs no model or network access and never starts pi. Its one live runtime test is skipped unless `PI_TOWER_LIVE=1` is set (the model comes from `PI_TOWER_LIVE_MODEL`).
+
 The extension entry point is `src/index.ts`, declared under `pi.extensions` in `package.json`.
+
+### Live end-to-end run
+
+`npm run test:e2e:pi` checks pi-tower against real models. It starts real `pi` processes in RPC mode with the extension from this checkout, and drives them through throwaway git repositories in a temporary run directory (`pi-tower-e2e-*`).
+
+| Scenario | What it checks | Report label |
+| --- | --- | --- |
+| S1 | three distinct models, one per role | mandatory |
+| S2 | the command surface and the mode lifecycle | mandatory |
+| S3 | a full objective lifecycle | mandatory |
+| S8 | the guards and vetoes | mandatory |
+| S4 | the review rework loop | optional |
+| S7 | a human stop with `/tower stop` | optional |
+| S13 | the `maxRunningAgents=1` concurrency budget | optional |
+
+All seven run by default. The run exits with 1 when a selected scenario fails or your pi settings changed, and with 2 when it hits the global timeout.
+
+```sh
+npm run test:e2e:pi -- --selfcheck
+npm run test:e2e:pi
+PI_TOWER_E2E_SCENARIOS=S1,S2,S3,S8 npm run test:e2e:pi -- --report=e2e-report.md
+```
+
+`--selfcheck` runs only the offline checks and starts no session. It still calls `pi --version`, so `pi` must be on your `PATH`. It checks the wake parser against this checkout and prints whether each role model can be told apart from pi's default model and from the starting session model.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `PI_TOWER_E2E_CHECKOUT` | this checkout | The pi-tower checkout whose `src/index.ts` is loaded |
+| `PI_TOWER_E2E_PI` | `pi` | The pi binary |
+| `PI_TOWER_E2E_ORCHESTRATOR_MODEL` | `byteplus-gateway/claude-sonnet-5-5:low` | Orchestrator model |
+| `PI_TOWER_E2E_WORKER_MODEL` | `byteplus-gateway/claude-haiku-5-5:low` | Worker model |
+| `PI_TOWER_E2E_REVIEWER_MODEL` | `byteplus-gateway/claude-opus-5-5:low` | Reviewer model |
+| `PI_TOWER_E2E_SESSION_MODEL` | `byteplus-gateway/claude-haiku-5-5:low` | Session model before `/tower on`. It must differ from the orchestrator model, so the switch is observable. |
+| `PI_TOWER_E2E_SCENARIOS` | `all` | Comma-separated scenario ids such as `S1,S3`. `--scenarios=S1,S3` does the same. |
+| `PI_TOWER_E2E_TIMEOUT_MS` | `4500000` (75 minutes) | Timeout for the whole run |
+| `PI_TOWER_E2E_SCENARIO_TIMEOUT_MS` | `1200000` (20 minutes) | Timeout for each scenario |
+| `PI_TOWER_E2E_KEEP` | unset | `1` keeps the run directory with its repositories and logs. `--keep` does the same. |
+| `PI_TOWER_E2E_VERBOSE` | unset | `1` echoes the output of the pi processes. `--verbose` does the same. |
+| `PI_TOWER_E2E_REPORT` | unset | Writes the Markdown report to this path. `--report=<path>` does the same. |
+
+Models use the `provider/modelId[:thinking]` form. The orchestrator, worker and reviewer models must be three distinct provider/model ids, or the run refuses to start. The defaults name a `byteplus-gateway` provider, so set the model variables to models that your pi setup can reach. The run uses the providers and credentials of that setup.
+
+A run spends real tokens. A full run takes about 6 minutes and costs roughly $1.1–1.3 with the default sonnet, haiku and opus models at low thinking.
+
+The run never modifies your pi settings. Every pi process gets its own `tower.json` (through `PI_TOWER_CONFIG`) and its own session directory inside the run directory. Each one starts with `--no-extensions`, `--no-skills`, `--no-prompt-templates`, `--no-context-files` and `--offline`. The runner fingerprints `settings.json` and `tower.json` in your agent directory (`~/.pi/agent`, or `PI_CODING_AGENT_DIR`) before and after the run, and fails the run if either changed.
 
 ## License and credits
 

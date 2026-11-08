@@ -177,7 +177,7 @@ function analyzeInvocation(
     const result = analyzeWrapped(dropWrapperOperands(args, wrapper, ctx.state), cwds, ctx);
     return CURRENT_SHELL_WRAPPERS.has(name) ? result : childFlow(result, cwds);
   }
-  if (NESTED_SHELLS.has(name)) return analyzeNestedShell(args, cwds, ctx);
+  if (NESTED_SHELLS.has(name)) return analyzeNestedShell(name, args, cwds, ctx);
   if (name === 'eval') return analyzeEval(args, cwds, ctx);
   if (name === 'trap') return analyzeTrap(args, cwds, ctx);
   if (name === 'alias') return analyzeAlias(args, cwds);
@@ -234,14 +234,23 @@ function analyzeWrapped(wrapped: WrappedCommand, cwds: readonly Cwd[], ctx: Guar
   return analyzeInvocation(normalizeCommandName(inner.value), rest, innerCwds, ctx);
 }
 
-function analyzeNestedShell(args: readonly ShellWord[], cwds: readonly Cwd[], ctx: GuardContext): WalkResult {
+function analyzeNestedShell(
+  shell: string,
+  args: readonly ShellWord[],
+  cwds: readonly Cwd[],
+  ctx: GuardContext,
+): WalkResult {
   if (ctx.state.startupRedirected) return vetoed(UNANALYZABLE_VETO);
   let command = false;
   let stdin = false;
+  let longOptions = shell === 'bash' || shell === 'sh';
   let index = 0;
   for (; index < args.length; index += 1) {
-    const arg = args[index]!.literal;
-    if (arg === undefined) return vetoed(UNANALYZABLE_VETO);
+    const word = args[index]!.literal ?? args[index]!.value;
+    if (word === undefined) return vetoed(UNANALYZABLE_VETO);
+    const long = longOptions && BASH_SINGLE_DASH_LONG_OPTIONS.has(word);
+    if (long && shell === 'sh') return vetoed(UNANALYZABLE_VETO);
+    const arg = long ? `-${word}` : word;
     if (arg === '--' || arg === '-') {
       index += 1;
       break;
@@ -257,6 +266,7 @@ function analyzeNestedShell(args: readonly ShellWord[], cwds: readonly Cwd[], ct
       continue;
     }
     if (!/^[-+][a-zA-Z]+$/.test(arg)) break;
+    longOptions = false;
     if (arg.startsWith('-') && arg.includes('c')) command = true;
     if (arg.startsWith('-') && arg.includes('s')) stdin = true;
     index += (arg.match(/[oO]/g) ?? []).length;
@@ -773,6 +783,27 @@ const SHELL_VALUE_OPTIONS: ReadonlySet<string> = new Set(['--rcfile', '--init-fi
 const SHELL_STARTUP_FILE_OPTIONS: ReadonlySet<string> = new Set(['--rcfile', '--init-file']);
 
 const SHELL_INFO_OPTIONS: ReadonlySet<string> = new Set(['--version', '--help']);
+
+const BASH_SINGLE_DASH_LONG_OPTIONS: ReadonlySet<string> = new Set([
+  '-rcfile',
+  '-init-file',
+  '-version',
+  '-help',
+  '-login',
+  '-noprofile',
+  '-norc',
+  '-posix',
+  '-restricted',
+  '-verbose',
+  '-debugger',
+  '-dump-strings',
+  '-dump-po-strings',
+  '-wordexp',
+  '-debug',
+  '-noediting',
+  '-pretty-print',
+  '-rpm-requires',
+]);
 
 const DECLARATION_BUILTINS: ReadonlySet<string> = new Set(['export', 'declare', 'typeset', 'readonly', 'local']);
 

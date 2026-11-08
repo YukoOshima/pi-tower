@@ -468,6 +468,36 @@ describe('/tower help and typo safety', () => {
     expect(h.ctx.confirms).toEqual([]);
   });
 
+  it('re-anchors on a near-miss word only once it names an existing local branch', async () => {
+    const h = await harness();
+    await h.run('main');
+
+    expect((await h.run('config')).errors).toEqual([
+      'Unknown /tower subcommand "config" — did you mean /tower models? Run /tower help for usage; /tower <base-branch> starts the tower on a branch.',
+    ]);
+    expect((await new TowerStore(h.repo).load()).base).toBe('main');
+
+    await git(h.repo, 'branch', 'config');
+    const moved = await h.run('config');
+
+    expect(moved.errors).toEqual([]);
+    expect(moved.notices).toEqual([{ title: 'Tower base: config' }]);
+    expect(h.ctx.confirms).toEqual([]);
+    expect((await new TowerStore(h.repo).load()).base).toBe('config');
+  });
+
+  it('turns tower mode on from an existing local branch named like a near-miss', async () => {
+    const h = await harness();
+    await git(h.repo, 'branch', 'start');
+
+    const on = await h.run('start');
+
+    expect(on.errors).toEqual([]);
+    expect(on.notices).toEqual([{ title: 'Tower mode: ON (base: start)' }]);
+    expect((await new TowerStore(h.repo).load()).base).toBe('start');
+    expect(h.ctx.confirms).toEqual([]);
+  });
+
   it('refuses argument-less subcommands with trailing words, multi-word bases and a bare stop', async () => {
     const h = await harness();
 

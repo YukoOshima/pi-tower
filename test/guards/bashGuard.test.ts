@@ -472,6 +472,22 @@ describe('wrappers and nested shells', () => {
     expect(guard('source ~/.nvm/nvm.sh && rm -rf node_modules')).toBeUndefined();
     expect(guard(". '/tmp/a b/env.sh'; rm -f x")).toBeUndefined();
   });
+
+  it('runs a nested shell script operand under ~/ like any other script file', () => {
+    expect(guard('bash ~/scripts/clean.sh && rm -rf dist', slot)).toBeUndefined();
+    expect(guard('bash ~/scripts/clean.sh && rm -rf dist')).toBeUndefined();
+    expect(guard('sh -e ~/scripts/clean.sh; rm -f x', slot)).toBeUndefined();
+  });
+
+  it.each([
+    "bash /dev/stdin <<< 'echo hi'; rm -f y",
+    'bash "$S"; rm -f y',
+    'bash *.sh && rm -rf dist',
+    "bash ~/../../dev/stdin <<< 'rm -rf .tower/comms'",
+    "bash ~/scripts/clean.sh -c 'rm -rf .tower'",
+  ])('still vetoes the nested shell script operand in %j', (command) => {
+    expect(guard(command, slot)).toBe(UNANALYZABLE_VETO);
+  });
 });
 
 describe('wrapper long options', () => {
@@ -571,6 +587,49 @@ describe('shell startup files', () => {
     expect(guard("bash --rcfile ~/.bashrc -ic 'rm -rf build'")).toBeUndefined();
     expect(guard("bash --init-file=./ci.rc -ic 'rm -rf build'")).toBeUndefined();
     expect(guard("bash --rcfile ./ci.rc -ic 'rm -rf .tower/comms'")).toBe(rmVeto('.tower/comms'));
+  });
+
+  it.each([
+    "bash -rcfile /dev/stdin -ic true <<< 'rm -rf .tower/comms'",
+    "bash -init-file /dev/fd/0 -ic true <<< 'git reset --hard'",
+    "bash -norc -rcfile /proc/self/fd/0 -i <<< 'rm -rf .tower/comms'",
+    "sudo bash -rcfile /dev/stdin -ic true <<< 'rm -rf .tower/comms'",
+  ])('reads a leading single-dash bash long option like its -- form in %j', (command) => {
+    expect(guard(command)).toBe(UNANALYZABLE_VETO);
+  });
+
+  it('treats single-dash long options as long only where bash itself does', () => {
+    expect(guard("bash -login -c 'rm -rf .tower/comms'")).toBe(rmVeto('.tower/comms'));
+    expect(guard("bash -noprofile -norc -c 'git reset --hard'")).toBe(GIT_RESET_VETO);
+    expect(guard('bash -version && rm -rf build')).toBeUndefined();
+    expect(guard("bash -e -rcfile 'rm -rf .tower/comms' x")).toBe(rmVeto('.tower/comms'));
+    expect(guard("zsh -rcfile 'rm -rf .tower/comms' x")).toBe(rmVeto('.tower/comms'));
+  });
+
+  it('vetoes a leading single-dash bash long option for sh, which may be bash or dash', () => {
+    expect(guard("sh -login /dev/stdin x <<< 'rm -rf .tower/comms'")).toBe(UNANALYZABLE_VETO);
+    expect(guard("sh -posix errexit <<< 'rm -rf .tower/comms'")).toBe(UNANALYZABLE_VETO);
+    expect(guard('sh -norc scripts/clean.sh; rm -f x')).toBe(UNANALYZABLE_VETO);
+    expect(guard('sh -e scripts/clean.sh && rm -rf dist')).toBeUndefined();
+  });
+
+  it.each([
+    ["bash -noediting -c 'rm -rf .tower/comms'", rmVeto('.tower/comms')],
+    ["bash -debug -rcfile /dev/stdin -ic true <<< 'rm -rf .tower/comms'", UNANALYZABLE_VETO],
+    ["bash -debug -login -c 'rm -rf .tower/comms'", rmVeto('.tower/comms')],
+    ["bash -pretty-print -init-file /dev/stdin -i <<< 'rm -rf .tower/comms'", UNANALYZABLE_VETO],
+    ["sh -noediting -c 'rm -rf .tower/comms'", UNANALYZABLE_VETO],
+    ["sh -debug -login /dev/stdin x <<< 'rm -rf .tower/comms'", UNANALYZABLE_VETO],
+    ["bash -noediting -c 'git reset --hard'", GIT_RESET_VETO],
+  ])('reads every bash --help long option in its single-dash form in %j', (command, veto) => {
+    expect(guard(command)).toBe(veto);
+  });
+
+  it('keeps everyday nested shell invocations allowed', () => {
+    expect(guard('bash -euo pipefail scripts/x.sh && rm -rf dist', slot)).toBeUndefined();
+    expect(guard("bash -lc 'rm -rf dist'", slot)).toBeUndefined();
+    expect(guard("bash -norc -noprofile -c 'rm -rf dist'", slot)).toBeUndefined();
+    expect(guard('bash -version && rm -rf dist')).toBeUndefined();
   });
 });
 

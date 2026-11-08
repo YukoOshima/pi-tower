@@ -152,7 +152,7 @@ export async function handleTowerCommand(
     return;
   }
   const typo = towerSubcommandTypo(words);
-  if (typo !== undefined) {
+  if (typo !== undefined && !(words.length === 1 && (await isLocalBranch(controller, input)))) {
     ui.error(typo);
     return;
   }
@@ -163,19 +163,20 @@ export async function handleTowerCommand(
   await startTowerWithBase(controller, ui, input);
 }
 
+async function isLocalBranch(controller: TowerController, name: string): Promise<boolean> {
+  try {
+    return await branchExists(controller.repoRoot, name);
+  } catch {
+    return false;
+  }
+}
+
 async function confirmNewBaseBranch(
   controller: TowerController,
   ctx: ExtensionCommandContext,
   base: string,
 ): Promise<boolean> {
-  if (!ctx.hasUI) return true;
-  let exists = false;
-  try {
-    exists = await branchExists(controller.repoRoot, base);
-  } catch {
-    exists = false;
-  }
-  if (exists) return true;
+  if (!ctx.hasUI || (await isLocalBranch(controller, base))) return true;
   return ctx.ui.confirm(
     `Create branch "${base}"?`,
     `"${base}" is not a local branch. /tower ${base} creates it from the current HEAD, switches the checkout to it, commits any uncommitted changes onto it as a snapshot, and makes it the tower base.`,
