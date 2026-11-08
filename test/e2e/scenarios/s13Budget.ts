@@ -1,3 +1,4 @@
+import { activityLog, agentTranscriptPath, rosterEntry, summarizeTranscript } from '../evidence.ts';
 import { clip, textOf } from '../rpc.ts';
 import { recordUsage, roleConfig, runsOf, startSession, TURN_TIMEOUT_MS, type ScenarioDefinition } from '../scenario.ts';
 
@@ -44,12 +45,20 @@ export const s13Budget: ScenarioDefinition = {
       `the retried spawn of ${SECOND}`,
       span.to,
     );
-    const retriedAt = rpc.events.indexOf(retried);
-    const firstDone = rpc.customMessages('tower-agent-notification', span.from).find((message) => message.text.includes(`name="${FIRST}"`));
+    const one = rosterEntry(session.repo, FIRST);
+    const two = rosterEntry(session.repo, SECOND);
+    const onePath = one === undefined ? undefined : agentTranscriptPath(session.repo, one.agentId);
+    const oneEnd = onePath === undefined ? Number.NaN : summarizeTranscript(onePath).lastAt;
+    const twoSpawn = Date.parse(two?.spawnedAt ?? '');
+    const log = activityLog(session.repo).filter((line) => line.includes(`${FIRST} mission.update`) || line.includes(`spawn name=${SECOND}`));
     report.check(
       `${SECOND} spawns once ${FIRST} has finished`,
-      firstDone !== undefined && firstDone.index < retriedAt,
-      [`${FIRST} finished notification at event #${String(firstDone?.index)}: ${clip(firstDone?.text.split('\n').find((line) => line.startsWith('Title:')) ?? '', 120)}`, `retried TowerSpawn ${SECOND} succeeded at event #${String(retriedAt)}: ${clip(textOf(retried.result?.content).split('\n').slice(0, 5).join(' | '), 200)}`],
+      oneEnd < twoSpawn,
+      [
+        `${FIRST} transcript ends ${Number.isFinite(oneEnd) ? new Date(oneEnd).toISOString() : '?'}; ${SECOND} spawned ${two?.spawnedAt ?? '?'}`,
+        `retried TowerSpawn: ${clip(textOf(retried.result?.content).split('\n').slice(0, 5).join(' | '), 200)}`,
+        ...log,
+      ],
     );
     await rpc.waitIdle(TURN_TIMEOUT_MS, 3000);
     await rpc.waitFor(

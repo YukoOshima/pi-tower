@@ -14,6 +14,7 @@ export interface RosterEntry {
   readonly branch?: string;
   readonly model?: string;
   readonly cwd?: string;
+  readonly spawnedAt?: string;
   readonly deathStatus?: string;
 }
 
