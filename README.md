@@ -357,7 +357,13 @@ With Kimi Code, you cannot give reviewers a model different from the tower's wit
 
 Subcommands are case-insensitive. The base branch keeps its case. Tab completion covers subcommands, agent names, model targets and the `--clear`/`--project` options.
 
-Common slips are refused with a "did you mean" hint instead of being taken as a branch name: near-miss words such as `/tower model`, `/tower agent`, `/tower start` or `/tower kill`, extra words after a subcommand that takes none, and base branch names with spaces.
+Common slips are refused with a "did you mean" hint instead of being taken as a branch name:
+
+- the near-miss words `model`, `config`, `configure`, `agent`, `task`, `tasks`, `list`, `ls`, `start`, `enable`, `disable`, `stat`, `state` and `kill`;
+- extra words after a subcommand that takes none, such as `/tower on now`;
+- base branch names with spaces.
+
+As a consequence, a branch named like one of these words cannot be passed to `/tower <base-branch>`. Check it out and run `/tower on` instead. For a workspace that already records another base, ask the tower to re-anchor to that branch: its `TowerInit` tool accepts an explicit base.
 
 Only you can turn tower mode on. The model cannot enable it by itself.
 
@@ -408,7 +414,7 @@ Worktrees isolate writes, but they are not a security sandbox.
 
 - Workers can read the repository and run tools with your permissions, and they never ask for approval.
 - Workers and reviewers run headless. They cannot spawn subagents: pi-tower is not loaded inside them, and their tool list contains no subagent tool.
-- Mission scopes and merge checks are process rules, not security boundaries.
+- Mission scopes, merge checks and the guards below are process rules, not security boundaries.
 
 pi-tower adds three guards:
 
@@ -419,6 +425,8 @@ pi-tower adds three guards:
   - `git reset --hard` in the main checkout.
 
   The same commands are allowed inside a mission worktree. A command that mentions `rm`, `git clean` or `git reset` is blocked as a precaution when the parser cannot analyze it safely, for example because it uses command substitution or a heredoc, or because a path it would delete depends on a variable. The guard models only these commands, so other destructive commands are not caught, the same as in Kimi Code. It checks pi's `bash` tool only; the Windows `powershell` tool is not guarded.
+
+  Because it errs on the side of blocking, it also stops some harmless commands, for example `source "$HOME/x" && rm -rf y`, `ENV=x bash script && rm -rf y`, or `cd <worktree> || exit 1; git reset --hard` run from the main checkout. Splitting such a command into simpler ones avoids this.
 - **Write guard.** A worker's `write` and `edit` calls outside its own worktree are denied.
 - **Read-only reviewers.** Reviewers have no `write` or `edit` tools.
 

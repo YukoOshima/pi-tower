@@ -357,7 +357,13 @@ Agent 在整个生命周期内都使用同一个模型；恢复后的 worker 会
 
 子命令不区分大小写，base branch 保留原有大小写。Tab 补全支持子命令、Agent 名称、模型目标以及 `--clear`/`--project` 选项。
 
-常见的输入失误会被拒绝并给出 "did you mean" 提示，而不会被当作 branch 名称：例如 `/tower model`、`/tower agent`、`/tower start`、`/tower kill` 这类相近的词，在不接受参数的子命令后面多写的内容，以及含有空格的 base branch 名称。
+常见的输入失误会被拒绝并给出 "did you mean" 提示，而不会被当作 branch 名称：
+
+- 相近的词 `model`、`config`、`configure`、`agent`、`task`、`tasks`、`list`、`ls`、`start`、`enable`、`disable`、`stat`、`state` 和 `kill`；
+- 在不接受参数的子命令后面多写的内容，例如 `/tower on now`；
+- 含有空格的 base branch 名称。
+
+因此，与上述词同名的 branch 无法通过 `/tower <base-branch>` 指定。请先检出该 branch，再运行 `/tower on`。如果工作区已经记录了另一个 base，可以让 Tower 重新锚定到该 branch：它的 `TowerInit` 工具可以接受明确指定的 base。
 
 只有你可以开启 Tower 模式，模型无法自行开启。
 
@@ -408,7 +414,7 @@ worktree 只能隔离写入，不能当作安全沙箱。
 
 - worker 可以读取仓库内容，并以你的权限运行工具，而且不会请求审批。
 - worker 和 reviewer 以无界面方式运行。它们无法再派发 subagent：pi-tower 不会在它们内部加载，它们的工具列表里也没有 subagent 工具。
-- mission 范围和合并检查只是流程约束，不是安全边界。
+- mission 范围、合并检查以及下面的几道防护都只是流程约束，不是安全边界。
 
 pi-tower 提供三道防护：
 
@@ -419,6 +425,8 @@ pi-tower 提供三道防护：
   - 在主 checkout 中执行的 `git reset --hard`。
 
   同样的命令在 mission worktree 内是允许的。如果命令中出现 `rm`、`git clean` 或 `git reset`，而解析器无法安全地分析它（例如用了命令替换或 heredoc，或者要删除的路径依赖某个变量），为保险起见会直接拦截。这道防护只针对上述命令，其他破坏性命令不会被拦截，这一点与 Kimi Code 相同。它只检查 pi 的 `bash` 工具，不检查 Windows 上的 `powershell` 工具。
+
+  由于它宁可多拦也不漏拦，一些无害的命令也会被拦下，例如 `source "$HOME/x" && rm -rf y`、`ENV=x bash script && rm -rf y`，或者在主 checkout 中运行的 `cd <worktree> || exit 1; git reset --hard`。把这类命令拆成几条更简单的命令即可避免。
 - **写入防护。** worker 在自己的 worktree 之外调用 `write` 和 `edit` 会被拒绝。
 - **只读 reviewer。** reviewer 没有 `write` 和 `edit` 工具。
 
