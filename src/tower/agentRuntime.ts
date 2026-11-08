@@ -11,6 +11,7 @@ import {
 import { createAgentTools, toToolDefinition } from '../tools/index.ts';
 import { DEFAULT_AGENT_TIMEOUT_MS } from './constants.ts';
 import type { TowerController } from './controller.ts';
+import { towerAgentGuards } from './guards.ts';
 
 export interface TowerAgentRuntimeOptions {
   readonly maxRunningAgents: () => number | undefined;
@@ -57,7 +58,15 @@ export function createTowerAgentRuntime(
         },
       });
     });
-    const extensions = options.extensionFactories?.(request) ?? [];
+    const extensions = [
+      towerAgentGuards({
+        agentId: request.agentId,
+        kind: request.spec.kind,
+        cwd: request.spec.cwd,
+        repoRoot: () => controller.repoRoot,
+      }),
+      ...(options.extensionFactories?.(request) ?? []),
+    ];
     return factoryFor(controller.repoRoot)({
       agentId: request.agentId,
       spec: {

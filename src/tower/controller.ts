@@ -58,6 +58,7 @@ import {
   TOWER_REMINDER_MESSAGE,
   TOWER_STATUS_KEY,
 } from './constants.ts';
+import { towerBashGuard } from './guards.ts';
 import { BranchLeases } from './leases.ts';
 import { isForeignLiveOwner, isOwnerLive, isProcessAlive } from './liveness.ts';
 import { latestTowerModeRecord, type TowerModeRecord, type TowerSessionModel } from './modeRecord.ts';
@@ -558,11 +559,13 @@ export class TowerController implements TowerToolHost {
     };
   }
 
-  onToolCall(event: ToolCallEvent, ctx: ExtensionContext): ToolCallEventResult | undefined {
+  async onToolCall(event: ToolCallEvent, ctx: ExtensionContext): Promise<ToolCallEventResult | undefined> {
     this.observe(ctx);
-    if (!this.active) return undefined;
-    const veto = towerModeVeto(event.toolName);
-    return veto === undefined ? undefined : { block: true, reason: veto };
+    if (this.active) {
+      const veto = towerModeVeto(event.toolName);
+      if (veto !== undefined) return { block: true, reason: veto };
+    }
+    return towerBashGuard(event, ctx.cwd);
   }
 
   onAfterProviderResponse(event: AfterProviderResponseEvent): void {

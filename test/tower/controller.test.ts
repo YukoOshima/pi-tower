@@ -648,21 +648,43 @@ describe('tower-mode tool vetoes', () => {
     await h.controller.enter();
 
     for (const name of ['todo', 'todo_write', 'TodoWrite', 'TodoList']) {
-      expect(h.controller.onToolCall(toolCall(name), h.ctx.asContext)).toEqual({ block: true, reason: todoToolDenied(name) });
+      expect(await h.controller.onToolCall(toolCall(name), h.ctx.asContext)).toEqual({ block: true, reason: todoToolDenied(name) });
     }
     for (const name of ['subagent', 'AgentSwarm']) {
-      expect(h.controller.onToolCall(toolCall(name), h.ctx.asContext)).toEqual({ block: true, reason: subagentToolDenied(name) });
+      expect(await h.controller.onToolCall(toolCall(name), h.ctx.asContext)).toEqual({ block: true, reason: subagentToolDenied(name) });
     }
     for (const name of ['bash', 'AskUserQuestion', 'TowerTasks', 'todos', 'Agent']) {
-      expect(h.controller.onToolCall(toolCall(name), h.ctx.asContext)).toBeUndefined();
+      expect(await h.controller.onToolCall(toolCall(name), h.ctx.asContext)).toBeUndefined();
     }
   });
 
   it('abstains while tower mode is inactive', async () => {
     const h = await harness();
 
-    expect(h.controller.onToolCall(toolCall('TodoList'), h.ctx.asContext)).toBeUndefined();
-    expect(h.controller.onToolCall(toolCall('subagent'), h.ctx.asContext)).toBeUndefined();
+    expect(await h.controller.onToolCall(toolCall('TodoList'), h.ctx.asContext)).toBeUndefined();
+    expect(await h.controller.onToolCall(toolCall('subagent'), h.ctx.asContext)).toBeUndefined();
+  });
+
+  it('runs the bash guard on main-session bash calls exactly while the workspace is owned, in or out of tower mode', async () => {
+    const h = await harness();
+    const bash = (command: string): ToolCallEvent =>
+      ({ type: 'tool_call', toolCallId: 'call_bash', toolName: 'bash', input: { command } }) as ToolCallEvent;
+
+    expect(await h.controller.onToolCall(bash('rm -rf .tower/comms'), h.ctx.asContext)).toBeUndefined();
+
+    await new TowerStore(h.repo).init('session-main');
+    const blocked = await h.controller.onToolCall(bash('rm -rf .tower/comms'), h.ctx.asContext);
+    expect(blocked).toMatchObject({ block: true });
+    expect(blocked?.reason).toContain('`rm` is not allowed on tower protocol paths');
+    expect(await h.controller.onToolCall(bash('git clean -fdx'), h.ctx.asContext)).toMatchObject({ block: true });
+
+    await h.controller.enter();
+    expect(await h.controller.onToolCall(bash('rm -rf .tower/comms'), h.ctx.asContext)).toMatchObject({ block: true });
+    expect(await h.controller.onToolCall(bash('ls -la .tower && git status'), h.ctx.asContext)).toBeUndefined();
+
+    await h.controller.exit();
+    expect((await new TowerStore(h.repo).load()).sessionId).toBeUndefined();
+    expect(await h.controller.onToolCall(bash('rm -rf .tower/comms'), h.ctx.asContext)).toBeUndefined();
   });
 });
 

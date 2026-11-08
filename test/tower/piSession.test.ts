@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -113,12 +113,22 @@ async function sandbox(): Promise<Sandbox> {
   return { repo, faux, ctx, pi, controller, sessions };
 }
 
+function toolResults(messages: readonly Message[]): { readonly toolName: string; readonly isError: boolean; readonly text: string }[] {
+  return messages.flatMap((message) =>
+    message.role === 'toolResult'
+      ? [
+          {
+            toolName: message.toolName,
+            isError: message.isError,
+            text: message.content.map((block) => (block.type === 'text' ? block.text : '')).join(''),
+          },
+        ]
+      : [],
+  );
+}
+
 function lastToolResultText(messages: readonly Message[]): string {
-  for (const message of [...messages].reverse()) {
-    if (message.role !== 'toolResult') continue;
-    return message.content.map((block) => (block.type === 'text' ? block.text : '')).join('');
-  }
-  return '';
+  return toolResults(messages).at(-1)?.text ?? '';
 }
 
 async function spawnWorker(s: Sandbox, name: string): Promise<string> {
@@ -166,5 +176,36 @@ describe('a tower worker in a real pi session', () => {
     expect(s.controller.agentOutput(agentId)?.recentToolCalls).toEqual([
       expect.objectContaining({ name: 'TowerStatus', isError: false }),
     ]);
+  });
+
+  it('blocks writes outside its worktree and bash that would wipe the tower state', async () => {
+    const s = await sandbox();
+    const outside = join(s.repo, 'OUTSIDE.md');
+    const comms = join(s.repo, '.tower', 'comms');
+    s.faux.setResponses([
+      fauxAssistantMessage(fauxToolCall('write', { path: outside, content: 'escape' })),
+      fauxAssistantMessage(fauxToolCall('bash', { command: `rm -rf ${comms}` })),
+      fauxAssistantMessage(fauxToolCall('write', { path: 'notes.md', content: 'inside' })),
+      (context) =>
+        fauxAssistantMessage(
+          `RESULTS ${toolResults(context.messages)
+            .map((result) => `${result.toolName}:${result.isError ? 'blocked' : 'ok'}:${result.text.split('\n')[0] ?? ''}`)
+            .join(' | ')}`,
+        ),
+    ]);
+
+    await spawnWorker(s, 'agent-guarded');
+
+    await vi.waitFor(() => expect(s.pi.sentOfType(TOWER_AGENT_NOTIFICATION_MESSAGE)).toHaveLength(1), {
+      timeout: 10_000,
+    });
+    const summary = sentText(s.pi.sentOfType(TOWER_AGENT_NOTIFICATION_MESSAGE)[0]);
+    expect(summary).toMatch(/write:blocked:[^|]*tower workers may only write inside their own worktree/);
+    expect(summary).toMatch(/bash:blocked:[^|]*`rm` is not allowed on tower protocol paths/);
+    expect(summary).toMatch(/write:ok:/);
+    expect(existsSync(outside)).toBe(false);
+    expect(existsSync(join(comms, 'state.json'))).toBe(true);
+    const mission = (await new TowerStore(s.repo).load()).missions.find((candidate) => candidate.id === 'M1');
+    expect(existsSync(join(s.repo, '.tower', 'worktrees', mission?.worktree ?? '', 'notes.md'))).toBe(true);
   });
 });
