@@ -22,7 +22,7 @@ describe.skipIf(!LIVE)(`live tower agent on ${MODEL}`, () => {
     async () => {
       const repoRoot = mkdtempSync(join(tmpdir(), 'pi-tower-live-'));
       const runtime = new TowerAgentRuntime({
-        sessionFactory: createPiSessionFactory({ repoRoot }),
+        sessionFactory: createPiSessionFactory({ repoRoot, projectTrusted: false }),
         timeoutMs: RUN_TIMEOUT_MS,
       });
       const log: string[] = [];
@@ -72,6 +72,7 @@ describe.skipIf(!LIVE)(`live tower agent on ${MODEL}`, () => {
         expect(first.status).toBe('idle');
         expect(first.summary).toContain(REPLY_TOKEN);
         expect(first.summary).toContain(STEER_TOKEN);
+        expect(first.undeliveredSteers).toEqual([]);
         expect(first.usage.totalTokens).toBeGreaterThan(0);
 
         finished = nextEvent(runtime, 'finished');

@@ -1,19 +1,22 @@
 import { fauxAssistantMessage, type AssistantMessage, type Usage } from '@earendil-works/pi-ai';
 import type { AgentSessionEvent, AgentSessionEventListener } from '@earendil-works/pi-coding-agent';
 
+import type { TowerAgentRuntime } from '../../src/runtime/agentRuntime.ts';
 import type {
   TowerAgentEvent,
   TowerAgentSession,
   TowerAgentSessionFactory,
   TowerAgentSessionRequest,
+  TowerSteerDisposition,
   TowerThinkingLevel,
 } from '../../src/runtime/types.ts';
-import type { TowerAgentRuntime } from '../../src/runtime/agentRuntime.ts';
 
 interface PendingPrompt {
   readonly resolve: () => void;
   readonly reject: (error: unknown) => void;
 }
+
+export type UsagePatch = Partial<Omit<Usage, 'cost'>> & { readonly cost?: Partial<Usage['cost']> };
 
 export class FakeSession implements TowerAgentSession {
   readonly sessionId: string;
@@ -21,11 +24,18 @@ export class FakeSession implements TowerAgentSession {
   readonly model = { provider: 'fake', id: 'fake-model' };
   readonly thinkingLevel: TowerThinkingLevel = 'low';
   isStreaming = false;
+  startsStreaming = true;
   ignoreAbort = false;
+  steerDisposition: TowerSteerDisposition = 'queued';
+  steerError: unknown;
+  steerGate: Promise<void> | undefined;
   abortCalls = 0;
+  discardCalls = 0;
   disposed = false;
   readonly prompts: string[] = [];
   readonly steers: string[] = [];
+  readonly queued: string[] = [];
+  readonly delivered: string[] = [];
   private readonly listeners = new Set<AgentSessionEventListener>();
   private pending: PendingPrompt | undefined;
 
@@ -36,14 +46,26 @@ export class FakeSession implements TowerAgentSession {
 
   prompt(text: string): Promise<void> {
     this.prompts.push(text);
-    this.isStreaming = true;
+    if (this.startsStreaming) {
+      this.isStreaming = true;
+      this.emit({ type: 'agent_start' });
+    }
     return new Promise<void>((resolve, reject) => {
       this.pending = { resolve, reject };
     });
   }
 
-  async steer(text: string): Promise<void> {
+  async steer(text: string): Promise<TowerSteerDisposition> {
     this.steers.push(text);
+    if (this.steerGate !== undefined) await this.steerGate;
+    if (this.steerError !== undefined) throw this.steerError;
+    if (this.steerDisposition === 'queued') this.queued.push(text);
+    return this.steerDisposition;
+  }
+
+  discardQueued(): readonly string[] {
+    this.discardCalls += 1;
+    return this.queued.splice(0);
   }
 
   async abort(): Promise<void> {
@@ -75,6 +97,10 @@ export class FakeSession implements TowerAgentSession {
     for (const listener of [...this.listeners]) listener(event);
   }
 
+  deliverQueued(): void {
+    this.delivered.push(...this.queued.splice(0));
+  }
+
   reply(text: string, usage?: UsagePatch): void {
     this.emit({ type: 'message_end', message: assistantMessage(text, usage) });
   }
@@ -102,12 +128,20 @@ export class FakeSession implements TowerAgentSession {
     }
   }
 
-  settle(aborted = false): void {
+  beginSettling(aborted = false): void {
     this.isStreaming = false;
     this.emit({ type: 'agent_settled', aborted });
+  }
+
+  resolvePrompt(): void {
     const pending = this.pending;
     this.pending = undefined;
     pending?.resolve();
+  }
+
+  settle(aborted = false): void {
+    this.beginSettling(aborted);
+    this.resolvePrompt();
   }
 
   crash(error: unknown): void {
@@ -117,8 +151,6 @@ export class FakeSession implements TowerAgentSession {
     pending?.reject(error);
   }
 }
-
-export type UsagePatch = Partial<Omit<Usage, 'cost'>> & { readonly cost?: Partial<Usage['cost']> };
 
 export function assistantMessage(text: string, usage?: UsagePatch): AssistantMessage {
   const message = fauxAssistantMessage(text);
@@ -138,12 +170,14 @@ export class FakeSessionFactory {
   readonly requests: TowerAgentSessionRequest[] = [];
   failWith: unknown;
   gate: Promise<void> | undefined;
+  configure: ((session: FakeSession) => void) | undefined;
 
   readonly create: TowerAgentSessionFactory = async (request) => {
     this.requests.push(request);
     if (this.gate !== undefined) await this.gate;
     if (this.failWith !== undefined) throw this.failWith;
     const session = new FakeSession(request.agentId);
+    this.configure?.(session);
     this.sessions.set(request.agentId, session);
     return session;
   };
@@ -174,4 +208,12 @@ export function sequentialIds(): (prefix: 'agent' | 'task') => string {
     counters[prefix] += 1;
     return `${prefix}-${String(counters[prefix])}`;
   };
+}
+
+export function deferred(): { readonly promise: Promise<void>; readonly resolve: () => void } {
+  let resolve: () => void = () => undefined;
+  const promise = new Promise<void>((settle) => {
+    resolve = settle;
+  });
+  return { promise, resolve };
 }

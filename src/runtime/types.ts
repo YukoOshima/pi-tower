@@ -75,7 +75,9 @@ export type TowerRunStartResult =
   | { readonly ok: true; readonly agentId: string; readonly taskId: string }
   | { readonly ok: false; readonly reason: string };
 
-export type TowerSteerResult = 'steered' | 'idle' | 'missing';
+export type TowerSteerResult = 'steered' | 'handled' | 'idle' | 'missing';
+
+export type TowerSteerDisposition = 'queued' | 'handled';
 
 export type TowerStopResult = 'stopped' | 'idle' | 'missing';
 
@@ -96,6 +98,7 @@ export interface TowerAgentFinishedEvent extends TowerAgentEventBase {
   readonly status: TowerAgentEndStatus;
   readonly summary?: string;
   readonly stopReason?: string;
+  readonly undeliveredSteers: readonly string[];
   readonly usage: TowerAgentUsage;
 }
 
@@ -123,7 +126,8 @@ export interface TowerAgentSession {
   readonly thinkingLevel: TowerThinkingLevel;
   readonly isStreaming: boolean;
   prompt(text: string): Promise<void>;
-  steer(text: string): Promise<void>;
+  steer(text: string): Promise<TowerSteerDisposition>;
+  discardQueued(): readonly string[];
   abort(): Promise<void>;
   subscribe(listener: AgentSessionEventListener): () => void;
   dispose(): void | Promise<void>;

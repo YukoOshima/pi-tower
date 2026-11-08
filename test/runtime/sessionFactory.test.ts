@@ -8,13 +8,16 @@ import {
   fauxProvider,
   fauxToolCall,
   type FauxProviderHandle,
+  type Message,
 } from '@earendil-works/pi-ai';
 import {
   defineTool,
   ModelRegistry,
   ModelRuntime,
+  type AgentSession,
   type ExtensionAPI,
   type ExtensionError,
+  type ExtensionFactory,
 } from '@earendil-works/pi-coding-agent';
 import { Type } from 'typebox';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -29,7 +32,7 @@ import {
   type PiSessionFactoryOptions,
 } from '../../src/runtime/sessionFactory.ts';
 import type { TowerAgentEvent, TowerAgentSession, TowerAgentSpec } from '../../src/runtime/types.ts';
-import { nextEvent } from './fakeSession.ts';
+import { deferred, nextEvent } from './fakeSession.ts';
 
 const FIXTURE_EXTENSION = fileURLToPath(new URL('./fixtures/towerExtension.ts', import.meta.url));
 
@@ -72,6 +75,63 @@ function userExtensionSource(toolName: string): string {
   ].join('\n');
 }
 
+const NATIVE_LEAK_KEY = '__piTowerNativeLeak';
+
+function leakingExtensionSource(): string {
+  return [
+    'export default function (pi) {',
+    "  pi.registerTool({ name: 'TowerInit', label: 'TowerInit', description: 'TowerInit',",
+    "    parameters: { type: 'object', properties: {} },",
+    "    execute: async () => ({ content: [{ type: 'text', text: 'ok' }], details: {} }) });",
+    "  pi.registerProvider('leaked-provider', { baseUrl: 'http://127.0.0.1:9/v1', api: 'openai-completions',",
+    "    apiKey: 'dummy', models: [{ id: 'leaked-1', name: 'leaked-1', reasoning: false, input: ['text'],",
+    '      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 1000, maxTokens: 100 }] });',
+    `  const native = globalThis.${NATIVE_LEAK_KEY};`,
+    '  if (native) pi.registerProvider(native);',
+    "  pi.registerMcpServer('leaked-mcp', { command: 'true', enabled: false });",
+    '}',
+    '',
+  ].join('\n');
+}
+
+function userTexts(context: { readonly messages: readonly Message[] }): string[] {
+  return context.messages.flatMap((message) => {
+    if (message.role !== 'user') return [];
+    if (typeof message.content === 'string') return [message.content.trim()];
+    return [
+      message.content
+        .map((block) => (block.type === 'text' ? block.text : ''))
+        .join('')
+        .trim(),
+    ];
+  });
+}
+
+function untilAborted(signal: AbortSignal | undefined): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal === undefined || signal.aborted) {
+      resolve();
+      return;
+    }
+    signal.addEventListener(
+      'abort',
+      () => {
+        resolve();
+      },
+      { once: true },
+    );
+  });
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function sessionOf(handle: TowerAgentSession): AgentSession {
+  if (!(handle instanceof PiTowerAgentSession)) throw new Error('expected a PiTowerAgentSession');
+  return handle.session;
+}
+
 describe('createPiSessionFactory', () => {
   let sandbox: Sandbox;
   const handles: TowerAgentSession[] = [];
@@ -97,19 +157,29 @@ describe('createPiSessionFactory', () => {
 
   afterEach(async () => {
     await Promise.all(handles.splice(0).map(async (handle) => handle.dispose()));
+    await sandbox.modelRuntime.getAvailable();
     vi.unstubAllEnvs();
     rmSync(sandbox.root, { recursive: true, force: true });
   });
 
-  function factory(options: PiSessionFactoryOptions = {}) {
-    return createPiSessionFactory({ agentDir: sandbox.agentDir, modelRegistry: sandbox.registry, ...options });
+  function factory(options: Partial<PiSessionFactoryOptions> = {}) {
+    return createPiSessionFactory({
+      projectTrusted: false,
+      agentDir: sandbox.agentDir,
+      modelRegistry: sandbox.registry,
+      ...options,
+    });
   }
 
   function spec(overrides: Partial<TowerAgentSpec> = {}): TowerAgentSpec {
     return { name: 'agent-alpha', cwd: sandbox.cwd, prompt: 'Say hello.', model: 'faux-test/faux-1', ...overrides };
   }
 
-  async function open(options: PiSessionFactoryOptions, overrides: Partial<TowerAgentSpec> = {}, agentId = 'agent-t1') {
+  async function open(
+    options: Partial<PiSessionFactoryOptions>,
+    overrides: Partial<TowerAgentSpec> = {},
+    agentId = 'agent-t1',
+  ) {
     const handle = await factory(options)({ agentId, spec: spec(overrides) });
     handles.push(handle);
     expect(handle).toBeInstanceOf(PiTowerAgentSession);
@@ -161,7 +231,7 @@ describe('createPiSessionFactory', () => {
   });
 
   it('reuses the parent model runtime: models registered only there resolve', async () => {
-    const isolated = createPiSessionFactory({ agentDir: sandbox.agentDir });
+    const isolated = createPiSessionFactory({ projectTrusted: false, agentDir: sandbox.agentDir });
 
     await expect(isolated({ agentId: 'agent-t2', spec: spec() })).rejects.toThrow(
       'unknown model "faux-test/faux-1"',
@@ -192,6 +262,46 @@ describe('createPiSessionFactory', () => {
     expect(session.modelRuntime).not.toBe(sandbox.modelRuntime);
   });
 
+  it('reports once when a parent registry was given but its model runtime cannot be reused', async () => {
+    writeFileSync(
+      join(sandbox.agentDir, 'models.json'),
+      JSON.stringify({
+        providers: {
+          'local-test': {
+            baseUrl: 'http://127.0.0.1:9/v1',
+            api: 'openai-completions',
+            apiKey: 'dummy',
+            models: [{ id: 'local-1' }],
+          },
+        },
+      }),
+    );
+    const diagnostics: string[] = [];
+    const opaqueRegistry: ModelRegistry = Object.create(ModelRegistry.prototype);
+    const create = factory({
+      modelRegistry: opaqueRegistry,
+      onDiagnostic: (message) => {
+        diagnostics.push(message);
+      },
+    });
+
+    handles.push(await create({ agentId: 'agent-d1', spec: spec({ model: 'local-test/local-1' }) }));
+    handles.push(await create({ agentId: 'agent-d2', spec: spec({ model: 'local-test/local-1' }) }));
+
+    expect(diagnostics).toEqual([
+      `the parent model registry exposes no reusable model runtime — tower agents use a model runtime loaded from ${sandbox.agentDir}, so the parent session's runtime-only API keys and extension-registered providers are not available to them`,
+    ]);
+    const quiet: string[] = [];
+    handles.push(
+      await factory({
+        onDiagnostic: (message) => {
+          quiet.push(message);
+        },
+      })({ agentId: 'agent-d3', spec: spec() }),
+    );
+    expect(quiet).toEqual([]);
+  });
+
   it('refuses unknown models, providers without credentials, +/- tool modifiers and missing cwds', async () => {
     vi.stubEnv('ANTHROPIC_API_KEY', '');
     const create = factory();
@@ -211,6 +321,30 @@ describe('createPiSessionFactory', () => {
     await expect(
       create({ agentId: 'agent-x5', spec: spec({ cwd: join(sandbox.root, 'missing-worktree') }) }),
     ).rejects.toThrow('is not a directory');
+  });
+
+  it('loads project-local extensions only while the project is trusted, re-reading trust per spawn', async () => {
+    mkdirSync(join(sandbox.cwd, '.pi', 'extensions'), { recursive: true });
+    writeFileSync(join(sandbox.cwd, '.pi', 'extensions', 'project-ext.ts'), userExtensionSource('ProjectTool'));
+    const tools = { tools: ['read', 'ProjectTool'] };
+
+    const untrusted = await open({ projectTrusted: false }, tools, 'agent-p1');
+    expect(untrusted.resourceLoader.getExtensions().extensions).toEqual([]);
+    expect(untrusted.getActiveToolNames()).toEqual(['read']);
+
+    let trusted = false;
+    const create = factory({ projectTrusted: () => trusted });
+    const before = await create({ agentId: 'agent-p2', spec: spec(tools) });
+    handles.push(before);
+    trusted = true;
+    const after = await create({ agentId: 'agent-p3', spec: spec(tools) });
+    handles.push(after);
+
+    expect(sessionOf(before).getActiveToolNames()).toEqual(['read']);
+    expect(sessionOf(after).getActiveToolNames()).toEqual(['read', 'ProjectTool']);
+    expect(sessionOf(after).resourceLoader.getExtensions().extensions.map((extension) => extension.path)).toEqual([
+      join(sandbox.cwd, '.pi', 'extensions', 'project-ext.ts'),
+    ]);
   });
 
   it('keeps user extensions but drops extensions under the excluded roots', async () => {
@@ -235,7 +369,7 @@ describe('createPiSessionFactory', () => {
     expect(session.getActiveToolNames()).not.toContain('TowerInit');
   });
 
-  it('excludes extensions from this package root by default, through symlinks too', async () => {
+  it('excludes this package by root (through symlinks too) and by package name, each on its own', async () => {
     expect(JSON.parse(readFileSync(join(PI_TOWER_PACKAGE_ROOT, 'package.json'), 'utf8'))).toMatchObject({
       name: 'pi-tower',
     });
@@ -247,17 +381,77 @@ describe('createPiSessionFactory', () => {
       JSON.stringify({ retry: { enabled: false }, extensions: [FIXTURE_EXTENSION] }),
     );
 
-    const included = await open(
-      { excludeExtensionRoots: [] },
-      { tools: ['read', 'TowerFixtureInit', 'UserTool'] },
-      'agent-t3',
-    );
+    const tools = { tools: ['read', 'TowerFixtureInit', 'UserTool'] };
+
+    const included = await open({ excludeExtensionRoots: [], excludePackageNames: [] }, tools, 'agent-t3');
     expect(included.getActiveToolNames()).toContain('TowerFixtureInit');
 
-    const session = await open({}, { tools: ['read', 'TowerFixtureInit', 'UserTool'] }, 'agent-t4');
-    const paths = session.resourceLoader.getExtensions().extensions.map((extension) => extension.path);
-    expect(paths).toEqual([join(sandbox.agentDir, 'extensions', 'user-ext.ts')]);
-    expect(session.getActiveToolNames()).toEqual(['read', 'UserTool']);
+    for (const [options, agentId] of [
+      [{ excludePackageNames: [] }, 'agent-t4'],
+      [{ excludeExtensionRoots: [] }, 'agent-t5'],
+      [{}, 'agent-t6'],
+    ] as const) {
+      const session = await open(options, tools, agentId);
+      const paths = session.resourceLoader.getExtensions().extensions.map((extension) => extension.path);
+      expect(paths, agentId).toEqual([join(sandbox.agentDir, 'extensions', 'user-ext.ts')]);
+      expect(session.getActiveToolNames(), agentId).toEqual(['read', 'UserTool']);
+    }
+  });
+
+  it('drops provider, native provider and MCP registrations of excluded extensions so nothing leaks into the parent runtime', async () => {
+    const fakeTower = join(sandbox.root, 'fake-tower');
+    mkdirSync(join(fakeTower, 'src'), { recursive: true });
+    writeFileSync(join(fakeTower, 'src', 'index.ts'), leakingExtensionSource());
+    writeFileSync(
+      join(sandbox.agentDir, 'settings.json'),
+      JSON.stringify({ retry: { enabled: false }, extensions: [join(fakeTower, 'src', 'index.ts')] }),
+    );
+    const globals = globalThis as Record<string, unknown>;
+    globals[NATIVE_LEAK_KEY] = fauxProvider({ provider: 'leaked-native', models: [{ id: 'native-1' }] }).provider;
+    try {
+      const excluded = await open({ excludeExtensionRoots: [fakeTower] }, {}, 'agent-l1');
+      expect(excluded.resourceLoader.getExtensions().extensions).toEqual([]);
+      expect(excluded.resourceLoader.getExtensions().runtime.mcpServers.list()).toEqual([]);
+      expect(sandbox.modelRuntime.getModel('leaked-provider', 'leaked-1')).toBeUndefined();
+      expect(sandbox.modelRuntime.getModel('leaked-native', 'native-1')).toBeUndefined();
+
+      const control = await open({ excludeExtensionRoots: [] }, {}, 'agent-l2');
+      expect(control.resourceLoader.getExtensions().runtime.mcpServers.list().map((server) => server.name)).toEqual([
+        'leaked-mcp',
+      ]);
+      expect(sandbox.modelRuntime.getModel('leaked-provider', 'leaked-1')).toBeDefined();
+      expect(sandbox.modelRuntime.getModel('leaked-native', 'native-1')).toBeDefined();
+    } finally {
+      delete globals[NATIVE_LEAK_KEY];
+    }
+  });
+
+  it('excludes a second pi-tower copy at another path by its package.json name', async () => {
+    const otherCheckout = join(sandbox.root, 'other-checkout');
+    mkdirSync(join(otherCheckout, 'src', 'nested'), { recursive: true });
+    writeFileSync(join(otherCheckout, 'package.json'), JSON.stringify({ name: 'pi-tower', version: '0.0.1' }));
+    writeFileSync(join(otherCheckout, 'src', 'nested', 'index.ts'), userExtensionSource('TowerInit'));
+    const unrelated = join(sandbox.root, 'unrelated-package');
+    mkdirSync(join(unrelated, 'src'), { recursive: true });
+    writeFileSync(join(unrelated, 'package.json'), JSON.stringify({ name: 'pi-tower-helpers' }));
+    writeFileSync(join(unrelated, 'src', 'index.ts'), userExtensionSource('HelperTool'));
+    writeFileSync(
+      join(sandbox.agentDir, 'settings.json'),
+      JSON.stringify({
+        retry: { enabled: false },
+        extensions: [join(otherCheckout, 'src', 'nested', 'index.ts'), join(unrelated, 'src', 'index.ts')],
+      }),
+    );
+    const tools = { tools: ['read', 'TowerInit', 'HelperTool'] };
+
+    const session = await open({}, tools, 'agent-n1');
+    expect(session.resourceLoader.getExtensions().extensions.map((extension) => extension.path)).toEqual([
+      join(unrelated, 'src', 'index.ts'),
+    ]);
+    expect(session.getActiveToolNames()).toEqual(['read', 'HelperTool']);
+
+    const allowed = await open({ excludePackageNames: [] }, tools, 'agent-n2');
+    expect(allowed.getActiveToolNames()).toEqual(['read', 'TowerInit', 'HelperTool']);
   });
 
   it('binds extensions on creation and emits session_shutdown on dispose', async () => {
@@ -380,6 +574,164 @@ describe('createPiSessionFactory', () => {
       expect(await finished).toMatchObject({ status: 'idle', summary: 'SAW-STEER' });
       expect(runtime.output(agentId)?.recentToolCalls).toMatchObject([{ name: 'bash', isError: false }]);
       expect(await runtime.steer(agentId, 'after the run')).toBe('idle');
+    });
+
+    for (const ending of ['stop', 'timeout'] as const) {
+      it(`drops a steer sent during a model request that ends by ${ending}: the resumed run never sees it`, async () => {
+        const seen: string[][] = [];
+        sandbox.faux.setResponses([
+          async (_context, options) => {
+            await untilAborted(options?.signal);
+            return fauxAssistantMessage('never delivered');
+          },
+          (context) => {
+            seen.push(userTexts(context));
+            return fauxAssistantMessage('RESUMED-CLEAN');
+          },
+        ]);
+        let finished = nextEvent(runtime, 'finished');
+        const agentId = await spawned({
+          prompt: 'FIRST PROMPT',
+          ...(ending === 'timeout' ? { timeoutMs: 400 } : {}),
+        });
+        await vi.waitFor(() => {
+          expect(sandbox.faux.state.callCount).toBe(1);
+        });
+
+        expect(await runtime.steer(agentId, 'STALE-STEER-1 urgent directive')).toBe('steered');
+        expect(await runtime.steer(agentId, '/STALE-STEER-2 looks like a command')).toBe('steered');
+        if (ending === 'stop') expect(await runtime.stop(agentId)).toBe('stopped');
+
+        expect(await finished).toMatchObject({
+          status: ending === 'stop' ? 'stopped' : 'timed_out',
+          undeliveredSteers: ['STALE-STEER-1 urgent directive', '/STALE-STEER-2 looks like a command'],
+        });
+        finished = nextEvent(runtime, 'finished');
+        expect((await runtime.resume(agentId, 'RESUME PROMPT')).ok).toBe(true);
+        expect(await finished).toMatchObject({ status: 'idle', summary: 'RESUMED-CLEAN', undeliveredSteers: [] });
+        expect(seen).toEqual([['FIRST PROMPT', 'RESUME PROMPT']]);
+      });
+    }
+
+    it('reports idle for a steer during a slow agent_settled handler, and the next run never sees it', async () => {
+      const settling = deferred();
+      const seen: string[][] = [];
+      sandbox.faux.setResponses([
+        fauxAssistantMessage('FIRST-DONE'),
+        (context) => {
+          seen.push(userTexts(context));
+          return fauxAssistantMessage('SECOND-DONE');
+        },
+      ]);
+      let slowed = false;
+      const slowSettle: ExtensionFactory = (pi) => {
+        pi.on('agent_settled', async () => {
+          if (slowed) return;
+          slowed = true;
+          settling.resolve();
+          await delay(200);
+        });
+      };
+      let finished = nextEvent(runtime, 'finished');
+      const agentId = await spawned({ prompt: 'FIRST PROMPT 2', extensionFactories: [slowSettle] });
+      await settling.promise;
+
+      expect(runtime.get(agentId)?.status).toBe('running');
+      expect(await runtime.steer(agentId, 'LATE-STEER-2 directive')).toBe('idle');
+      expect(await finished).toMatchObject({ status: 'idle', summary: 'FIRST-DONE', undeliveredSteers: [] });
+
+      finished = nextEvent(runtime, 'finished');
+      expect((await runtime.resume(agentId, 'RESUME PROMPT 2')).ok).toBe(true);
+      expect(await finished).toMatchObject({ status: 'idle', summary: 'SECOND-DONE' });
+      expect(seen).toEqual([['FIRST PROMPT 2', 'RESUME PROMPT 2']]);
+    });
+
+    it('waits for a steer held by a slow input handler past the end of the run, then drops it', async () => {
+      const inputGate = deferred();
+      const seen: string[][] = [];
+      sandbox.faux.setResponses([
+        fauxAssistantMessage(fauxToolCall('bash', { command: 'sleep 0.2' })),
+        fauxAssistantMessage('FIRST-DONE'),
+        (context) => {
+          seen.push(userTexts(context));
+          return fauxAssistantMessage('SECOND-DONE');
+        },
+      ]);
+      const slowInput: ExtensionFactory = (pi) => {
+        pi.on('input', async (event) => {
+          if (event.text.includes('SLOW-STEER-3')) await inputGate.promise;
+          return { action: 'continue' };
+        });
+      };
+      let finished = nextEvent(runtime, 'finished');
+      const agentId = await spawned({ prompt: 'FIRST PROMPT 3', extensionFactories: [slowInput] });
+      await vi.waitFor(() => {
+        expect(runtime.output(agentId)?.recentToolCalls).toHaveLength(1);
+      });
+      const steering = runtime.steer(agentId, 'SLOW-STEER-3 directive');
+      expect(await finished).toMatchObject({ status: 'idle', summary: 'FIRST-DONE', undeliveredSteers: [] });
+
+      finished = nextEvent(runtime, 'finished');
+      const resuming = runtime.resume(agentId, 'RESUME PROMPT 3');
+      inputGate.resolve();
+
+      expect(await steering).toBe('idle');
+      expect((await resuming).ok).toBe(true);
+      expect(await finished).toMatchObject({ status: 'idle', summary: 'SECOND-DONE' });
+      expect(seen).toEqual([['FIRST PROMPT 3', 'RESUME PROMPT 3']]);
+    });
+
+    it('reports handled when an extension input handler consumes the steer, and the model never sees it', async () => {
+      const seen: string[][] = [];
+      sandbox.faux.setResponses([
+        fauxAssistantMessage(fauxToolCall('bash', { command: 'sleep 0.3' })),
+        (context) => {
+          seen.push(userTexts(context));
+          return fauxAssistantMessage('DONE');
+        },
+      ]);
+      const swallow: ExtensionFactory = (pi) => {
+        pi.on('input', (event) => (event.text.includes('SWALLOW') ? { action: 'handled' } : { action: 'continue' }));
+      };
+      const finished = nextEvent(runtime, 'finished');
+      const agentId = await spawned({ prompt: 'FIRST PROMPT 4', extensionFactories: [swallow] });
+      await vi.waitFor(() => {
+        expect(runtime.output(agentId)?.recentToolCalls).toHaveLength(1);
+      });
+
+      expect(await runtime.steer(agentId, 'SWALLOW this directive')).toBe('handled');
+      expect(await runtime.steer(agentId, 'KEEP this directive')).toBe('steered');
+
+      expect(await finished).toMatchObject({ status: 'idle', summary: 'DONE', undeliveredSteers: [] });
+      expect(seen).toEqual([['FIRST PROMPT 4', 'KEEP this directive']]);
+    });
+
+    it('delivers steers that look like an extension command or a prompt template verbatim', async () => {
+      mkdirSync(join(sandbox.agentDir, 'prompts'), { recursive: true });
+      writeFileSync(join(sandbox.agentDir, 'prompts', 'review.md'), 'TEMPLATE BODY MUST NOT APPEAR');
+      const seen: string[][] = [];
+      sandbox.faux.setResponses([
+        fauxAssistantMessage(fauxToolCall('bash', { command: 'sleep 0.3' })),
+        fauxAssistantMessage('NEXT'),
+        (context) => {
+          seen.push(userTexts(context));
+          return fauxAssistantMessage('DONE');
+        },
+      ]);
+      const command: ExtensionFactory = (pi) => {
+        pi.registerCommand('deploy', { description: 'deploy', handler: async () => undefined });
+      };
+      const finished = nextEvent(runtime, 'finished');
+      const agentId = await spawned({ prompt: 'FIRST PROMPT 5', extensionFactories: [command] });
+      await vi.waitFor(() => {
+        expect(runtime.output(agentId)?.recentToolCalls).toHaveLength(1);
+      });
+
+      expect(await runtime.steer(agentId, '/deploy the branch now')).toBe('steered');
+      expect(await runtime.steer(agentId, '/review the diff')).toBe('steered');
+
+      expect(await finished).toMatchObject({ status: 'idle', summary: 'DONE', undeliveredSteers: [] });
+      expect(seen).toEqual([['FIRST PROMPT 5', '/deploy the branch now', '/review the diff']]);
     });
 
     it('stops a running session mid-tool and records the user stop', async () => {

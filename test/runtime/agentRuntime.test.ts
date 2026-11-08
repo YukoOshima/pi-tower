@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { TowerAgentRuntime } from '../../src/runtime/agentRuntime.ts';
 import { TOWER_SPAWN_PAUSE_MS, TowerRateLimiter } from '../../src/runtime/rateLimit.ts';
 import type { TowerAgentEvent, TowerAgentSpec, TowerRunStartResult } from '../../src/runtime/types.ts';
-import { FakeSessionFactory, nextEvent, sequentialIds } from './fakeSession.ts';
+import { deferred, FakeSessionFactory, nextEvent, sequentialIds } from './fakeSession.ts';
 
 function spec(overrides: Partial<TowerAgentSpec> = {}): TowerAgentSpec {
   return {
@@ -103,6 +103,7 @@ describe('TowerAgentRuntime', () => {
         status: 'idle',
         summary: 'Mission complete.',
         stopReason: undefined,
+        undeliveredSteers: [],
         usage: { input: 30, output: 12, cacheRead: 3, cacheWrite: 0, totalTokens: 45, cost: 0.75 },
         at: 4_000,
       });
@@ -217,6 +218,34 @@ describe('TowerAgentRuntime', () => {
       await capped.disposeAll();
     });
 
+    it('allocates ids before taking a slot, so a failing id allocation cannot leak one', async () => {
+      let agents = 0;
+      const colliding = new TowerAgentRuntime({
+        sessionFactory: factory.create,
+        limiter,
+        createId: (prefix) => {
+          if (prefix === 'task') return 'task-fixed';
+          agents += 1;
+          return `agent-${String(agents)}`;
+        },
+      });
+      const { agentId } = started(await colliding.spawn(spec()));
+      expect(limiter.snapshot().inflight).toBe(1);
+
+      await expect(colliding.spawn(spec({ name: 'agent-beta' }))).rejects.toThrow(
+        'could not allocate a unique tower task id',
+      );
+      expect(limiter.snapshot().inflight).toBe(1);
+      const finished = nextEvent(colliding, 'finished');
+      factory.session(agentId).settle();
+      await finished;
+      await expect(colliding.resume(agentId, 'continue')).rejects.toThrow(
+        'could not allocate a unique tower task id',
+      );
+      expect(limiter.snapshot().inflight).toBe(0);
+      await colliding.disposeAll();
+    });
+
     it('releases the slot and disposes the session when shut down during creation', async () => {
       let openGate: () => void = () => undefined;
       factory.gate = new Promise<void>((resolve) => {
@@ -266,6 +295,109 @@ describe('TowerAgentRuntime', () => {
 
     it('reports missing for unknown agents', async () => {
       expect(await runtime.steer('agent-404', 'hello')).toBe('missing');
+    });
+
+    it('reports idle when the session stopped streaming before the run is finalized', async () => {
+      const { agentId } = started(await runtime.spawn(spec()));
+      const session = factory.session(agentId);
+
+      session.isStreaming = false;
+
+      expect(runtime.get(agentId)?.status).toBe('running');
+      expect(await runtime.steer(agentId, 'nobody will read this')).toBe('idle');
+      expect(session.steers).toEqual([]);
+    });
+
+    it('reports handled when an extension consumed the steered text', async () => {
+      const { agentId } = started(await runtime.spawn(spec()));
+      const session = factory.session(agentId);
+      session.steerDisposition = 'handled';
+
+      expect(await runtime.steer(agentId, 'intercepted')).toBe('handled');
+      expect(session.queued).toEqual([]);
+    });
+
+    it('never throws: a session that refuses the text reports handled and a diagnostic', async () => {
+      const diagnostics: string[] = [];
+      const diagnosed = new TowerAgentRuntime({
+        sessionFactory: factory.create,
+        createId: sequentialIds(),
+        onDiagnostic: (message) => {
+          diagnostics.push(message);
+        },
+      });
+      const { agentId } = started(await diagnosed.spawn(spec()));
+      factory.session(agentId).steerError = new Error('Extension command "/deploy" cannot be queued.');
+
+      expect(await diagnosed.steer(agentId, '/deploy now')).toBe('handled');
+      expect(diagnostics).toEqual([
+        `steering tower agent "agent-alpha" (${agentId}) failed: Extension command "/deploy" cannot be queued.`,
+      ]);
+      await diagnosed.disposeAll();
+    });
+
+    it('discards a steer that pi queued only after the run ended and reports idle', async () => {
+      const { agentId } = started(await runtime.spawn(spec()));
+      const session = factory.session(agentId);
+      const gate = deferred();
+      session.steerGate = gate.promise;
+      const steering = runtime.steer(agentId, 'LATE directive');
+      const finished = nextEvent(runtime, 'finished');
+      session.settle();
+      expect((await finished).undeliveredSteers).toEqual([]);
+
+      gate.resolve();
+
+      expect(await steering).toBe('idle');
+      expect(session.queued).toEqual([]);
+    });
+
+    it('reports steers still queued when the run finalizes and never carries them into the next run', async () => {
+      const { agentId, taskId } = started(await runtime.spawn(spec()));
+      const session = factory.session(agentId);
+      expect(await runtime.steer(agentId, 'STALE urgent directive')).toBe('steered');
+
+      expect(await runtime.stop(agentId)).toBe('stopped');
+
+      expect(events.at(-1)).toMatchObject({
+        type: 'finished',
+        taskId,
+        status: 'stopped',
+        undeliveredSteers: ['STALE urgent directive'],
+      });
+      expect(session.queued).toEqual([]);
+      started(await runtime.resume(agentId, 'RESUME prompt'));
+      expect(session.queued).toEqual([]);
+      expect(session.delivered).toEqual([]);
+    });
+
+    it('does not report steers that reached the model as undelivered', async () => {
+      const { agentId } = started(await runtime.spawn(spec()));
+      const session = factory.session(agentId);
+      expect(await runtime.steer(agentId, 'read your inbox')).toBe('steered');
+      session.deliverQueued();
+      const finished = nextEvent(runtime, 'finished');
+
+      session.settle();
+
+      expect((await finished).undeliveredSteers).toEqual([]);
+      expect(session.delivered).toEqual(['read your inbox']);
+    });
+
+    it('moves other steers discarded by a late steer into the finished report', async () => {
+      const { agentId } = started(await runtime.spawn(spec()));
+      const session = factory.session(agentId);
+      expect(await runtime.steer(agentId, 'EARLY steer')).toBe('steered');
+      const gate = deferred();
+      session.steerGate = gate.promise;
+      const steering = runtime.steer(agentId, 'LATE steer');
+      session.beginSettling();
+      gate.resolve();
+
+      expect(await steering).toBe('idle');
+      const finished = nextEvent(runtime, 'finished');
+      session.resolvePrompt();
+      expect((await finished).undeliveredSteers).toEqual(['EARLY steer']);
     });
 
     it('accepts the current task id and treats an older task id as idle', async () => {
@@ -376,6 +508,56 @@ describe('TowerAgentRuntime', () => {
       expect(result.reason).toContain('new tower spawns paused');
       expect(limiter.snapshot().inflight).toBe(0);
     });
+
+    it('waits for an in-flight steer so a late steer can never land in the resumed run', async () => {
+      const { agentId } = started(await runtime.spawn(spec()));
+      const session = factory.session(agentId);
+      const gate = deferred();
+      session.steerGate = gate.promise;
+      let steerSettled = false;
+      const steering = runtime.steer(agentId, 'SLOW directive').then((result) => {
+        steerSettled = true;
+        return result;
+      });
+      const finished = nextEvent(runtime, 'finished');
+      session.settle();
+      await finished;
+      const atPrompt: Array<{ steerSettled: boolean; queued: string[] }> = [];
+      const prompt = session.prompt.bind(session);
+      session.prompt = (text) => {
+        atPrompt.push({ steerSettled, queued: [...session.queued] });
+        return prompt(text);
+      };
+
+      const resuming = runtime.resume(agentId, 'RESUME prompt');
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(session.prompts).toHaveLength(1);
+      gate.resolve();
+
+      expect(await steering).toBe('idle');
+      expect((await resuming).ok).toBe(true);
+      expect(atPrompt).toEqual([{ steerSettled: true, queued: [] }]);
+      expect(session.prompts.at(-1)).toBe('RESUME prompt');
+    });
+
+    it('refuses to resume while a steer is still stuck in the session past the grace period', async () => {
+      const { agentId } = started(await runtime.spawn(spec()));
+      const session = factory.session(agentId);
+      session.steerGate = new Promise<void>(() => undefined);
+      void runtime.steer(agentId, 'STUCK directive');
+      const finished = nextEvent(runtime, 'finished');
+      session.settle();
+      await finished;
+
+      const result = await runtime.resume(agentId, 'RESUME prompt');
+
+      expect(result).toEqual({
+        ok: false,
+        reason: `tower agent "agent-alpha" (${agentId}) is still processing a steered message — retry shortly`,
+      });
+      expect(session.prompts).toHaveLength(1);
+      expect(limiter.snapshot().inflight).toBe(0);
+    });
   });
 
   describe('stop', () => {
@@ -435,6 +617,46 @@ describe('TowerAgentRuntime', () => {
       await Promise.resolve();
       expect(events.filter((event) => event.type === 'finished')).toHaveLength(1);
       expect((await runtime.resume(agentId, 'continue')).ok).toBe(true);
+    });
+
+    it('keeps a run that is completing naturally idle instead of relabelling it stopped', async () => {
+      const { agentId } = started(await runtime.spawn(spec()));
+      const session = factory.session(agentId);
+      session.reply('All done.');
+      session.beginSettling();
+
+      const stopping = runtime.stop(agentId);
+      session.resolvePrompt();
+
+      expect(await stopping).toBe('idle');
+      expect(session.abortCalls).toBe(0);
+      expect(runtime.get(agentId)).toMatchObject({ status: 'idle', stopReason: undefined });
+      expect(events.at(-1)).toMatchObject({ type: 'finished', status: 'idle', summary: 'All done.' });
+    });
+
+    it('still stops a run whose natural completion does not finish within the grace period', async () => {
+      const { agentId } = started(await runtime.spawn(spec()));
+      const session = factory.session(agentId);
+      session.beginSettling();
+
+      expect(await runtime.stop(agentId)).toBe('stopped');
+
+      expect(session.abortCalls).toBe(1);
+      expect(runtime.get(agentId)).toMatchObject({ status: 'stopped', stopReason: 'user' });
+    });
+
+    it('stops a run that has not started streaming yet', async () => {
+      factory.configure = (session) => {
+        session.startsStreaming = false;
+      };
+      const { agentId } = started(await runtime.spawn(spec()));
+      const session = factory.session(agentId);
+      expect(session.isStreaming).toBe(false);
+
+      expect(await runtime.stop(agentId)).toBe('stopped');
+
+      expect(session.abortCalls).toBe(1);
+      expect(runtime.get(agentId)).toMatchObject({ status: 'stopped', stopReason: 'user' });
     });
   });
 

@@ -15,6 +15,7 @@ import type {
   TowerAgentSpec,
   TowerAgentStatus,
   TowerRunStartResult,
+  TowerSteerDisposition,
   TowerSteerResult,
   TowerStopResult,
 } from './types.ts';
@@ -34,6 +35,7 @@ export interface TowerAgentRuntimeOptions {
   readonly now?: () => number;
   readonly createId?: (prefix: 'agent' | 'task') => string;
   readonly onListenerError?: (error: unknown, event: TowerAgentEvent) => void;
+  readonly onDiagnostic?: (message: string) => void;
 }
 
 interface MutableUsage {
@@ -63,11 +65,13 @@ interface AgentRun {
   readonly taskId: string;
   readonly startedAt: number;
   readonly usage: MutableUsage;
+  readonly undelivered: string[];
   readonly done: Promise<void>;
   readonly resolveDone: () => void;
   stopRequest?: StopRequest;
   lastText?: string;
   lastError?: string;
+  streamed: boolean;
   settled: boolean;
   abortedBySession: boolean;
   finished: boolean;
@@ -83,6 +87,7 @@ interface AgentRecord {
   readonly taskIds: string[];
   readonly usage: MutableUsage;
   readonly toolCalls: ToolCallState[];
+  readonly pendingSteers: Set<Promise<SteerOutcome>>;
   unsubscribe: () => void;
   run: AgentRun;
   status: TowerAgentStatus;
@@ -103,6 +108,10 @@ interface RunOutcome {
   readonly stopReason?: string;
 }
 
+type SteerOutcome =
+  | { readonly disposition: TowerSteerDisposition }
+  | { readonly error: unknown };
+
 export class TowerAgentRuntime {
   readonly limiter: TowerRateLimiter;
   private readonly sessionFactory: TowerAgentSessionFactory;
@@ -111,9 +120,10 @@ export class TowerAgentRuntime {
   private readonly now: () => number;
   private readonly createId: (prefix: 'agent' | 'task') => string;
   private readonly onListenerError: ((error: unknown, event: TowerAgentEvent) => void) | undefined;
+  private readonly onDiagnostic: ((message: string) => void) | undefined;
   private readonly agents = new Map<string, AgentRecord>();
   private readonly taskOwners = new Map<string, string>();
-  private readonly pendingAgentIds = new Set<string>();
+  private readonly reservedIds = new Set<string>();
   private readonly listeners = new Set<TowerAgentEventListener>();
   private disposed = false;
 
@@ -131,6 +141,7 @@ export class TowerAgentRuntime {
     this.stopGraceMs = options.stopGraceMs ?? TOWER_AGENT_STOP_GRACE_MS;
     this.createId = options.createId ?? randomId;
     this.onListenerError = options.onListenerError;
+    this.onDiagnostic = options.onDiagnostic;
   }
 
   onEvent(listener: TowerAgentEventListener): () => void {
@@ -144,78 +155,69 @@ export class TowerAgentRuntime {
     if (this.disposed) return { ok: false, reason: RUNTIME_SHUT_DOWN };
     const problem = specProblem(spec);
     if (problem !== undefined) return { ok: false, reason: problem };
-    const gate = this.limiter.acquire();
-    if (!gate.ok) return gate;
-    const agentId = this.nextId('agent');
-    this.pendingAgentIds.add(agentId);
-    let session: TowerAgentSession;
+    const reserved: string[] = [];
     try {
-      session = await this.sessionFactory({ agentId, spec });
-    } catch (error) {
-      this.limiter.release();
-      return { ok: false, reason: `tower spawn failed: ${errorMessage(error)}` };
+      const agentId = this.reserveId('agent', reserved);
+      const taskId = this.reserveId('task', reserved);
+      return await this.startAgent(spec, agentId, taskId);
     } finally {
-      this.pendingAgentIds.delete(agentId);
+      for (const id of reserved) this.reservedIds.delete(id);
     }
-    if (this.disposed) {
-      this.limiter.release();
-      await settle(() => session.dispose());
-      return { ok: false, reason: RUNTIME_SHUT_DOWN };
-    }
-    const run = this.newRun();
-    const record: AgentRecord = {
-      agentId,
-      spec,
-      session,
-      createdAt: run.startedAt,
-      taskIds: [],
-      usage: emptyUsage(),
-      toolCalls: [],
-      unsubscribe: () => undefined,
-      run,
-      status: 'running',
-      disposed: false,
-    };
-    this.agents.set(agentId, record);
-    record.unsubscribe = session.subscribe((event) => {
-      this.onSessionEvent(record, event);
-    });
-    this.launch(record, run, spec.prompt, false);
-    return { ok: true, agentId, taskId: run.taskId };
   }
 
   async resume(id: string, prompt: string): Promise<TowerRunStartResult> {
-    if (this.disposed) return { ok: false, reason: RUNTIME_SHUT_DOWN };
     const found = this.lookup(id);
-    if (found === undefined) return { ok: false, reason: `unknown tower agent "${id}"` };
+    if (found === undefined) {
+      return { ok: false, reason: this.disposed ? RUNTIME_SHUT_DOWN : `unknown tower agent "${id}"` };
+    }
     const { record } = found;
-    if (record.status === 'running') {
-      return {
-        ok: false,
-        reason: `tower agent ${describeAgent(record)} is still running task ${record.run.taskId} — steer it or stop it instead of resuming`,
-      };
-    }
-    if (record.session.isStreaming) {
-      return {
-        ok: false,
-        reason: `tower agent ${describeAgent(record)} is still winding down its previous run — retry shortly`,
-      };
-    }
+    let refusal = this.resumeRefusal(record);
+    if (refusal !== undefined) return { ok: false, reason: refusal };
     if (prompt.trim().length === 0) return { ok: false, reason: 'resume prompt must not be empty' };
-    const gate = this.limiter.acquire();
-    if (!gate.ok) return gate;
-    const run = this.newRun();
-    this.launch(record, run, prompt, true);
-    return { ok: true, agentId: record.agentId, taskId: run.taskId };
+    if (record.pendingSteers.size > 0) {
+      const drained = await settledWithin(Promise.allSettled([...record.pendingSteers]), this.stopGraceMs);
+      if (!drained) {
+        return {
+          ok: false,
+          reason: `tower agent ${describeAgent(record)} is still processing a steered message — retry shortly`,
+        };
+      }
+      refusal = this.resumeRefusal(record);
+      if (refusal !== undefined) return { ok: false, reason: refusal };
+    }
+    const reserved: string[] = [];
+    try {
+      const taskId = this.reserveId('task', reserved);
+      const gate = this.limiter.acquire();
+      if (!gate.ok) return gate;
+      this.launch(record, this.newRun(taskId), prompt, true);
+      return { ok: true, agentId: record.agentId, taskId };
+    } finally {
+      for (const reservedId of reserved) this.reservedIds.delete(reservedId);
+    }
   }
 
   async steer(id: string, text: string): Promise<TowerSteerResult> {
     const found = this.lookup(id);
     if (found === undefined) return 'missing';
+    const { record } = found;
     const run = activeRun(found);
-    if (run === undefined || run.settled || run.stopRequest !== undefined) return 'idle';
-    await found.record.session.steer(text);
-    return 'steered';
+    if (run === undefined || !acceptsSteer(record, run)) return 'idle';
+    const delivery = deliverSteer(record.session, text);
+    record.pendingSteers.add(delivery);
+    const outcome = await delivery;
+    record.pendingSteers.delete(delivery);
+    if (!acceptsSteer(record, run)) {
+      this.discardQueued(record, run, text);
+      return 'idle';
+    }
+    if ('error' in outcome) {
+      this.diagnose(
+        `steering tower agent ${describeAgent(record)} failed: ${errorMessage(outcome.error)}`,
+      );
+      return 'handled';
+    }
+    return outcome.disposition === 'queued' ? 'steered' : 'handled';
   }
 
   async stop(id: string, reason = 'user'): Promise<TowerStopResult> {
@@ -223,6 +225,10 @@ export class TowerAgentRuntime {
     if (found === undefined) return 'missing';
     const run = activeRun(found);
     if (run === undefined) return 'idle';
+    if (endingNaturally(found.record, run)) {
+      await settledWithin(run.done, this.stopGraceMs);
+      if (run.finished) return 'idle';
+    }
     this.requestStop(found.record, run, { status: 'stopped', reason });
     await run.done;
     return 'stopped';
@@ -273,6 +279,60 @@ export class TowerAgentRuntime {
     await Promise.all([...this.agents.values()].map((record) => this.disposeRecord(record, reason)));
   }
 
+  private async startAgent(
+    spec: TowerAgentSpec,
+    agentId: string,
+    taskId: string,
+  ): Promise<TowerRunStartResult> {
+    const gate = this.limiter.acquire();
+    if (!gate.ok) return gate;
+    let session: TowerAgentSession;
+    try {
+      session = await this.sessionFactory({ agentId, spec });
+    } catch (error) {
+      this.limiter.release();
+      return { ok: false, reason: `tower spawn failed: ${errorMessage(error)}` };
+    }
+    if (this.disposed) {
+      this.limiter.release();
+      await settle(() => session.dispose());
+      return { ok: false, reason: RUNTIME_SHUT_DOWN };
+    }
+    const run = this.newRun(taskId);
+    const record: AgentRecord = {
+      agentId,
+      spec,
+      session,
+      createdAt: run.startedAt,
+      taskIds: [],
+      usage: emptyUsage(),
+      toolCalls: [],
+      pendingSteers: new Set(),
+      unsubscribe: () => undefined,
+      run,
+      status: 'running',
+      disposed: false,
+    };
+    this.agents.set(agentId, record);
+    record.unsubscribe = session.subscribe((event) => {
+      this.onSessionEvent(record, event);
+    });
+    this.launch(record, run, spec.prompt, false);
+    return { ok: true, agentId, taskId };
+  }
+
+  private resumeRefusal(record: AgentRecord): string | undefined {
+    if (this.disposed) return RUNTIME_SHUT_DOWN;
+    if (record.disposed) return `unknown tower agent "${record.agentId}"`;
+    if (record.status === 'running') {
+      return `tower agent ${describeAgent(record)} is still running task ${record.run.taskId} — steer it or stop it instead of resuming`;
+    }
+    if (record.session.isStreaming) {
+      return `tower agent ${describeAgent(record)} is still winding down its previous run — retry shortly`;
+    }
+    return undefined;
+  }
+
   private liveRecords(): AgentRecord[] {
     return [...this.agents.values()].filter((record) => !record.disposed);
   }
@@ -285,27 +345,31 @@ export class TowerAgentRuntime {
     return record === undefined || record.disposed ? undefined : { record, taskId: id };
   }
 
-  private nextId(prefix: 'agent' | 'task'): string {
+  private reserveId(prefix: 'agent' | 'task', reserved: string[]): string {
     for (let attempt = 0; attempt < ID_ATTEMPTS; attempt += 1) {
       const id = this.createId(prefix);
-      if (!this.agents.has(id) && !this.taskOwners.has(id) && !this.pendingAgentIds.has(id)) {
+      if (!this.agents.has(id) && !this.taskOwners.has(id) && !this.reservedIds.has(id)) {
+        this.reservedIds.add(id);
+        reserved.push(id);
         return id;
       }
     }
     throw new Error(`could not allocate a unique tower ${prefix} id`);
   }
 
-  private newRun(): AgentRun {
+  private newRun(taskId: string): AgentRun {
     let resolveDone: () => void = () => undefined;
     const done = new Promise<void>((resolve) => {
       resolveDone = resolve;
     });
     return {
-      taskId: this.nextId('task'),
+      taskId,
       startedAt: this.now(),
       usage: emptyUsage(),
+      undelivered: [],
       done,
       resolveDone,
+      streamed: false,
       settled: false,
       abortedBySession: false,
       finished: false,
@@ -373,6 +437,7 @@ export class TowerAgentRuntime {
     clearTimeout(run.timeoutTimer);
     clearTimeout(run.graceTimer);
     try {
+      this.discardQueued(record, run);
       const outcome = runOutcome(run, failure);
       const at = this.now();
       record.status = outcome.status;
@@ -388,12 +453,30 @@ export class TowerAgentRuntime {
         status: outcome.status,
         summary: run.lastText,
         stopReason: outcome.stopReason,
+        undeliveredSteers: [...run.undelivered],
         usage: { ...run.usage },
         at,
       });
     } finally {
       run.resolveDone();
     }
+  }
+
+  private discardQueued(record: AgentRecord, run: AgentRun, own?: string): void {
+    let discarded: string[];
+    try {
+      discarded = [...record.session.discardQueued()];
+    } catch (error) {
+      this.diagnose(
+        `discarding queued steers of tower agent ${describeAgent(record)} failed: ${errorMessage(error)}`,
+      );
+      return;
+    }
+    if (own !== undefined) {
+      const index = discarded.findIndex((text) => text.trim() === own.trim());
+      if (index !== -1) discarded.splice(index, 1);
+    }
+    run.undelivered.push(...discarded);
   }
 
   private async disposeRecord(record: AgentRecord, reason: string): Promise<void> {
@@ -413,6 +496,9 @@ export class TowerAgentRuntime {
     const run = record.run;
     if (run.finished) return;
     switch (event.type) {
+      case 'agent_start':
+        run.streamed = true;
+        return;
       case 'message_update':
         if (event.message.role === 'assistant') record.streaming = event.message;
         return;
@@ -517,6 +603,14 @@ export class TowerAgentRuntime {
       return;
     }
   }
+
+  private diagnose(message: string): void {
+    try {
+      this.onDiagnostic?.(message);
+    } catch {
+      return;
+    }
+  }
 }
 
 function activeRun(found: AgentLookup): AgentRun | undefined {
@@ -524,6 +618,29 @@ function activeRun(found: AgentLookup): AgentRun | undefined {
   if (record.status !== 'running') return undefined;
   if (taskId !== undefined && taskId !== record.run.taskId) return undefined;
   return record.run;
+}
+
+function acceptsSteer(record: AgentRecord, run: AgentRun): boolean {
+  return (
+    record.status === 'running' &&
+    record.run === run &&
+    !run.finished &&
+    !run.settled &&
+    run.stopRequest === undefined &&
+    record.session.isStreaming
+  );
+}
+
+function endingNaturally(record: AgentRecord, run: AgentRun): boolean {
+  return run.stopRequest === undefined && run.streamed && !record.session.isStreaming;
+}
+
+async function deliverSteer(session: TowerAgentSession, text: string): Promise<SteerOutcome> {
+  try {
+    return { disposition: await session.steer(text) };
+  } catch (error) {
+    return { error };
+  }
 }
 
 function runOutcome(run: AgentRun, failure: { readonly error: unknown } | undefined): RunOutcome {
@@ -605,5 +722,26 @@ async function settle(action: () => unknown): Promise<void> {
     await action();
   } catch {
     return;
+  }
+}
+
+async function settledWithin(promise: Promise<unknown>, ms: number): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<boolean>((resolve) => {
+    timer = setTimeout(() => {
+      resolve(false);
+    }, ms);
+    timer.unref();
+  });
+  try {
+    return await Promise.race([
+      promise.then(
+        () => true,
+        () => true,
+      ),
+      expired,
+    ]);
+  } finally {
+    clearTimeout(timer);
   }
 }

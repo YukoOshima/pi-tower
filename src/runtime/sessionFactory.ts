@@ -1,5 +1,5 @@
-import { realpathSync, statSync } from 'node:fs';
-import { isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { readFileSync, realpathSync, statSync } from 'node:fs';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import type { Api, Model } from '@earendil-works/pi-ai';
@@ -22,6 +22,7 @@ import type {
   TowerAgentSession,
   TowerAgentSessionFactory,
   TowerAgentSpec,
+  TowerSteerDisposition,
   TowerThinkingLevel,
 } from './types.ts';
 
@@ -37,16 +38,20 @@ export const DEFAULT_TOWER_AGENT_TOOLS: readonly string[] = [
 
 export const PI_TOWER_PACKAGE_ROOT = resolve(fileURLToPath(new URL('../../', import.meta.url)));
 
+export const PI_TOWER_PACKAGE_NAME = 'pi-tower';
+
 const INLINE_EXTENSION_PREFIX = '<inline:';
 
 export interface PiSessionFactoryOptions {
+  readonly projectTrusted: boolean | (() => boolean);
   readonly agentDir?: string;
   readonly modelRuntime?: ModelRuntime;
   readonly modelRegistry?: ModelRegistry | (() => ModelRegistry | undefined);
   readonly repoRoot?: string;
-  readonly projectTrusted?: boolean;
   readonly excludeExtensionRoots?: readonly string[];
+  readonly excludePackageNames?: readonly string[];
   readonly onExtensionError?: (agentId: string, error: ExtensionError) => void;
+  readonly onDiagnostic?: (message: string) => void;
 }
 
 export class PiTowerAgentSession implements TowerAgentSession {
@@ -80,8 +85,14 @@ export class PiTowerAgentSession implements TowerAgentSession {
     return this.session.prompt(text, { expandPromptTemplates: false, source: 'extension' });
   }
 
-  async steer(text: string): Promise<void> {
-    await this.session.steer(text, undefined, { source: 'extension' });
+  steer(text: string): Promise<TowerSteerDisposition> {
+    return this.session.steer(text.startsWith('/') ? ` ${text}` : text, undefined, {
+      source: 'extension',
+    });
+  }
+
+  discardQueued(): readonly string[] {
+    return this.session.clearQueue().steering.map((text) => (text.startsWith(' /') ? text.slice(1) : text));
   }
 
   abort(): Promise<void> {
@@ -104,12 +115,12 @@ export class PiTowerAgentSession implements TowerAgentSession {
   }
 }
 
-export function createPiSessionFactory(
-  options: PiSessionFactoryOptions = {},
-): TowerAgentSessionFactory {
+export function createPiSessionFactory(options: PiSessionFactoryOptions): TowerAgentSessionFactory {
   const agentDir = resolve(options.agentDir ?? getAgentDir());
   const excludedRoots = (options.excludeExtensionRoots ?? [PI_TOWER_PACKAGE_ROOT]).map(canonicalPath);
+  const excludedPackageNames = new Set(options.excludePackageNames ?? [PI_TOWER_PACKAGE_NAME]);
   let fallbackRuntime: Promise<ModelRuntime> | undefined;
+  let registryDiagnosed = false;
 
   const modelRuntime = async (): Promise<ModelRuntime> => {
     if (options.modelRuntime !== undefined) return options.modelRuntime;
@@ -117,6 +128,12 @@ export function createPiSessionFactory(
       typeof options.modelRegistry === 'function' ? options.modelRegistry() : options.modelRegistry;
     const parent = registryRuntime(registry);
     if (parent !== undefined) return parent;
+    if (registry !== undefined && !registryDiagnosed) {
+      registryDiagnosed = true;
+      options.onDiagnostic?.(
+        `the parent model registry exposes no reusable model runtime — tower agents use a model runtime loaded from ${agentDir}, so the parent session's runtime-only API keys and extension-registered providers are not available to them`,
+      );
+    }
     fallbackRuntime ??= ModelRuntime.create({
       authPath: join(agentDir, 'auth.json'),
       modelsPath: join(agentDir, 'models.json'),
@@ -139,16 +156,17 @@ export function createPiSessionFactory(
     }
     const runtime = await modelRuntime();
     const model = spec.model === undefined ? undefined : await resolveAgentModel(runtime, spec.model);
-    const settingsManager = SettingsManager.create(spec.cwd, agentDir, {
-      projectTrusted: options.projectTrusted ?? true,
-    });
+    const projectTrusted =
+      typeof options.projectTrusted === 'function' ? options.projectTrusted() : options.projectTrusted;
+    const settingsManager = SettingsManager.create(spec.cwd, agentDir, { projectTrusted });
     const appended = appendedPrompts(spec);
     const resourceLoader = new DefaultResourceLoader({
       cwd: spec.cwd,
       agentDir,
       settingsManager,
       extensionFactories: [...(spec.extensionFactories ?? [])],
-      extensionsOverride: (base) => withoutExtensionsUnder(base, excludedRoots),
+      extensionsOverride: (base) =>
+        withoutExcludedExtensions(base, exclusionMatcher(excludedRoots, excludedPackageNames)),
       appendSystemPromptOverride: (base) => [...base, ...appended],
     });
     await resourceLoader.reload();
@@ -241,19 +259,88 @@ function toolAllowlist(spec: TowerAgentSpec, extensions: LoadExtensionsResult): 
   return [...names];
 }
 
-function withoutExtensionsUnder(
+function withoutExcludedExtensions(
   base: LoadExtensionsResult,
-  roots: readonly string[],
+  isExcluded: (path: string) => boolean,
 ): LoadExtensionsResult {
-  if (roots.length === 0) return base;
-  return {
-    ...base,
-    extensions: base.extensions.filter((extension) => {
-      if (!isAbsolute(extension.resolvedPath)) return true;
-      const path = canonicalPath(extension.resolvedPath);
-      return !roots.some((root) => isWithin(path, root));
-    }),
+  const droppedPaths = new Set<string>();
+  const extensions = base.extensions.filter((extension) => {
+    if (!isExcluded(extension.resolvedPath)) return true;
+    droppedPaths.add(extension.path);
+    droppedPaths.add(extension.resolvedPath);
+    return false;
+  });
+  const dropped = (extensionPath: string): boolean =>
+    droppedPaths.has(extensionPath) || isExcluded(extensionPath);
+  const { runtime } = base;
+  runtime.pendingProviderRegistrations = runtime.pendingProviderRegistrations.filter(
+    (registration) => !dropped(registration.extensionPath),
+  );
+  runtime.pendingNativeProviderRegistrations = runtime.pendingNativeProviderRegistrations.filter(
+    (registration) => !dropped(registration.extensionPath),
+  );
+  runtime.pendingVirtualModelRegistrations = runtime.pendingVirtualModelRegistrations.filter(
+    (registration) => !dropped(registration.extensionPath),
+  );
+  for (const server of runtime.mcpServers.list()) {
+    if (dropped(server.extensionPath)) runtime.mcpServers.unregister(server.name, server.extensionPath);
+  }
+  return { ...base, extensions };
+}
+
+function exclusionMatcher(
+  roots: readonly string[],
+  packageNames: ReadonlySet<string>,
+): (path: string) => boolean {
+  const packageNameByDir = new Map<string, string | undefined>();
+  return (path) => {
+    if (!isAbsolute(path)) return false;
+    const real = canonicalPath(path);
+    if (roots.some((root) => isWithin(real, root))) return true;
+    if (packageNames.size === 0) return false;
+    const name = nearestPackageName(real, packageNameByDir);
+    return name !== undefined && packageNames.has(name);
   };
+}
+
+function nearestPackageName(file: string, cache: Map<string, string | undefined>): string | undefined {
+  const visited: string[] = [];
+  let dir = dirname(file);
+  let name: string | undefined;
+  for (;;) {
+    if (cache.has(dir)) {
+      name = cache.get(dir);
+      break;
+    }
+    visited.push(dir);
+    const manifest = readManifestName(join(dir, 'package.json'));
+    if (manifest.found) {
+      name = manifest.name;
+      break;
+    }
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  for (const entry of visited) cache.set(entry, name);
+  return name;
+}
+
+function readManifestName(path: string): { readonly found: boolean; readonly name?: string } {
+  let text: string;
+  try {
+    text = readFileSync(path, 'utf8');
+  } catch {
+    return { found: false };
+  }
+  try {
+    const parsed: unknown = JSON.parse(text);
+    const name =
+      typeof parsed === 'object' && parsed !== null ? (parsed as { readonly name?: unknown }).name : undefined;
+    return { found: true, name: typeof name === 'string' ? name : undefined };
+  } catch {
+    return { found: true };
+  }
 }
 
 function isDirectory(path: string): boolean {
