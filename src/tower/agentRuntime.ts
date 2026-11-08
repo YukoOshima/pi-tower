@@ -14,6 +14,7 @@ import type { TowerController } from './controller.ts';
 
 export interface TowerAgentRuntimeOptions {
   readonly maxRunningAgents: () => number | undefined;
+  readonly agentDir?: string;
   readonly createSessionFactory?: (options: PiSessionFactoryOptions) => TowerAgentSessionFactory;
   readonly extensionFactories?: (request: TowerAgentSessionRequest) => readonly InlineExtension[];
   readonly stopGraceMs?: number;
@@ -29,6 +30,7 @@ export function createTowerAgentRuntime(
     let factory = factories.get(repoRoot);
     if (factory === undefined) {
       factory = createFactory({
+        ...(options.agentDir === undefined ? {} : { agentDir: options.agentDir }),
         projectTrusted: () => controller.context?.isProjectTrusted() ?? false,
         modelRegistry: () => controller.context?.modelRegistry,
         repoRoot,
@@ -44,9 +46,17 @@ export function createTowerAgentRuntime(
     return factory;
   };
   const sessionFactory: TowerAgentSessionFactory = (request) => {
-    const agentTools = createAgentTools(controller, { agentId: request.agentId }).map((tool) =>
-      defineTool(toToolDefinition(tool)),
-    );
+    controller.expectAgentRegistration(request.agentId);
+    const agentTools = createAgentTools(controller, { agentId: request.agentId }).map((tool) => {
+      const definition = toToolDefinition(tool);
+      return defineTool({
+        ...definition,
+        execute: async (toolCallId, params, signal, onUpdate, ctx) => {
+          await controller.agentRegistration(request.agentId);
+          return definition.execute(toolCallId, params, signal, onUpdate, ctx);
+        },
+      });
+    });
     const extensions = options.extensionFactories?.(request) ?? [];
     return factoryFor(controller.repoRoot)({
       agentId: request.agentId,

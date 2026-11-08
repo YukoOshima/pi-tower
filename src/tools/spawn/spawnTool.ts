@@ -199,6 +199,7 @@ async function spawn(host: TowerToolHost, args: TowerSpawnToolInput): Promise<To
       await host.abortAgent(launched.agentId);
       throw error;
     }
+    host.agentRegistered(launched.agentId);
 
     const settled = host.agentInfo(launched.agentId);
     if (settled !== undefined && settled.status !== 'running' && settled.status !== 'idle') {

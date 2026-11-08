@@ -1098,6 +1098,29 @@ describe('background agent notifications', () => {
   });
 });
 
+describe('agent registration gate', () => {
+  it("holds a new agent's tower tool calls until its roster entry is registered or its spawn is aborted", async () => {
+    const h = await harness();
+    h.controller.expectAgentRegistration('agent-new');
+    let released = false;
+    const waiting = h.controller.agentRegistration('agent-new').then(() => {
+      released = true;
+    });
+    await settle();
+    expect(released).toBe(false);
+
+    h.controller.agentRegistered('agent-new');
+    await waiting;
+    expect(released).toBe(true);
+
+    h.controller.expectAgentRegistration('agent-aborted');
+    const aborted = h.controller.agentRegistration('agent-aborted');
+    await h.controller.abortAgent('agent-aborted');
+    await expect(aborted).resolves.toBeUndefined();
+    await expect(h.controller.agentRegistration('agent-resumed')).resolves.toBeUndefined();
+  });
+});
+
 describe('session shutdown and provider rate limits', () => {
   it('stops every agent, records shutdown deaths, keeps ownership and sends no notifications', async () => {
     const h = await harness();

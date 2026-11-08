@@ -183,6 +183,7 @@ describe('TowerSpawnTool', () => {
       expect(result.isError).toBe(true);
       expect(result.output).toContain('forced post-launch failure');
       expect(host.aborted).toEqual(['agent-1']);
+      expect(host.registered).toEqual([]);
       expect(host.runtime.get('agent-1')).toBeUndefined();
       const state = await store.load();
       expect(state.roster.agents).toEqual([]);
@@ -215,6 +216,7 @@ describe('TowerSpawnTool', () => {
       cwd: worktreeAbs,
     });
     expect(host.launches[0]?.prompt).toContain(worktreeAbs);
+    expect(host.registered).toEqual(['agent-1']);
 
     const state = await store.load();
     expect(state.roster.agents.find((agent) => agent.name === 'agent-build')).toMatchObject({

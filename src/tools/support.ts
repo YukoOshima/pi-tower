@@ -92,6 +92,7 @@ export interface TowerToolHost {
   steerAgent(agentId: string, text: string): Promise<TowerSteerResult>;
   resolveSpawnModel(kind: TowerAgentKind, choice: string | undefined): Promise<TowerSpawnModelResolution>;
   launchAgent(request: TowerLaunchRequest): Promise<TowerRunStartResult>;
+  agentRegistered(agentId: string): void;
   abortAgent(agentId: string): Promise<void>;
   agentInfo(id: string): TowerAgentInfo | undefined;
   agentOutput(id: string): TowerAgentOutput | undefined;

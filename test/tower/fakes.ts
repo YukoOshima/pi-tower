@@ -362,6 +362,7 @@ export class TestHost implements TowerToolHost {
   readonly published: TowerInboxSentPayload[] = [];
   readonly launches: TowerLaunchRequest[] = [];
   readonly aborted: string[] = [];
+  readonly registered: string[] = [];
   readonly retired = new Set<string>();
   spawnModel: TowerSpawnModelResolution = { ok: true };
   publishFailure: Error | undefined;
@@ -440,6 +441,10 @@ export class TestHost implements TowerToolHost {
         ? {}
         : { thinkingLevel: request.binding.thinkingLevel }),
     });
+  }
+
+  agentRegistered(agentId: string): void {
+    this.registered.push(agentId);
   }
 
   async abortAgent(agentId: string): Promise<void> {

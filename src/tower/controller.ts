@@ -122,6 +122,7 @@ const SILENT_LOG: TowerLog = { info: () => undefined, warn: () => undefined };
 
 const REVIEWER_SETTLE_POLL_MS = 1_000;
 const REVIEWER_SETTLE_POLL_LIMIT = 1_800;
+const AGENT_REGISTRATION_WAIT_MS = 30_000;
 
 const DEFAULT_RATE_LIMIT_SNAPSHOT: TowerRateLimitSnapshot = {
   budget: 256,
@@ -151,6 +152,7 @@ export class TowerController implements TowerToolHost {
   private readonly retainedOutputs = new Map<string, TowerAgentOutput>();
   private readonly pendingWrites = new Set<Promise<unknown>>();
   private readonly deathChains = new Map<string, Promise<void>>();
+  private readonly registrations = new Map<string, { readonly promise: Promise<void>; readonly open: () => void }>();
   private ctx: ExtensionContext | undefined;
   private boundSessionId: string | undefined;
   private boundRepoRoot: string | undefined;
@@ -318,7 +320,38 @@ export class TowerController implements TowerToolHost {
     });
   }
 
+  expectAgentRegistration(agentId: string): void {
+    if (this.registrations.has(agentId)) return;
+    let open: () => void = () => undefined;
+    const promise = new Promise<void>((resolve) => {
+      open = resolve;
+    });
+    const expiry = setTimeout(() => {
+      this.agentRegistered(agentId);
+    }, AGENT_REGISTRATION_WAIT_MS);
+    expiry.unref();
+    this.registrations.set(agentId, {
+      promise,
+      open: () => {
+        clearTimeout(expiry);
+        open();
+      },
+    });
+  }
+
+  agentRegistered(agentId: string): void {
+    const pending = this.registrations.get(agentId);
+    if (pending === undefined) return;
+    this.registrations.delete(agentId);
+    pending.open();
+  }
+
+  async agentRegistration(agentId: string): Promise<void> {
+    await this.registrations.get(agentId)?.promise;
+  }
+
   async abortAgent(agentId: string): Promise<void> {
+    this.agentRegistered(agentId);
     const runtime = this.runtimeInstance;
     if (runtime === undefined) return;
     this.abortedSpawns.add(agentId);
@@ -493,6 +526,7 @@ export class TowerController implements TowerToolHost {
   async onSessionShutdown(): Promise<void> {
     this.shuttingDown = true;
     this.dropInboxWake();
+    for (const agentId of [...this.registrations.keys()]) this.agentRegistered(agentId);
     const runtime = this.runtimeInstance;
     if (runtime !== undefined) {
       await runtime.disposeAll(SHUTDOWN_STOP_REASON).catch((error: unknown) => {

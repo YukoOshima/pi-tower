@@ -15,8 +15,9 @@ import { TowerModels } from './tower/models.ts';
 import { handleTowerModelsCommand } from './tower/modelsCommand.ts';
 
 export default function towerExtension(pi: ExtensionAPI): void {
+  const agentDir = getAgentDir();
   const models = new TowerModels({
-    agentDir: getAgentDir(),
+    agentDir,
     configDirName: CONFIG_DIR_NAME,
     env: process.env,
     getFlag: (name) => pi.getFlag(name),
@@ -25,7 +26,7 @@ export default function towerExtension(pi: ExtensionAPI): void {
     pi,
     models,
     createRuntime: (owner) =>
-      createTowerAgentRuntime(owner, { maxRunningAgents: () => models.maxRunningAgents }),
+      createTowerAgentRuntime(owner, { agentDir, maxRunningAgents: () => models.maxRunningAgents }),
   });
   const observe = { onContext: controller.observe.bind(controller) };
 
