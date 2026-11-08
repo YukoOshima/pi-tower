@@ -276,7 +276,8 @@ function analyzeNestedShell(args: readonly ShellWord[], cwds: readonly Cwd[], ct
 
 function analyzeSourcedScript(args: readonly ShellWord[], cwds: readonly Cwd[], home: Cwd): WalkResult {
   const script = args[0]?.value === '--' ? args[1] : args[0];
-  return script !== undefined && readsStdin(scriptPath(script), cwds, home) ? vetoed(UNANALYZABLE_VETO) : passthrough(cwds);
+  const stdin = script !== undefined && readsStdin(scriptPath(script), cwds, home);
+  return stdin ? vetoed(UNANALYZABLE_VETO) : passthrough(cwds);
 }
 
 function scriptPath(word: ShellWord | undefined): string | undefined {
