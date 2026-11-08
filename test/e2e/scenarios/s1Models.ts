@@ -1,6 +1,6 @@
 import { join } from 'node:path';
 
-import { activityLog, agentTranscriptPath, distinct, readJsonl, rosterEntry, summarizeTranscript, towerState } from '../evidence.ts';
+import { activityLog, agentTranscriptPath, distinct, frontmatter, readJsonl, reviewFiles, rosterEntry, summarizeTranscript, towerState } from '../evidence.ts';
 import { clip, textOf, type PiRpc, type PiToolRun } from '../rpc.ts';
 import {
   firstLine,
@@ -22,7 +22,7 @@ const AGENT_WAIT_MS = 8 * 60_000;
 const OBJECTIVE = [
   'Objective for the tower (an automated end-to-end test — follow these steps exactly):',
   '1. Call TowerInit with no arguments.',
-  `2. Call TowerPlan with exactly one build mission: title "Append delta to notes", scope ["notes.txt"], tasks ["Append a final line containing exactly: delta to notes.txt", "Commit the change on the mission branch"].`,
+  `2. Call TowerPlan with exactly one build mission: title "Append delta to notes", scope ["notes.txt"], tasks ["Add one new last line to notes.txt whose entire content is the single word delta (the file then ends with the two lines alpha and delta)", "Commit the change on the mission branch"].`,
   `3. Spawn the worker for that mission with TowerSpawn: name "${WORKER}", kind "worker", mission_id "M1". Do not pass a model, so it runs on the default worker model.`,
   '4. End your turn. When the worker reports completion, only acknowledge it in one short sentence: do not spawn reviewers, do not merge, and call no tools until I send the next instruction.',
 ].join('\n');
@@ -34,7 +34,7 @@ function reviewPrompt(branch: string): string {
     `2. Spawn reviewer "${REVIEWERS[0]}" for ${branch} on the default reviewer model (do not pass a model).`,
     `3. Spawn reviewer "${REVIEWERS[1]}" for ${branch} — for this one reviewer I want you to use the worker model instead of the reviewer model.`,
     `4. Spawn reviewer "${REVIEWERS[2]}" for ${branch} on the default reviewer model again (do not pass a model).`,
-    '5. Call TowerTasks once.',
+    '5. Call TowerTasks once with active_only false, so finished agents are listed too.',
     'Then end your turn. When the reviews come in, only acknowledge them in one short sentence: do not merge, do not spawn anything else, and do not resume anyone.',
   ].join('\n');
 }
@@ -179,9 +179,8 @@ export const s1Models: ScenarioDefinition = {
 
     const runs = rpc.toolRuns();
     const agentsText = (await rpc.command('/tower agents')).text;
-    const tasksRun = runsOf(runs, 'TowerTasks').at(-1);
     report.note(`/tower agents:\n${agentsText}`);
-    const tasksText = tasksRun?.output ?? '';
+    const tasksText = runsOf(runs, 'TowerTasks').map((run) => run.output).join('\n');
     checkAgentModel(ctx, repo, { name: WORKER, kind: 'worker', role: 'worker', expected: B, spawn: spawnRun(runs, WORKER), agentsText, tasksText });
     checkAgentModel(ctx, repo, { name: REVIEWERS[0], kind: 'reviewer', role: 'reviewer', expected: C, spawn: spawnRun(runs, REVIEWERS[0]), agentsText, tasksText });
 
@@ -193,6 +192,11 @@ export const s1Models: ScenarioDefinition = {
     );
     checkAgentModel(ctx, repo, { name: REVIEWERS[1], kind: 'reviewer', role: 'worker (explicit choice)', expected: B, spawn: asWorker, agentsText, tasksText });
     checkAgentModel(ctx, repo, { name: REVIEWERS[2], kind: 'reviewer', role: 'reviewer (default again)', expected: C, spawn: spawnRun(runs, REVIEWERS[2]), agentsText, tasksText });
+
+    for (const review of reviewFiles(repo)) {
+      const fields = frontmatter(review.text);
+      report.note(`review file ${review.name}: reviewer=${String(fields.reviewer)} status=${String(fields.status)} merge=${String(fields.merge)} round=${String(fields.round)}`);
+    }
 
     const bogus = runsOf(runs, 'TowerSpawn').find((run) => run.args.model === BOGUS_MODEL);
     report.check(

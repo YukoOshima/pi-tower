@@ -91,6 +91,9 @@ export interface TranscriptSummary {
   readonly assistantModels: readonly string[];
   readonly toolResults: readonly { readonly toolName: string; readonly isError: boolean; readonly text: string }[];
   readonly toolCalls: readonly { readonly name: string; readonly arguments: Record<string, unknown> }[];
+  readonly tools: readonly string[];
+  readonly firstAt: number;
+  readonly lastAt: number;
   readonly usage: Usage;
 }
 
@@ -123,13 +126,27 @@ export function summarizeTranscript(path: string): TranscriptSummary {
     assistantModels: [] as string[],
     toolResults: [] as { toolName: string; isError: boolean; text: string }[],
     toolCalls: [] as { name: string; arguments: Record<string, unknown> }[],
+    tools: [] as string[],
+    firstAt: Number.POSITIVE_INFINITY,
+    lastAt: 0,
     usage,
   };
   for (const line of lines) {
+    const at = Date.parse(String(line.timestamp ?? ''));
+    if (Number.isFinite(at)) {
+      summary.firstAt = Math.min(summary.firstAt, at);
+      summary.lastAt = Math.max(summary.lastAt, at);
+    }
     if (line.type === 'model_change') summary.modelChanges.push(`${String(line.provider)}/${String(line.modelId)}`);
     if (line.type === 'thinking_level_change') summary.thinkingLevels.push(String(line.thinkingLevel));
     if (line.type !== 'message') continue;
     const message = line.message ?? {};
+    if (message.role === 'system') {
+      for (const tool of Array.isArray(message.toolsAdded) ? (message.toolsAdded as JsonLine[]) : []) summary.tools.push(String(tool.name));
+      for (const tool of Array.isArray(message.toolsRemoved) ? (message.toolsRemoved as JsonLine[]) : []) {
+        summary.tools = summary.tools.filter((name) => name !== String(tool.name));
+      }
+    }
     if (message.role === 'assistant') {
       summary.assistantModels.push(`${String(message.provider)}/${String(message.model)}`);
       const part = usageOf(message);

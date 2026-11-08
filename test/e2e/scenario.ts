@@ -1,5 +1,5 @@
 import type { ScenarioReport } from './report.ts';
-import type { PiRpc, PiToolRun } from './rpc.ts';
+import { sleep, type PiRpc, type PiToolRun } from './rpc.ts';
 import type { E2eSettings, RoleModel, ScenarioId } from './settings.ts';
 import { agentTranscripts, summarizeTranscript, towerState } from './evidence.ts';
 import { createToyRepo, launchPi, type RunRoot } from './workspace.ts';
@@ -93,5 +93,44 @@ export async function recordUsage(ctx: ScenarioContext, session: TowerSession): 
     const id = /_(agent-[0-9a-f]+)\.jsonl$/.exec(path)?.[1];
     const kind = roster.find((agent) => agent.agentId === id)?.kind;
     ctx.report.addUsage(kind === 'worker' ? 'workers' : kind === 'reviewer' ? 'reviewers' : 'tower agents', summarizeTranscript(path).usage);
+  }
+}
+
+export function runningAgents(agentsText: string): string[] {
+  return agentsText
+    .split('\n')
+    .filter((line) => /status: running/.test(line))
+    .map((line) => /^- (\S+)/.exec(line)?.[1] ?? line);
+}
+
+export interface DriveOptions {
+  readonly label: string;
+  readonly timeoutMs: number;
+  readonly nudge: string;
+  readonly maxNudges?: number;
+  readonly idleMs?: number;
+}
+
+export async function driveUntil(ctx: ScenarioContext, rpc: PiRpc, done: () => boolean, options: DriveOptions): Promise<number> {
+  const deadline = Date.now() + options.timeoutMs;
+  const idleMs = options.idleMs ?? 75_000;
+  let nudges = 0;
+  for (;;) {
+    if (rpc.exitCode !== undefined) throw new Error(`pi exited (${String(rpc.exitCode)}) while waiting for ${options.label}`);
+    if (done()) {
+      await rpc.waitIdle(TURN_TIMEOUT_MS, 3000);
+      if (done()) return nudges;
+    }
+    if (Date.now() > deadline) throw new Error(`timeout after ${String(options.timeoutMs)}ms waiting for ${options.label}`);
+    if (!rpc.running && Date.now() - rpc.lastEventAt > idleMs) {
+      const running = runningAgents((await rpc.command('/tower agents')).text);
+      if (running.length === 0) {
+        if (nudges >= (options.maxNudges ?? 2)) throw new Error(`the tower stalled (idle, no running agents) before ${options.label}`);
+        nudges += 1;
+        ctx.report.note(`nudge ${String(nudges)}: the tower was idle for ${String(Math.round(idleMs / 1000))}s with no running agents before ${options.label}`);
+        await rpc.send({ type: 'prompt', message: options.nudge, streamingBehavior: 'followUp' });
+      }
+    }
+    await sleep(3000);
   }
 }

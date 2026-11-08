@@ -76,6 +76,7 @@ export class PiRpc {
   readonly options: PiRpcOptions;
   stderr = '';
   running = false;
+  lastEventAt = Date.now();
   exitCode: number | null | undefined;
   private readonly child: ChildProcessWithoutNullStreams;
   private readonly pending = new Map<string, (event: PiEvent) => void>();
@@ -131,6 +132,7 @@ export class PiRpc {
   }
 
   private onEvent(event: PiEvent): void {
+    this.lastEventAt = Date.now();
     if (event.type === 'message_update') return;
     if (event.type === 'response' && typeof event.id === 'string' && this.pending.has(event.id)) {
       const resolve = this.pending.get(event.id);
