@@ -799,6 +799,10 @@ const BASH_SINGLE_DASH_LONG_OPTIONS: ReadonlySet<string> = new Set([
   '-dump-strings',
   '-dump-po-strings',
   '-wordexp',
+  '-debug',
+  '-noediting',
+  '-pretty-print',
+  '-rpm-requires',
 ]);
 
 const DECLARATION_BUILTINS: ReadonlySet<string> = new Set(['export', 'declare', 'typeset', 'readonly', 'local']);

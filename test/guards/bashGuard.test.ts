@@ -612,6 +612,25 @@ describe('shell startup files', () => {
     expect(guard('sh -norc scripts/clean.sh; rm -f x')).toBe(UNANALYZABLE_VETO);
     expect(guard('sh -e scripts/clean.sh && rm -rf dist')).toBeUndefined();
   });
+
+  it.each([
+    ["bash -noediting -c 'rm -rf .tower/comms'", rmVeto('.tower/comms')],
+    ["bash -debug -rcfile /dev/stdin -ic true <<< 'rm -rf .tower/comms'", UNANALYZABLE_VETO],
+    ["bash -debug -login -c 'rm -rf .tower/comms'", rmVeto('.tower/comms')],
+    ["bash -pretty-print -init-file /dev/stdin -i <<< 'rm -rf .tower/comms'", UNANALYZABLE_VETO],
+    ["sh -noediting -c 'rm -rf .tower/comms'", UNANALYZABLE_VETO],
+    ["sh -debug -login /dev/stdin x <<< 'rm -rf .tower/comms'", UNANALYZABLE_VETO],
+    ["bash -noediting -c 'git reset --hard'", GIT_RESET_VETO],
+  ])('reads every bash --help long option in its single-dash form in %j', (command, veto) => {
+    expect(guard(command)).toBe(veto);
+  });
+
+  it('keeps everyday nested shell invocations allowed', () => {
+    expect(guard('bash -euo pipefail scripts/x.sh && rm -rf dist', slot)).toBeUndefined();
+    expect(guard("bash -lc 'rm -rf dist'", slot)).toBeUndefined();
+    expect(guard("bash -norc -noprofile -c 'rm -rf dist'", slot)).toBeUndefined();
+    expect(guard('bash -version && rm -rf dist')).toBeUndefined();
+  });
 });
 
 describe('quoting and parsing', () => {
