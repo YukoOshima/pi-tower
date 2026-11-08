@@ -114,6 +114,8 @@ cd /path/to/project
 git status
 ```
 
+请在仓库的顶层目录中启动 pi。Tower 会在 pi 的工作目录中创建它的工作区（`.tower/`）。
+
 Tower 只能合并到本地 branch，不能合并到 remote-tracking ref 或 tag。如果 `/tower <base-branch>` 指定的 branch 不存在，Tower 会基于当前 checkout 创建它。使用已有 branch 并保持工作区干净，是最稳妥的做法。
 
 > [!WARNING]
@@ -125,7 +127,7 @@ Tower 只能合并到本地 branch，不能合并到 remote-tracking ref 或 tag
 
    如果当前是 detached HEAD（未检出任何 branch），或者需要换一个 base，请改用 `/tower <base-branch>`，例如 `/tower feature/my-objective`。
 
-2. **发送开发目标。** 像平常对话一样输入任务，并说明如何验证、什么情况下算完成。Tower 会初始化 `.tower/`、规划 mission，并启动所有依赖已经满足的 worker。worker 完成任务或 Tower 的 inbox 收到消息时，Tower 会自动继续处理。
+2. **发送开发目标。** 像平常对话一样输入任务，并说明如何验证、什么情况下算完成。Tower 会初始化 `.tower/`、规划 mission，并启动所有依赖已经满足的 worker。worker 完成任务或 Tower 的 inbox 收到消息时，Tower 会自动继续处理；如果 Tower 当时正忙，这次唤醒会等到它当前的轮次结束。
 
 3. **让任务在后台推进。** 每个 worker 在自己的 branch 和 worktree 中工作并提交。Tower 会安排独立 reviewer，必要时 rebase，并按依赖顺序合并通过审核的 mission。Tower 询问任务范围或优先级时，请及时回复。
 
@@ -406,7 +408,7 @@ pi-tower 提供三道防护：
   - 作用范围覆盖主 checkout、且带有 force 和 `-x`/`-X` 的 `git clean`；
   - 在主 checkout 中执行的 `git reset --hard`。
 
-  同样的命令在 mission worktree 内是允许的。如果命令中出现 `rm`、`git clean` 或 `git reset`，而解析器无法安全地分析它（例如用了命令替换或 heredoc，或者要删除的路径依赖某个变量），为保险起见会直接拦截。这道防护只针对上述命令，其他破坏性命令不会被拦截，这一点与 Kimi Code 相同。
+  同样的命令在 mission worktree 内是允许的。如果命令中出现 `rm`、`git clean` 或 `git reset`，而解析器无法安全地分析它（例如用了命令替换或 heredoc，或者要删除的路径依赖某个变量），为保险起见会直接拦截。这道防护只针对上述命令，其他破坏性命令不会被拦截，这一点与 Kimi Code 相同。它只检查 pi 的 `bash` 工具，不检查 Windows 上的 `powershell` 工具。
 - **写入防护。** worker 在自己的 worktree 之外调用 `write` 和 `edit` 会被拒绝。
 - **只读 reviewer。** reviewer 没有 `write` 和 `edit` 工具。
 

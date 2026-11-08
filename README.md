@@ -114,6 +114,8 @@ cd /path/to/project
 git status
 ```
 
+Start pi in the top-level directory of the repository. Tower creates its workspace (`.tower/`) in pi's working directory.
+
 Tower merges only into a local branch, never into a remote-tracking ref or a tag. If the branch you pass to `/tower <base-branch>` does not exist, Tower creates it from the current checkout. The safest choice is an existing branch with a clean working tree.
 
 > [!WARNING]
@@ -125,7 +127,7 @@ Tower merges only into a local branch, never into a remote-tracking ref or a tag
 
    If HEAD is detached (no branch is checked out), or you want another base, run `/tower <base-branch>` instead, for example `/tower feature/my-objective`.
 
-2. **Send the objective.** Type the task as a normal chat message, and say how to verify the work and what counts as done. The tower initializes `.tower/`, plans missions, and starts every worker whose dependencies are satisfied. When a worker finishes or a message reaches the tower's inbox, the tower resumes by itself.
+2. **Send the objective.** Type the task as a normal chat message, and say how to verify the work and what counts as done. The tower initializes `.tower/`, plans missions, and starts every worker whose dependencies are satisfied. When a worker finishes or a message reaches the tower's inbox, the tower resumes by itself. If the tower is busy at that moment, the wake-up waits until its current turn ends.
 
 3. **Let the work run in the background.** Each worker works and commits on its own branch, in its own worktree. The tower assigns independent reviewers, rebases when needed, and merges approved missions in dependency order. Answer the tower when it asks about scope or priority.
 
@@ -406,7 +408,7 @@ pi-tower adds three guards:
   - `git clean` with force and `-x`/`-X` when it covers the main checkout;
   - `git reset --hard` in the main checkout.
 
-  The same commands are allowed inside a mission worktree. A command that mentions `rm`, `git clean` or `git reset` is blocked as a precaution when the parser cannot analyze it safely, for example because it uses command substitution or a heredoc, or because a path it would delete depends on a variable. The guard models only these commands, so other destructive commands are not caught, the same as in Kimi Code.
+  The same commands are allowed inside a mission worktree. A command that mentions `rm`, `git clean` or `git reset` is blocked as a precaution when the parser cannot analyze it safely, for example because it uses command substitution or a heredoc, or because a path it would delete depends on a variable. The guard models only these commands, so other destructive commands are not caught, the same as in Kimi Code. It checks pi's `bash` tool only; the Windows `powershell` tool is not guarded.
 - **Write guard.** A worker's `write` and `edit` calls outside its own worktree are denied.
 - **Read-only reviewers.** Reviewers have no `write` or `edit` tools.
 
