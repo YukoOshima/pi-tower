@@ -477,4 +477,4 @@ npm test
 
 pi-tower 以 [MIT 许可证](LICENSE)发布，Copyright (c) 2026 YukoOshima。
 
-pi-tower 移植自 Moonshot AI 的 [Kimi Code](https://github.com/MoonshotAI/kimi-code) 中的 Tower 模式。它的协议、工具说明、提示词和测试都源自该项目，该项目同样采用 MIT 许可证（Copyright (c) 2026 Moonshot AI）。两份许可声明都收录在 [LICENSE](LICENSE) 中。感谢 Kimi Code 团队的原创设计。
+pi-tower 移植自 Moonshot AI 的 [Kimi Code](https://github.com/MoonshotAI/kimi-code) 中的 Tower 模式。它的协议、工具说明、提示词和测试都源自该项目，该项目同样采用 [MIT 许可证](https://github.com/MoonshotAI/kimi-code/blob/main/LICENSE)（Copyright (c) 2026 Moonshot AI）。两份许可声明都收录在 [LICENSE](LICENSE) 中。感谢 Kimi Code 团队的原创设计。

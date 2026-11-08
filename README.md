@@ -477,4 +477,4 @@ The extension entry point is `src/index.ts`, declared under `pi.extensions` in `
 
 pi-tower is released under the [MIT License](LICENSE), Copyright (c) 2026 YukoOshima.
 
-pi-tower is a port of the Tower mode of [Kimi Code](https://github.com/MoonshotAI/kimi-code) by Moonshot AI. Its protocol, tool descriptions, prompts and tests are derived from that project, which is also MIT-licensed (Copyright (c) 2026 Moonshot AI). Both notices are in [LICENSE](LICENSE). Thanks to the Kimi Code team for the original design.
+pi-tower is a port of the Tower mode of [Kimi Code](https://github.com/MoonshotAI/kimi-code) by Moonshot AI. Its protocol, tool descriptions, prompts and tests are derived from that project, which is also [MIT-licensed](https://github.com/MoonshotAI/kimi-code/blob/main/LICENSE) (Copyright (c) 2026 Moonshot AI). Both notices are in [LICENSE](LICENSE). Thanks to the Kimi Code team for the original design.
