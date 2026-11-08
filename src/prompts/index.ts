@@ -79,6 +79,7 @@ export {
   sendUndeliveredNote,
   spawnSnapshotNote,
   spawnTaskDescription,
+  undeliveredSteersSection,
   wakeDigestTargets,
   workerSpawnGuidance,
   worktreeSetupWarning,

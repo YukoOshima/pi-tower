@@ -58,8 +58,10 @@ export interface TowerAgentNotificationInput {
   readonly status: TowerAgentEndStatus;
   readonly stopReason?: string;
   readonly stoppedByHuman?: boolean;
+  readonly stoppedByTower?: boolean;
   readonly wallTimeMs: number;
   readonly result?: string;
+  readonly undeliveredSteers?: readonly string[];
 }
 
 export interface SpawnTaskDescriptionInput {
@@ -180,6 +182,8 @@ export function renderAgentNotification(input: TowerAgentNotificationInput): str
     `Severity: ${input.status === 'completed' ? 'info' : 'warning'}`,
     agentNotificationBody(input),
   ];
+  const undelivered = undeliveredSteersSection(input);
+  if (undelivered !== undefined) lines.push(undelivered);
   const result = input.result?.trim();
   if (result !== undefined && result.length > 0) lines.push(renderAgentResult(input.name, result));
   lines.push('</notification>');
@@ -232,6 +236,11 @@ function agentRecoveryGuidance(input: TowerAgentNotificationInput): string {
   if (input.stoppedByHuman === true) {
     return `The human stopped this ${input.kind}, so it is dead by intent: never resume, reassign, or replace it unless the human says otherwise.`;
   }
+  if (input.stoppedByTower === true) {
+    return input.kind === 'reviewer'
+      ? 'The tower stopped this reviewer on purpose with TowerTaskStop. A reviewer is one-shot — do not resume it; spawn a fresh reviewer only if the mission still needs a review.'
+      : `The tower stopped this worker on purpose with TowerTaskStop, so there is no death to diagnose. When its work should continue, call TowerResume(agent="${input.name}", prompt="...") — it runs in the background and keeps its full prior context, but any in-flight tool call lost its result and may need to be redone.`;
+  }
   if (input.kind === 'reviewer') {
     return 'Diagnose first: check the death status/reason and task state. A reviewer is one-shot — do not resume it or another roster agent; after diagnosis, spawn a fresh reviewer only if the mission still needs one.';
   }
@@ -247,6 +256,20 @@ function agentRecoveryGuidance(input: TowerAgentNotificationInput): string {
     ...taskIdWarning,
     'TowerResume always runs it in the background; its completion arrives as another notification.',
     'The worker retains its full prior context across the restart, but any in-flight tool call lost its result and may need to be redone.',
+  ].join('\n');
+}
+
+export function undeliveredSteersSection(
+  input: Pick<TowerAgentNotificationInput, 'name' | 'kind' | 'undeliveredSteers'>,
+): string | undefined {
+  const steers = input.undeliveredSteers ?? [];
+  if (steers.length === 0) return undefined;
+  return [
+    `Undelivered steers: ${String(steers.length)} steered message(s) never reached ${input.name} before its run ended — they sit only in its inbox:`,
+    ...steers.map((steer) => `- ${previewSubject(steer.replaceAll(/\s+/g, ' ').trim(), WAKE_SUBJECT_PREVIEW_MAX * 2)}`),
+    input.kind === 'worker'
+      ? `Deliver them with TowerResume(agent="${input.name}", prompt="Read TowerInbox and act on the unread messages.") when the worker should continue.`
+      : 'A reviewer is one-shot and is never resumed: spawn a fresh reviewer if the review still needs this input.',
   ].join('\n');
 }
 

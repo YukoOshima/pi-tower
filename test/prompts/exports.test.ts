@@ -143,6 +143,13 @@ const SAMPLES: Readonly<Record<string, () => string>> = {
     prompts.renderAgentNotification(NOTIFICATION) +
     prompts.renderAgentNotification({ ...NOTIFICATION, status: 'completed', result: 'x'.repeat(9000) }),
   spawnTaskDescription: () => prompts.spawnTaskDescription({ name: 'agent-build', reviewTarget: 'feat/x' }),
+  undeliveredSteersSection: () =>
+    (prompts.undeliveredSteersSection({ ...NOTIFICATION, undeliveredSteers: ['steer one'] }) ?? '') +
+    (prompts.undeliveredSteersSection({
+      ...NOTIFICATION,
+      kind: 'reviewer',
+      undeliveredSteers: ['steer two'],
+    }) ?? ''),
   workerSpawnGuidance: () => prompts.workerSpawnGuidance('agent-build'),
   spawnSnapshotNote: () => prompts.spawnSnapshotNote('0123456789'),
   worktreeSetupWarning: () => prompts.worktreeSetupWarning('failed'),

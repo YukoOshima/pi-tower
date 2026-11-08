@@ -1,0 +1,27 @@
+import { Type, type Static } from 'typebox';
+
+import { TOWER_PARAMETER_DESCRIPTIONS } from '../../prompts/index.ts';
+import { stringEnum } from '../support.ts';
+
+const DESCRIPTIONS = TOWER_PARAMETER_DESCRIPTIONS.TowerPlan;
+
+export const TowerPlanMissionSchema = Type.Object(
+  {
+    title: Type.String({ description: DESCRIPTIONS.title }),
+    scope: Type.Array(Type.String(), { minItems: 1, description: DESCRIPTIONS.scope }),
+    tasks: Type.Optional(Type.Array(Type.String(), { description: DESCRIPTIONS.tasks })),
+    context: Type.Optional(Type.String({ description: DESCRIPTIONS.context })),
+    deps: Type.Optional(Type.Array(Type.String(), { description: DESCRIPTIONS.deps })),
+    kind: Type.Optional(stringEnum(['build', 'survey'] as const, DESCRIPTIONS.kind)),
+  },
+  { additionalProperties: false },
+);
+
+export const TowerPlanToolInputSchema = Type.Object(
+  {
+    missions: Type.Array(TowerPlanMissionSchema, { minItems: 1 }),
+  },
+  { additionalProperties: false },
+);
+
+export type TowerPlanToolInput = Static<typeof TowerPlanToolInputSchema>;
