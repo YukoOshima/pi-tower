@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdtemp, readdir, readFile, rm, utimes, writeFile } from 'node:fs/promises';
+import { mkdtemp, readdir, readFile, readlink, rm, symlink, utimes, writeFile } from 'node:fs/promises';
 import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -148,6 +148,36 @@ describe('withConfigFileLock', () => {
       expect(await withConfigFileLock(file, async () => 'ran', { timeoutMs: 1000, retryMs: 5 })).toBe('ran');
       expect(await readdir(root)).toEqual([]);
     });
+  });
+
+  it('waits out a dangling symlink at the lock path and times out instead of spinning', async () => {
+    await symlink(join(root, 'missing-target'), lock);
+    let ran = false;
+    const started = Date.now();
+    await expect(
+      withConfigFileLock(
+        file,
+        async () => {
+          ran = true;
+        },
+        { timeoutMs: 150, retryMs: 10 },
+      ),
+    ).rejects.toThrow(
+      `timed out after 150ms waiting for the tower config lock ${lock} — another pi process is updating this file; retry, or delete the lock file if no pi process is using it`,
+    );
+    expect(Date.now() - started).toBeLessThan(2_000);
+    expect(ran).toBe(false);
+    expect(await readlink(lock)).toBe(join(root, 'missing-target'));
+  });
+
+  it('times out on a stale lock whose reaper path is a dangling symlink', async () => {
+    const holder = holderLine(await exitedPid());
+    await writeFile(lock, `${holder} token=crashed\n`, 'utf8');
+    await symlink(join(root, 'missing-reaper'), `${lock}.reaper`);
+    await expect(
+      withConfigFileLock(file, async () => 'ran', { timeoutMs: 150, retryMs: 10 }),
+    ).rejects.toThrow(`timed out after 150ms waiting for the tower config lock ${lock} (held by ${holder})`);
+    expect(await readFile(lock, 'utf8')).toBe(`${holder} token=crashed\n`);
   });
 
   it('proceeds as soon as the holder releases the lock', async () => {

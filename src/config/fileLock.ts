@@ -67,9 +67,9 @@ async function withLockFile<T>(
   const token = randomUUID();
   const deadline = Date.now() + timeoutMs;
   while (!(await tryCreateLock(lockPath, token))) {
-    if (await reapStaleLock(lockPath, staleMs)) continue;
+    const reaped = await reapStaleLock(lockPath, staleMs);
     if (Date.now() >= deadline) throw new Error(await lockTimeoutMessage(lockPath, timeoutMs));
-    await delay(retryMs);
+    if (!reaped) await delay(retryMs);
   }
   try {
     return await fn();
@@ -107,8 +107,7 @@ async function releaseLock(lockPath: string, token: string): Promise<void> {
 
 async function reapStaleLock(lockPath: string, staleMs: number): Promise<boolean> {
   const seen = await snapshot(lockPath);
-  if (seen === undefined) return true;
-  if (!lockIsStale(seen, staleMs)) return false;
+  if (seen === undefined || !lockIsStale(seen, staleMs)) return false;
   const reaperPath = `${lockPath}.reaper`;
   const guard = randomUUID();
   if (!(await tryCreateLock(reaperPath, guard))) {
@@ -117,8 +116,7 @@ async function reapStaleLock(lockPath: string, staleMs: number): Promise<boolean
   }
   try {
     const confirmed = await snapshot(lockPath);
-    if (confirmed === undefined) return true;
-    if (!lockIsStale(confirmed, staleMs)) return false;
+    if (confirmed === undefined || !lockIsStale(confirmed, staleMs)) return false;
     await rm(lockPath, { force: true });
     return true;
   } finally {
