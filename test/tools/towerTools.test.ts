@@ -4,7 +4,13 @@ import { setTimeout as delay } from 'node:timers/promises';
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { TOWER_MAIN_AGENT_ONLY, TOWER_MODE_USER_ENABLED_ONLY } from '../../src/prompts/index.ts';
+import {
+  TOWER_MAIN_AGENT_ONLY,
+  TOWER_MODE_USER_ENABLED_ONLY,
+  sendDeferredNote,
+  sendHandledNote,
+  sendUnreachableNote,
+} from '../../src/prompts/index.ts';
 import { MAIN_AGENT_ID, TOWER_GIT_CONCURRENCY, TowerStore } from '../../src/protocol/index.ts';
 import { createTowerCompleteTool } from '../../src/tools/complete/completeTool.ts';
 import { createTowerFindingTool } from '../../src/tools/finding/findingTool.ts';
@@ -454,23 +460,35 @@ describe('TowerSendTool + TowerInboxTool', () => {
     expect(result.output).toContain('known: tower, all, w1, w2');
   });
 
-  it('notes when the tower messages a roster agent that has no running task to deliver it', async () => {
-    const idle = await run(createTowerSendTool, { to: 'w1', subject: 'wake', body: 'x' });
-    expect(idle.isError).toBeFalsy();
-    expect(idle.output).toContain('w1 has no running task');
-    expect(idle.output).toContain('TowerResume(agent="w1", prompt="...")');
-  });
-
-  it('reports a handled or idle steer as undelivered', async () => {
+  it('tells the tower how its message reaches the agent for every undelivered steer outcome', async () => {
     const store = new TowerStore(repo);
-    const agentId = await runningAgent('w3');
-    await store.registerAgent({ name: 'w3', kind: 'worker', agentId, spawnedAt: new Date().toISOString() });
+    const register = async (name: string): Promise<string> => {
+      const agentId = await runningAgent(name);
+      await store.registerAgent({ name, kind: 'worker', agentId, spawnedAt: new Date().toISOString() });
+      return agentId;
+    };
+    const send = (to: string) => run(createTowerSendTool, { to, subject: `for ${to}`, body: 'x' });
+
+    const unknown = await send('w1');
+    expect(unknown.isError).toBeFalsy();
+    expect(unknown.output).toContain(sendUnreachableNote('w1', 'worker'));
+
+    host.runtime.finish(await register('w4'), 'idle');
+    const finished = await send('w4');
+    expect(finished.output).toContain('w4 has no running task');
+    expect(finished.output).toContain('TowerResume(agent="w4", prompt="...")');
+
+    host.runtime.finish(await register('w5'), 'stopped', { stopReason: 'stopped by the tower', windingDown: true });
+    expect((await send('w5')).output).toContain(sendDeferredNote('w5', true));
+
+    await register('w6');
+    host.runtime.steerResult = 'idle';
+    expect((await send('w6')).output).toContain(sendDeferredNote('w6', false));
+
     host.runtime.steerResult = 'handled';
-
-    const result = await run(createTowerSendTool, { to: 'w3', subject: 'later', body: 'x' });
-
-    expect(result.output).not.toContain('steered into its running turn');
-    expect(result.output).toContain('w3 has no running task');
+    const handled = await send('w6');
+    expect(handled.output).toContain(sendHandledNote('w6'));
+    expect(handled.output).not.toContain('steered into its running turn');
   });
 
   it('skips the delivery note for broadcasts and for sends from workers', async () => {

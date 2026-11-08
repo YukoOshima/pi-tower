@@ -22,13 +22,14 @@ import type {
   TowerAgentEventListener,
   TowerAgentInfo,
   TowerAgentOutput,
-  TowerAgentSpecInput,
+  TowerAgentSpec,
   TowerAgentUsage,
   TowerRateLimitSnapshot,
   TowerRunStartResult,
   TowerRuntime,
   TowerSteerResult,
   TowerStopResult,
+  TowerThinkingLevel,
   TowerToolCallRecord,
 } from '../../src/tower/runtimeTypes.ts';
 
@@ -82,9 +83,10 @@ interface FakeAgentRecord {
   description?: string;
   cwd: string;
   model?: string;
-  thinkingLevel?: string;
+  thinkingLevel?: TowerThinkingLevel;
   sessionId: string;
   status: TowerAgentInfo['status'];
+  windingDown: boolean;
   runs: number;
   createdAt: number;
   startedAt: number;
@@ -100,6 +102,7 @@ export interface FakeFinishOptions {
   readonly stopReason?: string;
   readonly summary?: string;
   readonly undeliveredSteers?: readonly string[];
+  readonly windingDown?: boolean;
 }
 
 export class FakeRuntime implements TowerRuntime {
@@ -115,7 +118,7 @@ export class FakeRuntime implements TowerRuntime {
       this.successes += 1;
     },
   };
-  readonly specs: TowerAgentSpecInput[] = [];
+  readonly specs: TowerAgentSpec[] = [];
   readonly steers: { readonly id: string; readonly text: string }[] = [];
   readonly stops: { readonly id: string; readonly reason: string }[] = [];
   readonly disposed: string[] = [];
@@ -138,7 +141,7 @@ export class FakeRuntime implements TowerRuntime {
     };
   }
 
-  async spawn(spec: TowerAgentSpecInput): Promise<TowerRunStartResult> {
+  async spawn(spec: TowerAgentSpec): Promise<TowerRunStartResult> {
     this.specs.push(spec);
     if (this.gate !== undefined) return this.gate;
     if (this.failSpawn !== undefined) {
@@ -155,10 +158,16 @@ export class FakeRuntime implements TowerRuntime {
       ...(spec.kind === undefined ? {} : { kind: spec.kind }),
       ...(spec.description === undefined ? {} : { description: spec.description }),
       cwd: spec.cwd,
-      model: spec.model ?? 'fake/default-model',
+      model:
+        spec.model === undefined
+          ? 'fake/default-model'
+          : typeof spec.model === 'string'
+            ? spec.model
+            : `${spec.model.provider}/${spec.model.id}`,
       thinkingLevel: spec.thinkingLevel ?? 'medium',
       sessionId: `pi-session-${agentId}`,
       status: 'running',
+      windingDown: false,
       runs: 1,
       createdAt: at,
       startedAt: at,
@@ -182,6 +191,7 @@ export class FakeRuntime implements TowerRuntime {
     const record = this.lookup(id);
     if (record === undefined) throw new Error(`no fake agent ${id}`);
     record.status = status;
+    record.windingDown = options.windingDown ?? false;
     record.endedAt = this.now();
     if (options.stopReason === undefined) delete record.stopReason;
     else record.stopReason = options.stopReason;
@@ -200,6 +210,11 @@ export class FakeRuntime implements TowerRuntime {
     });
   }
 
+  settle(id: string): void {
+    const record = this.lookup(id);
+    if (record !== undefined) record.windingDown = false;
+  }
+
   addToolCall(id: string, call: TowerToolCallRecord): void {
     this.lookup(id)?.recentToolCalls.push(call);
   }
@@ -214,6 +229,12 @@ export class FakeRuntime implements TowerRuntime {
     if (record === undefined) return { ok: false, reason: `unknown tower agent "${id}"` };
     if (record.status === 'running') {
       return { ok: false, reason: `tower agent "${record.name}" is still running` };
+    }
+    if (record.windingDown) {
+      return {
+        ok: false,
+        reason: `tower agent "${record.name}" (${record.agentId}) is still winding down its previous run — retry shortly`,
+      };
     }
     if (this.resumeRefusal !== undefined) return { ok: false, reason: this.resumeRefusal };
     this.counter += 1;
@@ -268,14 +289,14 @@ export class FakeRuntime implements TowerRuntime {
 
   list(activeOnly = false): TowerAgentInfo[] {
     return [...this.agents.values()]
-      .filter((record) => !activeOnly || record.status === 'running')
+      .filter((record) => !activeOnly || record.status === 'running' || record.windingDown)
       .map((record) => this.describe(record));
   }
 
   activeAgentIds(): ReadonlySet<string> {
     return new Set(
       [...this.agents.values()]
-        .filter((record) => record.status === 'running')
+        .filter((record) => record.status === 'running' || record.windingDown)
         .map((record) => record.agentId),
     );
   }
@@ -314,6 +335,7 @@ export class FakeRuntime implements TowerRuntime {
       ...(record.thinkingLevel === undefined ? {} : { thinkingLevel: record.thinkingLevel }),
       sessionId: record.sessionId,
       status: record.status,
+      windingDown: record.windingDown,
       runs: record.runs,
       createdAt: record.createdAt,
       startedAt: record.startedAt,

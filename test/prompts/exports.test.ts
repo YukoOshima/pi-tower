@@ -129,6 +129,11 @@ const SAMPLES: Readonly<Record<string, () => string>> = {
     prompts.formatGateDigestLine('M1', { ready: true, blocks: [], reviewBinding: 'exact-tip' }),
   renderSteerPreview: () => prompts.renderSteerPreview('tower', 'subject'),
   sendSteeredNote: () => prompts.sendSteeredNote('agent-build'),
+  sendDeferredNote: () =>
+    prompts.sendDeferredNote('agent-build', true) + prompts.sendDeferredNote('agent-build', false),
+  sendHandledNote: () => prompts.sendHandledNote('agent-build'),
+  sendUnreachableNote: () =>
+    prompts.sendUnreachableNote('agent-build', 'worker') + prompts.sendUnreachableNote('reviewer-a', 'reviewer'),
   sendUndeliveredNote: () =>
     prompts.sendUndeliveredNote('agent-build', 'worker') + prompts.sendUndeliveredNote('reviewer-a', 'reviewer'),
   formatWallTime: () => prompts.formatWallTime(1500),

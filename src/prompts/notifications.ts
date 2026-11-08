@@ -153,6 +153,22 @@ export function sendUndeliveredNote(to: string, kind: TowerAgentKind): string {
     : `note: ${to} has no running task in this session — the message sits in its inbox; a reviewer is one-shot and is never resumed, so spawn a fresh reviewer if the review still needs this input`;
 }
 
+export function sendDeferredNote(to: string, windingDown: boolean): string {
+  return windingDown
+    ? `note: ${to} is winding down a stopped run — the message sits in its inbox; ${to} reads it at its next TowerInbox call or when it is resumed (TowerResume works once the run has settled)`
+    : `note: ${to} is finishing its current run and could not take a steered message — the message sits in its inbox; ${to} reads it at its next TowerInbox call or on its next resume`;
+}
+
+export function sendHandledNote(to: string): string {
+  return `note: ${to}'s session intercepted or refused the steered message — it sits only in ${to}'s inbox until ${to} reads it with TowerInbox`;
+}
+
+export function sendUnreachableNote(to: string, kind: TowerAgentKind): string {
+  return kind === 'worker'
+    ? `note: ${to} is not running in this process (the tower restarted, or its session was disposed) — the message sits in its inbox; TowerResume cannot reach it, so spawn a fresh worker under a new name if the work must continue`
+    : sendUndeliveredNote(to, kind);
+}
+
 export function formatWallTime(wallTimeMs: number): string {
   return `${(Math.max(0, wallTimeMs) / 1000).toFixed(3)} seconds`;
 }

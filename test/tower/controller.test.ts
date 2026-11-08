@@ -1058,6 +1058,20 @@ describe('background agent notifications', () => {
     expect(h.controller.listAgents(true)).toEqual([]);
   });
 
+  it('keeps a winding-down reviewer visible to the merge gate until it settles, then disposes it', async () => {
+    const h = await withAgent('reviewer');
+
+    h.runtime.finish(h.agentId, 'stopped', { stopReason: 'stopped by the tower', windingDown: true });
+    await settle();
+
+    expect(h.runtime.disposed).toEqual([]);
+    expect(h.controller.activeAgentIds().has(h.agentId)).toBe(true);
+
+    h.runtime.settle(h.agentId);
+    await vi.waitFor(() => expect(h.runtime.disposed).toEqual([h.agentId]), { timeout: 3_000 });
+    expect(h.controller.agentOutput(h.agentId)?.windingDown).toBe(false);
+  });
+
   it('reports a disposed reviewer to TowerTaskStop as not running rather than unknown', async () => {
     const h = await withAgent('reviewer');
     h.runtime.finish(h.agentId, 'idle', { summary: 'Review submitted: clean.' });

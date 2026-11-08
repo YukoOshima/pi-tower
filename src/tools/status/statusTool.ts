@@ -1,6 +1,7 @@
 import { TOWER_STATUS_DESCRIPTION } from '../../prompts/index.ts';
 import type { TowerMission, TowerRosterEntry } from '../../protocol/index.ts';
 import { HUMAN_STOP_REASON } from '../../tower/constants.ts';
+import type { TowerAgentInfo } from '../../tower/runtimeTypes.ts';
 import { runTowerTool, type TowerCaller, type TowerTool, type TowerToolHost } from '../support.ts';
 import { TowerStatusToolInputSchema } from './status.ts';
 import {
@@ -51,7 +52,7 @@ export function createTowerStatusTool(
             inboxCount: status.inbox.count,
             concurrency: status.concurrency,
             recentActivity: status.recentActivity,
-            isRuntimeKnown: (agentId) => host.agentInfo(agentId) !== undefined,
+            runtimeAgent: (agentId) => host.agentInfo(agentId),
           }),
         };
       }),
@@ -62,8 +63,10 @@ export interface TowerDashboardExtras {
   readonly inboxCount: number;
   readonly concurrency: TowerStatusConcurrency;
   readonly recentActivity: readonly string[];
-  readonly isRuntimeKnown?: (agentId: string) => boolean;
+  readonly runtimeAgent?: RuntimeAgentLookup;
 }
+
+type RuntimeAgentLookup = (agentId: string) => Pick<TowerAgentInfo, 'windingDown'> | undefined;
 
 export function renderTowerDashboard(
   state: TowerStatusState,
@@ -79,7 +82,7 @@ export function renderTowerDashboard(
     '',
     ...renderMissions(state),
     ...renderUnspawnedMissions(state),
-    ...renderDeathWarnings(state, extras.isRuntimeKnown),
+    ...renderDeathWarnings(state, extras.runtimeAgent),
     '',
     '## Roster',
     '',
@@ -230,7 +233,7 @@ function renderUnspawnedMissions(state: TowerStatusState): string[] {
 
 function renderDeathWarnings(
   state: TowerStatusState,
-  isRuntimeKnown: ((agentId: string) => boolean) | undefined,
+  runtimeAgent: RuntimeAgentLookup | undefined,
 ): string[] {
   const deadByName = new Map(
     state.roster.agents.filter((a) => a.diedAt !== undefined).map((a) => [a.name, a]),
@@ -246,19 +249,22 @@ function renderDeathWarnings(
         ? `- 🛑 ${mission.id} owner ${entry.name} was stopped by the user (${entry.deathStatus ?? 'unknown'}) — dead by intent: never resume it and do not reassign the mission unless the human asks`
         : entry.kind === 'reviewer'
           ? `- ⚠️ ${mission.id} reviewer ${entry.name} died (${entry.deathStatus ?? 'unknown'}) — diagnose first: check the death status/reason and task state. A reviewer is one-shot: do not resume it or another roster agent; after diagnosis, spawn a fresh reviewer only if the mission still needs one`
-          : `- ⚠️ ${mission.id} owner ${entry.name} died (${entry.deathStatus ?? 'unknown'}) — diagnose first: check why it died (the died entry's status/reason, its task state) before reviving anything. ${reviveHint(entry, isRuntimeKnown)} only when the cause is transient (lost contact, timeout, OOM); a systematic cause (code or environment defect) is fixed or escalated to the human before any revive`,
+          : `- ⚠️ ${mission.id} owner ${entry.name} died (${entry.deathStatus ?? 'unknown'}) — diagnose first: check why it died (the died entry's status/reason, its task state) before reviving anything. ${reviveHint(entry, runtimeAgent)} only when the cause is transient (lost contact, timeout, OOM); a systematic cause (code or environment defect) is fixed or escalated to the human before any revive`,
     );
   }
   if (lines.length === 0) return lines;
   return ['', '## Dead workers', '', ...lines];
 }
 
-function reviveHint(
-  entry: TowerRosterEntry,
-  isRuntimeKnown: ((agentId: string) => boolean) | undefined,
-): string {
-  if (isRuntimeKnown !== undefined && !isRuntimeKnown(entry.agentId)) {
-    return 'Its run is not in this process (the tower restarted), so it cannot be resumed: spawn a fresh worker for the mission under a new name with TowerSpawn, or reassign the mission,';
+function reviveHint(entry: TowerRosterEntry, runtimeAgent: RuntimeAgentLookup | undefined): string {
+  if (runtimeAgent !== undefined) {
+    const info = runtimeAgent(entry.agentId);
+    if (info === undefined) {
+      return 'Its run is not in this process (the tower restarted), so it cannot be resumed: spawn a fresh worker for the mission under a new name with TowerSpawn, or reassign the mission,';
+    }
+    if (info.windingDown) {
+      return `Its stopped run is still winding down, so TowerResume refuses until it settles — then resume with TowerResume(agent="${entry.name}", prompt="...") (it always runs in the background) or reassign the mission`;
+    }
   }
   return `Resume with TowerResume(agent="${entry.name}", prompt="...") (it always runs in the background) or reassign the mission`;
 }

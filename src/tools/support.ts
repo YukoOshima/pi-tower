@@ -16,6 +16,7 @@ import type {
   TowerRunStartResult,
   TowerSteerResult,
   TowerStopResult,
+  TowerThinkingLevel,
 } from '../tower/runtimeTypes.ts';
 
 export interface TowerToolResult {
@@ -60,7 +61,7 @@ export interface TowerInboxSentPayload {
 export interface TowerSpawnBinding {
   readonly choice: string;
   readonly model: string;
-  readonly thinkingLevel?: string;
+  readonly thinkingLevel?: TowerThinkingLevel;
 }
 
 export type TowerSpawnModelResolution =

@@ -44,6 +44,9 @@ export function isHumanStop(info: Pick<TowerAgentInfo, 'status' | 'stopReason'>)
   return info.status === 'stopped' && info.stopReason?.trim() === HUMAN_STOP_REASON;
 }
 
+export const WINDING_DOWN_NOTE =
+  'winding down — its stopped run has not settled yet: it still holds a concurrency slot and TowerResume refuses until it settles';
+
 export function displayStatus(info: Pick<TowerAgentInfo, 'status' | 'stopReason'>): string {
   if (info.status === 'idle') return 'completed';
   if (isHumanStop(info)) return 'stopped by the human';
@@ -78,8 +81,9 @@ export function agentLine(
       ? ` (${singleLine(info.stopReason)})`
       : '';
   const elapsed = (info.endedAt ?? now) - info.startedAt;
+  const windingDown = info.windingDown ? ` (${WINDING_DOWN_NOTE})` : '';
   return [
-    `- ${info.name} (${info.kind ?? entry?.kind ?? 'agent'}) — status: ${displayStatus(info)}${reason}`,
+    `- ${info.name} (${info.kind ?? entry?.kind ?? 'agent'}) — status: ${displayStatus(info)}${reason}${windingDown}`,
     `agent_id: ${info.agentId}`,
     `task_id: ${info.taskId}`,
     describeAgentModel(info),
@@ -99,7 +103,7 @@ export function renderAgentOutput(
     `kind: ${output.kind ?? entry?.kind ?? 'agent'}`,
     `agent_id: ${output.agentId}`,
     `task_id: ${output.taskId}`,
-    `status: ${displayStatus(output)}`,
+    `status: ${displayStatus(output)}${output.windingDown ? ` — ${WINDING_DOWN_NOTE}` : ''}`,
     describeAgentModel(output),
     agentAssignment(output, entry),
     `runs: ${String(output.runs)}`,

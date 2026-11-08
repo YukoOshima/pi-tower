@@ -120,6 +120,9 @@ export interface TowerLog {
 
 const SILENT_LOG: TowerLog = { info: () => undefined, warn: () => undefined };
 
+const REVIEWER_SETTLE_POLL_MS = 1_000;
+const REVIEWER_SETTLE_POLL_LIMIT = 1_800;
+
 const DEFAULT_RATE_LIMIT_SNAPSHOT: TowerRateLimitSnapshot = {
   budget: 256,
   inflight: 0,
@@ -915,8 +918,29 @@ export class TowerController implements TowerToolHost {
     if (output?.kind !== 'reviewer') return;
     this.retainedOutputs.set(output.agentId, output);
     queueMicrotask(() => {
-      void runtime.dispose(event.agentId, 'reviewer finished').catch(() => false);
+      this.disposeSettledReviewer(runtime, event.agentId, 0);
     });
+  }
+
+  private disposeSettledReviewer(runtime: TowerRuntime, agentId: string, attempt: number): void {
+    if (this.shuttingDown) return;
+    const info = runtime.get(agentId);
+    if (info === undefined || info.status === 'running') return;
+    if (info.windingDown) {
+      if (attempt >= REVIEWER_SETTLE_POLL_LIMIT) return;
+      const timer = setTimeout(() => {
+        this.disposeSettledReviewer(runtime, agentId, attempt + 1);
+      }, REVIEWER_SETTLE_POLL_MS);
+      timer.unref();
+      return;
+    }
+    const output = runtime.output(agentId);
+    if (output !== undefined) this.retainedOutputs.set(agentId, output);
+    void runtime.dispose(agentId, 'reviewer finished').catch(() => false);
+  }
+
+  diagnostic(message: string): void {
+    this.log.warn(`tower: ${message}`);
   }
 
   private retainedOutput(id: string): TowerAgentOutput | undefined {

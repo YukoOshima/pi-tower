@@ -1,10 +1,19 @@
-import { renderSteerPreview, sendSteeredNote, sendUndeliveredNote } from '../prompts/index.ts';
+import {
+  renderSteerPreview,
+  sendDeferredNote,
+  sendHandledNote,
+  sendSteeredNote,
+  sendUndeliveredNote,
+  sendUnreachableNote,
+} from '../prompts/index.ts';
 import {
   BROADCAST_NAME,
   TOWER_NAME,
+  type TowerRosterEntry,
   type TowerSendResult,
   type TowerState,
 } from '../protocol/index.ts';
+import type { TowerSteerResult } from '../tower/runtimeTypes.ts';
 import type { TowerToolHost } from './support.ts';
 
 export async function deliverTowerMessage(
@@ -27,9 +36,33 @@ export async function deliverTowerMessage(
   }
   const entry = toTower ? undefined : state.roster.agents.find((agent) => agent.name === item.to);
   if (entry === undefined) return '';
-  const steered = await steerIntoRunningAgent(host, entry.agentId, item.from, item.subject);
-  if (steered) return `\n${sendSteeredNote(item.to)}`;
-  return item.from === TOWER_NAME ? `\n${sendUndeliveredNote(item.to, entry.kind)}` : '';
+  const outcome = await steerIntoRunningAgent(host, entry.agentId, item.from, item.subject);
+  if (outcome === 'steered') return `\n${sendSteeredNote(item.to)}`;
+  if (item.from !== TOWER_NAME) return '';
+  return `\n${undeliveredNote(host, entry, item.to, outcome)}`;
+}
+
+function undeliveredNote(
+  host: TowerToolHost,
+  entry: TowerRosterEntry,
+  to: string,
+  outcome: TowerSteerResult | 'failed',
+): string {
+  switch (outcome) {
+    case 'handled':
+      return sendHandledNote(to);
+    case 'idle': {
+      const info = host.agentInfo(entry.agentId);
+      if (info !== undefined && (info.status === 'running' || info.windingDown)) {
+        return sendDeferredNote(to, info.windingDown);
+      }
+      return sendUndeliveredNote(to, entry.kind);
+    }
+    case 'missing':
+      return sendUnreachableNote(to, entry.kind);
+    default:
+      return sendUndeliveredNote(to, entry.kind);
+  }
 }
 
 async function steerIntoRunningAgent(
@@ -37,10 +70,10 @@ async function steerIntoRunningAgent(
   agentId: string,
   from: string,
   subject: string,
-): Promise<boolean> {
+): Promise<TowerSteerResult | 'failed'> {
   try {
-    return (await host.steerAgent(agentId, renderSteerPreview(from, subject))) === 'steered';
+    return await host.steerAgent(agentId, renderSteerPreview(from, subject));
   } catch {
-    return false;
+    return 'failed';
   }
 }

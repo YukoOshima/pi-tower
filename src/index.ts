@@ -2,6 +2,7 @@ import { CONFIG_DIR_NAME, getAgentDir, type ExtensionAPI } from '@earendil-works
 
 import { TOWER_MODEL_ENV, TOWER_MODEL_FLAGS, TOWER_ROLES } from './config/index.ts';
 import { createOrchestratorTools, toToolDefinition } from './tools/index.ts';
+import { createTowerAgentRuntime } from './tower/agentRuntime.ts';
 import {
   TOWER_COMMAND_DESCRIPTION,
   commandUi,
@@ -20,7 +21,12 @@ export default function towerExtension(pi: ExtensionAPI): void {
     env: process.env,
     getFlag: (name) => pi.getFlag(name),
   });
-  const controller = new TowerController({ pi, models });
+  const controller = new TowerController({
+    pi,
+    models,
+    createRuntime: (owner) =>
+      createTowerAgentRuntime(owner, { maxRunningAgents: () => models.maxRunningAgents }),
+  });
   const observe = { onContext: controller.observe.bind(controller) };
 
   for (const tool of createOrchestratorTools(controller)) {

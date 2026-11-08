@@ -4,7 +4,13 @@ import {
   unknownAgentRefusal,
 } from '../../prompts/index.ts';
 import { TOWER_STOP_REASON_PREFIX } from '../../tower/constants.ts';
-import { displayStatus, knownAgentNames, loadRoster, resolveAgentRef } from '../agents.ts';
+import {
+  WINDING_DOWN_NOTE,
+  displayStatus,
+  knownAgentNames,
+  loadRoster,
+  resolveAgentRef,
+} from '../agents.ts';
 import {
   isMainAgent,
   runTowerTool,
@@ -45,10 +51,11 @@ export function createTowerTaskStopTool(
         const reason = towerTaskStopReason(args.reason);
         const result = await host.stopAgent(ref.id, reason);
         const after = host.agentInfo(ref.id) ?? before;
+        const windingDown = after.windingDown ? `; it is still ${WINDING_DOWN_NOTE}` : '';
         if (result === 'stopped') {
           return {
             output: [
-              `stopped tower agent "${after.name}" (agent_id: ${after.agentId}, task_id: ${after.taskId}) — reason recorded: ${reason}`,
+              `stopped tower agent "${after.name}" (agent_id: ${after.agentId}, task_id: ${after.taskId}) — reason recorded: ${reason}${windingDown}`,
               after.kind === 'reviewer'
                 ? 'A reviewer is one-shot: it is never resumed; spawn a fresh reviewer with a new name if the review is still needed.'
                 : `Resume it later with TowerResume(agent="${after.name}", prompt="...") if its work should continue.`,
@@ -57,7 +64,7 @@ export function createTowerTaskStopTool(
         }
         if (result === 'idle' || (result === 'missing' && after.status !== 'running')) {
           return {
-            output: `tower agent "${after.name}" (agent_id: ${after.agentId}) is not running — its last run ended with status: ${displayStatus(after)}; nothing was stopped`,
+            output: `tower agent "${after.name}" (agent_id: ${after.agentId}) is not running — its last run ended with status: ${displayStatus(after)}; nothing was stopped${windingDown}`,
           };
         }
         return {
