@@ -47,6 +47,12 @@ export interface PiRpcOptions {
 interface Waiter {
   readonly match: (event: PiEvent) => boolean;
   readonly resolve: (event: PiEvent) => void;
+  readonly reject: (error: Error) => void;
+}
+
+interface Pending {
+  readonly resolve: (event: PiEvent) => void;
+  readonly reject: (error: Error) => void;
 }
 
 export class PiTimeoutError extends Error {}
@@ -79,11 +85,12 @@ export class PiRpc {
   lastEventAt = Date.now();
   exitCode: number | null | undefined;
   private readonly child: ChildProcessWithoutNullStreams;
-  private readonly pending = new Map<string, (event: PiEvent) => void>();
+  private readonly pending = new Map<string, Pending>();
   private waiters: Waiter[] = [];
   private buffer = '';
   private counter = 0;
   private readonly exited: Promise<number | null>;
+  private resolveExited: (code: number | null) => void = () => undefined;
 
   constructor(options: PiRpcOptions) {
     this.options = options;
@@ -94,11 +101,19 @@ export class PiRpc {
     });
     this.log(`spawn pi ${options.args.join(' ')} (cwd ${options.cwd}, pid ${String(this.child.pid)})`);
     this.exited = new Promise((resolve) => {
-      this.child.on('exit', (code) => {
-        this.exitCode = code;
-        this.log(`pi exited: ${String(code)}`);
-        resolve(code);
-      });
+      this.resolveExited = resolve;
+    });
+    this.child.on('exit', (code) => {
+      this.log(`pi exited: ${String(code)}`);
+      this.markGone(code, `exited with ${String(code)}`);
+    });
+    this.child.on('error', (error) => {
+      this.log(`pi process error: ${error.message}`);
+      this.markGone(null, error.message);
+    });
+    this.child.stdin.on('error', (error) => {
+      this.log(`pi stdin error: ${error.message}`);
+      this.markGone(null, `stdin ${error.message}`);
     });
     this.child.stderr.on('data', (chunk: Buffer) => {
       this.stderr += chunk.toString('utf8');
@@ -125,6 +140,20 @@ export class PiRpc {
     return this.child.pid;
   }
 
+  private markGone(code: number | null, reason: string): void {
+    const first = this.exitCode === undefined;
+    if (first || code !== null) this.exitCode = code;
+    this.running = false;
+    this.resolveExited(code);
+    if (!first) return;
+    const error = new Error(`[${this.options.label}] pi is gone (${reason})`);
+    for (const pending of this.pending.values()) pending.reject(error);
+    this.pending.clear();
+    const waiters = this.waiters;
+    this.waiters = [];
+    for (const waiter of waiters) waiter.reject(error);
+  }
+
   log(text: string): void {
     const line = `${String(Math.round((Date.now() - started) / 1000)).padStart(4)}s [${this.options.label}] ${text}`;
     appendFileSync(this.options.logFile, `${line}\n`);
@@ -135,10 +164,10 @@ export class PiRpc {
     this.lastEventAt = Date.now();
     if (event.type === 'message_update') return;
     if (event.type === 'response' && typeof event.id === 'string' && this.pending.has(event.id)) {
-      const resolve = this.pending.get(event.id);
+      const pending = this.pending.get(event.id);
       this.pending.delete(event.id);
       this.events.push(event);
-      resolve?.(event);
+      pending?.resolve(event);
       return;
     }
     this.events.push(event);
@@ -195,20 +224,31 @@ export class PiRpc {
   }
 
   private write(record: Record<string, unknown>): void {
-    if (this.exitCode !== undefined) return;
-    this.child.stdin.write(`${JSON.stringify(record)}\n`);
+    if (this.exitCode !== undefined || this.child.stdin.destroyed) return;
+    try {
+      this.child.stdin.write(`${JSON.stringify(record)}\n`);
+    } catch (error) {
+      this.markGone(null, `stdin write failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }
 
   send(command: Record<string, unknown>, timeoutMs = 30_000): Promise<PiEvent> {
     const id = `req-${String(++this.counter)}`;
+    if (this.exitCode !== undefined) return Promise.reject(new Error(`[${this.options.label}] pi is gone — cannot send ${String(command.type)}`));
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
         reject(new PiTimeoutError(`[${this.options.label}] timeout waiting for ${String(command.type)} response`));
       }, timeoutMs);
-      this.pending.set(id, (event) => {
-        clearTimeout(timer);
-        resolve(event);
+      this.pending.set(id, {
+        resolve: (event) => {
+          clearTimeout(timer);
+          resolve(event);
+        },
+        reject: (error) => {
+          clearTimeout(timer);
+          reject(error);
+        },
       });
       this.write({ id, ...command });
     });
@@ -217,12 +257,17 @@ export class PiRpc {
   waitFor(match: (event: PiEvent) => boolean, timeoutMs: number, label: string, fromIndex = this.events.length): Promise<PiEvent> {
     const seen = this.events.slice(fromIndex).find(match);
     if (seen !== undefined) return Promise.resolve(seen);
+    if (this.exitCode !== undefined) return Promise.reject(new Error(`[${this.options.label}] pi is gone — not waiting for ${label}`));
     return new Promise((resolve, reject) => {
       const waiter: Waiter = {
         match,
         resolve: (event) => {
           clearTimeout(timer);
           resolve(event);
+        },
+        reject: (error) => {
+          clearTimeout(timer);
+          reject(error);
         },
       };
       const timer = setTimeout(() => {

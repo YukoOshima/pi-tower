@@ -3,6 +3,7 @@ import { join } from 'node:path';
 
 import { agentTranscriptPath, frontmatter, reviewFiles, summarizeTranscript, towerState, type MissionRecord, type RosterEntry } from '../evidence.ts';
 import { clip, type PiRpc } from '../rpc.ts';
+import { parseInboxWake, type InboxWake, type WakeReference } from '../wakes.ts';
 import { driveUntil, recordUsage, roleConfig, runsOf, sessionModel, startSession, TURN_TIMEOUT_MS, type ScenarioContext, type ScenarioDefinition } from '../scenario.ts';
 import { git, listFiles, tryGit } from '../workspace.ts';
 
@@ -30,10 +31,6 @@ function allMerged(repo: string): boolean {
 
 function overlaps(a: { firstAt: number; lastAt: number }, b: { firstAt: number; lastAt: number }): boolean {
   return a.firstAt < b.lastAt && b.firstAt < a.lastAt;
-}
-
-function customCount(rpc: PiRpc, type: string, pattern: RegExp, from: number): number {
-  return rpc.customMessages(type, from).filter((message) => pattern.test(message.text)).length;
 }
 
 async function teardown(ctx: ScenarioContext, rpc: PiRpc, repo: string, mergedMissions: readonly MissionRecord[]): Promise<void> {
@@ -113,13 +110,26 @@ export const s3Lifecycle: ScenarioDefinition = {
       [...windows.map((w) => `${w.name}: ${new Date(w.firstAt).toISOString()} → ${new Date(w.lastAt).toISOString()}`), `overlapping: ${parallel.join(', ') || '(none)'}`],
     );
 
-    const reviewWakes = customCount(rpc, 'tower-inbox-wake', /review-request/, start);
-    const digestWakes = customCount(rpc, 'tower-inbox-wake', /Gate digest:/, start);
-    const surveyWakes = customCount(rpc, 'tower-inbox-wake', /survey-summary/, start);
+    const wakes = rpc.customMessages('tower-inbox-wake', start).map((message) => parseInboxWake(message.text));
+    const wakeFor = (subject: string, mission: MissionRecord | undefined): { wake: InboxWake; reference: WakeReference } | undefined => {
+      for (const wake of wakes) {
+        const reference = wake.references.find((candidate) => candidate.subject === subject && candidate.mission === mission?.id);
+        if (reference !== undefined) return { wake, reference };
+      }
+      return undefined;
+    };
+    const expectedWakes = [['review-request', m1], ['review-request', m2], ['survey-summary', m3]] as const;
+    const matched = expectedWakes.map(([subject, mission]) => ({ subject, mission, hit: wakeFor(subject, mission) }));
+    const wakeOk = matched.every(({ subject, mission, hit }) =>
+      hit !== undefined && hit.reference.from === mission?.owner && hit.reference.file !== undefined && existsSync(join(repo, hit.reference.file)) && (subject !== 'review-request' || hit.wake.digestMissions.includes(mission?.id ?? '')),
+    );
     report.check(
-      'TowerComplete wakes the tower (review-request and survey-summary wakes with a gate digest)',
-      reviewWakes >= 2 && digestWakes >= 1 && surveyWakes >= 1,
-      `tower-inbox-wake messages: review-request=${String(reviewWakes)} survey-summary=${String(surveyWakes)} with gate digest=${String(digestWakes)}`,
+      'TowerComplete wakes the tower: the M1/M2 review-requests and the M3 survey-summary are each referenced by a tower-inbox-wake (review-request wakes carry their mission\'s gate digest)',
+      wakeOk,
+      [
+        `${String(wakes.length)} tower-inbox-wake message(s) carrying ${String(wakes.reduce((sum, wake) => sum + wake.references.length, 0))} reference(s); batched wakes: ${String(wakes.filter((wake) => wake.references.length > 1).length)}`,
+        ...matched.map(({ subject, mission, hit }) => (hit === undefined ? `${mission?.id ?? '?'} ${subject}: not referenced by any wake` : `${mission?.id ?? '?'} ${subject}: ${clip(hit.reference.line, 200)} · digest missions [${hit.wake.digestMissions.join(',')}]`)),
+      ],
     );
 
     const reviewerLines = reviewers.map((reviewer) => {

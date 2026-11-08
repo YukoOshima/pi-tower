@@ -12,7 +12,7 @@ import {
   type ScenarioContext,
   type ScenarioDefinition,
 } from '../scenario.ts';
-import type { RoleModel } from '../settings.ts';
+import { discriminationNotes, type RoleModel } from '../settings.ts';
 
 const WORKER = 'agent-notes';
 const REVIEWERS = ['reviewer-default-1', 'reviewer-as-worker', 'reviewer-default-2'] as const;
@@ -84,25 +84,34 @@ function checkAgentModel(
   const summary = transcript === undefined ? undefined : summarizeTranscript(transcript);
   const models = distinct(summary?.assistantModels ?? []);
   report.check(
-    `${name}: its .tower/agents transcript runs on the ${input.role} model`,
-    summary !== undefined && summary.assistantModels.length > 0 && models.length === 1 && models[0] === expected.model && summary.modelChanges.at(-1) === expected.model,
+    `${name}: its .tower/agents transcript runs on the ${input.role} model${thinking === undefined ? '' : ` at thinking ${thinking}`}`,
+    summary !== undefined && summary.assistantModels.length > 0 && models.length === 1 && models[0] === expected.model && summary.modelChanges.at(-1) === expected.model && (thinking === undefined || summary.thinkingLevels.at(-1) === thinking),
     summary === undefined
       ? 'no transcript'
       : `${transcript?.split('/.tower/')[1] ?? ''}: model_change=${summary.modelChanges.join(',')} thinking=${summary.thinkingLevels.join(',')} assistant messages=${String(summary.assistantModels.length)} on ${models.join(',')}`,
   );
 }
 
-function sessionSegments(sessionFile: string): { readonly changes: string[]; readonly segments: { model: string; assistant: string[] }[] } {
+interface SessionSegment {
+  readonly model: string;
+  readonly assistant: string[];
+  readonly thinking: string[];
+}
+
+function sessionSegments(sessionFile: string): { readonly changes: string[]; readonly segments: SessionSegment[] } {
   const changes: string[] = [];
-  const segments: { model: string; assistant: string[] }[] = [];
+  const segments: SessionSegment[] = [];
+  let thinking = 'unset';
   for (const line of readJsonl(sessionFile)) {
+    if (line.type === 'thinking_level_change') thinking = String(line.thinkingLevel);
     if (line.type === 'model_change') {
       const model = `${String(line.provider)}/${String(line.modelId)}`;
       changes.push(model);
-      segments.push({ model, assistant: [] });
+      segments.push({ model, assistant: [], thinking: [] });
     }
     if (line.type === 'message' && line.message?.role === 'assistant') {
       segments.at(-1)?.assistant.push(`${String(line.message.provider)}/${String(line.message.model)}`);
+      segments.at(-1)?.thinking.push(thinking);
     }
   }
   return { changes, segments };
@@ -142,6 +151,7 @@ export const s1Models: ScenarioDefinition = {
     });
     const { rpc, repo } = session;
     const configPath = join(ctx.dir, 'tower.json');
+    for (const note of discriminationNotes(settings)) report.note(note);
 
     const models = await rpc.command('/tower models');
     report.note(`/tower models:\n${models.text}`);
@@ -161,8 +171,14 @@ export const s1Models: ScenarioDefinition = {
     report.check('before /tower on the main session answers on the starting model', preModels.length === 1 && preModels[0] === P.model, `assistant models before /tower on: ${preModels.join(', ')}`);
 
     const on = await rpc.command('/tower on');
-    const onModel = await sessionModel(rpc);
-    report.check('/tower on switches the main session to the orchestrator model A', /Tower mode: ON/.test(on.text) && onModel === A.model, `${on.text.split('\n')[0] ?? ''}; session model now ${onModel}`);
+    const onState = await rpc.send({ type: 'get_state' });
+    const onModel = `${String(onState.data?.model?.provider)}/${String(onState.data?.model?.id)}`;
+    const onThinking = String(onState.data?.thinkingLevel);
+    report.check(
+      `/tower on switches the main session to the orchestrator model A${A.thinking === undefined ? '' : ` at thinking ${A.thinking}`}`,
+      /Tower mode: ON/.test(on.text) && onModel === A.model && (A.thinking === undefined || onThinking === A.thinking),
+      `${on.text.split('\n')[0] ?? ''}; session model now ${onModel} (thinking ${onThinking})`,
+    );
 
     const objective = await rpc.prompt(OBJECTIVE, TURN_TIMEOUT_MS);
     const objectiveModels = distinct(rpc.assistantTurns(objective.from, objective.to).map((turn) => `${String(turn.provider)}/${String(turn.model)}`));
@@ -215,11 +231,14 @@ export const s1Models: ScenarioDefinition = {
     const state = await rpc.send({ type: 'get_state' });
     const sessionFile = String(state.data?.sessionFile ?? '');
     const { changes, segments } = sessionSegments(sessionFile);
-    const segmentLines = segments.map((segment) => `model_change ${segment.model} → ${String(segment.assistant.length)} assistant message(s) on ${distinct(segment.assistant).join(',') || '-'}`);
+    const segmentLines = segments.map((segment) => `model_change ${segment.model} → ${String(segment.assistant.length)} assistant message(s) on ${distinct(segment.assistant).join(',') || '-'} at thinking ${distinct(segment.thinking).join(',') || '-'}`);
     const withMessages = segments.filter((segment) => segment.assistant.length > 0);
+    const orchestratorThinking = withMessages[1]?.thinking ?? [];
     report.check(
-      'the orchestrator session JSONL shows P → A (/tower on) → P (/tower off), each assistant message on the active model',
-      withMessages.map((segment) => segment.model).join(' → ') === `${P.model} → ${A.model} → ${P.model}` && segments.every((segment) => segment.assistant.every((model) => model === segment.model)),
+      `the orchestrator session JSONL shows P → A (/tower on) → P (/tower off), each assistant message on the active model${A.thinking === undefined ? '' : `, A's at thinking ${A.thinking}`}`,
+      withMessages.map((segment) => segment.model).join(' → ') === `${P.model} → ${A.model} → ${P.model}` &&
+        segments.every((segment) => segment.assistant.every((model) => model === segment.model)) &&
+        (A.thinking === undefined || (orchestratorThinking.length > 0 && orchestratorThinking.every((level) => level === A.thinking))),
       [`session file: ${sessionFile}`, `model_change sequence: ${changes.join(' → ')}`, ...segmentLines],
     );
 

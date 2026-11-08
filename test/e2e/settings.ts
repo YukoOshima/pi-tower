@@ -1,5 +1,6 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -23,6 +24,8 @@ export interface E2eSettings {
   readonly worker: RoleModel;
   readonly reviewer: RoleModel;
   readonly session: RoleModel;
+  readonly agentDir: string;
+  readonly piDefault: { readonly model: string | undefined; readonly thinking: string | undefined };
   readonly scenarios: readonly ScenarioId[];
   readonly globalTimeoutMs: number;
   readonly scenarioTimeoutMs: number;
@@ -61,6 +64,41 @@ function parseScenarios(raw: string | undefined): readonly ScenarioId[] {
   return SCENARIO_IDS.filter((id) => picked.includes(id));
 }
 
+function readPiDefault(agentDir: string): E2eSettings['piDefault'] {
+  try {
+    const parsed = JSON.parse(readFileSync(join(agentDir, 'settings.json'), 'utf8')) as Record<string, unknown>;
+    const provider = typeof parsed.defaultProvider === 'string' ? parsed.defaultProvider : undefined;
+    const model = typeof parsed.defaultModel === 'string' ? parsed.defaultModel : undefined;
+    return {
+      model: provider !== undefined && model !== undefined ? `${provider}/${model}` : model,
+      thinking: typeof parsed.defaultThinkingLevel === 'string' ? parsed.defaultThinkingLevel : undefined,
+    };
+  } catch {
+    return { model: undefined, thinking: undefined };
+  }
+}
+
+export function discriminationNotes(settings: E2eSettings): string[] {
+  const { orchestrator: A, worker: B, reviewer: C, session: P, piDefault } = settings;
+  const fallback = piDefault.model === undefined ? 'unknown' : `${piDefault.model} (thinking ${piDefault.thinking ?? 'pi default'})`;
+  const notes = [`pi global default model (a dropped role binding falls back to it): ${fallback}`];
+  for (const [label, role] of [['orchestrator A', A], ['worker B', B], ['reviewer C', C]] as const) {
+    const clashes: string[] = [];
+    if (role.model === piDefault.model) clashes.push("pi's global default model");
+    if (label !== 'orchestrator A' && role.model === P.model) clashes.push('the starting session model P');
+    if (clashes.length === 0) {
+      notes.push(`${label} ${role.spec}: differs from pi's default and from P, so its model-id checks discriminate`);
+      continue;
+    }
+    const thinkingSaves = role.thinking !== undefined && role.thinking !== (role.model === piDefault.model ? piDefault.thinking : P.thinking);
+    notes.push(
+      `WARNING ${label} ${role.spec} equals ${clashes.join(' and ')}: its model-id checks cannot catch a binding that silently fell back there; ` +
+        (thinkingSaves ? `the thinking-level assertions (configured ${String(role.thinking)}) still discriminate` : 'pick another model or thinking level for this role to make the checks discriminating'),
+    );
+  }
+  return notes;
+}
+
 export function loadSettings(argv: readonly string[]): E2eSettings {
   const checkout = resolve(envValue('PI_TOWER_E2E_CHECKOUT') ?? join(here, '..', '..'));
   const extension = join(checkout, 'src', 'index.ts');
@@ -78,6 +116,7 @@ export function loadSettings(argv: readonly string[]): E2eSettings {
   if (session.model === orchestrator.model) {
     throw new Error(`the starting session model (${session.model}) must differ from the orchestrator model so the /tower on switch is observable`);
   }
+  const agentDir = envValue('PI_CODING_AGENT_DIR')?.replace(/^~(?=\/|$)/, homedir()) ?? join(homedir(), '.pi', 'agent');
   const cliScenarios = argv.find((arg) => arg.startsWith('--scenarios='))?.slice('--scenarios='.length);
   return {
     checkout,
@@ -89,6 +128,8 @@ export function loadSettings(argv: readonly string[]): E2eSettings {
     worker,
     reviewer,
     session,
+    agentDir,
+    piDefault: readPiDefault(agentDir),
     scenarios: parseScenarios(cliScenarios ?? envValue('PI_TOWER_E2E_SCENARIOS')),
     globalTimeoutMs: positiveInt('PI_TOWER_E2E_TIMEOUT_MS', 75 * 60_000),
     scenarioTimeoutMs: positiveInt('PI_TOWER_E2E_SCENARIO_TIMEOUT_MS', 20 * 60_000),

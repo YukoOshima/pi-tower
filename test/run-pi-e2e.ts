@@ -1,19 +1,22 @@
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
-import { homedir } from 'node:os';
 import { join } from 'node:path';
 
 import { renderReport, ScenarioReport } from './e2e/report.ts';
 import { sleep } from './e2e/rpc.ts';
 import { SCENARIOS } from './e2e/scenarios/index.ts';
-import { loadSettings } from './e2e/settings.ts';
+import { discriminationNotes, loadSettings } from './e2e/settings.ts';
+import { selfCheckWakeParser } from './e2e/wakes.ts';
 import { RunRoot, tryGit } from './e2e/workspace.ts';
 
 const settings = loadSettings(process.argv.slice(2));
+const selfCheck = await selfCheckWakeParser(settings.checkout);
+console.log(`wake parser self-check: ${selfCheck.ok ? 'ok' : 'FAILED'}\n${selfCheck.lines.map((line) => `  - ${line}`).join('\n')}`);
+if (!selfCheck.ok || process.argv.includes('--selfcheck')) process.exit(selfCheck.ok ? 0 : 1);
 const startedAt = Date.now();
 const root = new RunRoot();
 const reports: ScenarioReport[] = [];
-const watched = [join(homedir(), '.pi', 'agent', 'settings.json'), join(homedir(), '.pi', 'agent', 'tower.json')];
+const watched = [join(settings.agentDir, 'settings.json'), join(settings.agentDir, 'tower.json')];
 
 function fingerprint(path: string): string {
   return existsSync(path) ? createHash('sha256').update(readFileSync(path)).digest('hex') : 'absent';
@@ -32,6 +35,9 @@ const header = [
   `- starting session model: ${settings.session.spec}`,
   `- scenarios: ${settings.scenarios.join(', ')}`,
   `- run root: ${root.path}${settings.keep ? ' (kept)' : ' (removed at exit)'}`,
+  `- offline wake parser self-check: ok (${selfCheck.lines.join('; ')})`,
+  '- role-model discrimination:',
+  ...discriminationNotes(settings).map((note) => `  - ${note}`),
 ];
 console.log(['pi-tower live e2e', ...header].join('\n'));
 
@@ -61,6 +67,12 @@ const globalTimer = setTimeout(() => {
   void finish(2, `GLOBAL TIMEOUT after ${String(settings.globalTimeoutMs)}ms — killing pi processes`);
 }, settings.globalTimeoutMs);
 globalTimer.unref();
+process.on('uncaughtException', (error) => {
+  void finish(1, `uncaught exception: ${error.stack ?? error.message}`);
+});
+process.on('unhandledRejection', (reason) => {
+  void finish(1, `unhandled rejection: ${reason instanceof Error ? (reason.stack ?? reason.message) : String(reason)}`);
+});
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {
   process.on(signal, () => {
     void finish(130, `received ${signal} — killing pi processes`);
