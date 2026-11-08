@@ -1,4 +1,5 @@
 export const SHELL_PARSE_MAX_TOKENS = 10_000;
+export const SHELL_PARSE_MAX_SUBSHELL_DEPTH = 16;
 
 export interface ShellParseOptions {
   readonly maxTokens?: number;
@@ -7,6 +8,8 @@ export interface ShellParseOptions {
 export interface ShellWord {
   readonly text: string;
   readonly value: string | undefined;
+  readonly literal?: string;
+  readonly pattern?: string;
 }
 
 export interface ShellAssignment {
@@ -14,10 +17,25 @@ export interface ShellAssignment {
   readonly value: ShellWord;
 }
 
-export interface ShellCommand {
+export interface ShellRedirect {
+  readonly operator: string;
+  readonly target: ShellWord;
+}
+
+export interface ShellSimpleCommand {
+  readonly kind: 'simple';
   readonly assignments: readonly ShellAssignment[];
   readonly words: readonly ShellWord[];
+  readonly redirects: readonly ShellRedirect[];
 }
+
+export interface ShellSubshell {
+  readonly kind: 'subshell';
+  readonly script: ShellScript;
+  readonly redirects: readonly ShellRedirect[];
+}
+
+export type ShellCommand = ShellSimpleCommand | ShellSubshell;
 
 export interface ShellPipeline {
   readonly negated: boolean;
@@ -49,7 +67,6 @@ export type ShellParseFailure =
   | 'command-substitution'
   | 'process-substitution'
   | 'expansion'
-  | 'subshell'
   | 'brace-group'
   | 'compound-command'
   | 'heredoc'
@@ -64,13 +81,14 @@ type ShellOperator = ';;&' | ';;' | ';&' | '&&' | '||' | '|&' | '|' | ';' | '&' 
 type Token =
   | { readonly kind: 'word'; readonly word: ShellWord; readonly offset: number }
   | { readonly kind: 'operator'; readonly operator: ShellOperator; readonly offset: number }
-  | { readonly kind: 'redirect'; readonly offset: number }
+  | { readonly kind: 'redirect'; readonly operator: string; readonly offset: number }
   | { readonly kind: 'newline'; readonly offset: number };
 
 interface Cursor {
   readonly tokens: readonly Token[];
   readonly length: number;
   index: number;
+  depth: number;
 }
 
 class ShellParseError extends Error {
@@ -89,7 +107,10 @@ const WORD_BREAKS: ReadonlySet<string> = new Set([' ', '\t', '\n', '|', '&', ';'
 const REDIRECT = /(?:\d+|\{[A-Za-z_][A-Za-z0-9_]*\})?(<<<|<<-?|<>|<&|<\(|<|>>|>&|>\||>\(|>)|(&>>?)/y;
 const ASSIGNMENT = /^([A-Za-z_][A-Za-z0-9_]*)\+?=/;
 const DYNAMIC_VALUE = /[$`*?[\]{}]/;
+const NON_GLOB_DYNAMIC_VALUE = /[$`{}]/;
 const DOUBLE_QUOTE_ESCAPES = '$`"\\';
+const GLOB_SPECIAL = '*?[]\\';
+const UNQUOTED_EXPANSIONS = '*?[{';
 
 const COMPOUND_COMMAND_WORDS: readonly string[] = [
   'if',
@@ -121,7 +142,7 @@ export function parseShell(source: string, options: ShellParseOptions = {}): She
     const carriageReturn = source.indexOf('\r');
     if (carriageReturn >= 0) throw new ShellParseError('syntax', carriageReturn);
     const tokens = tokenize(source, options.maxTokens ?? SHELL_PARSE_MAX_TOKENS);
-    return { ok: true, script: parseScript({ tokens, length: source.length, index: 0 }) };
+    return { ok: true, script: parseScript({ tokens, length: source.length, index: 0, depth: 0 }, false) };
   } catch (error) {
     if (error instanceof ShellParseError) return { ok: false, reason: error.reason, offset: error.offset };
     throw error;
@@ -155,13 +176,14 @@ function tokenize(source: string, maxTokens: number): Token[] {
     REDIRECT.lastIndex = pos;
     const redirect = REDIRECT.exec(source);
     if (redirect !== null) {
-      const operator = redirect[1] ?? redirect[2];
+      const operator = redirect[1] ?? redirect[2] ?? '';
       if (operator === '<<' || operator === '<<-') throw new ShellParseError('heredoc', pos);
       if (operator === '<(' || operator === '>(') throw new ShellParseError('process-substitution', pos);
-      tokens.push({ kind: 'redirect', offset: pos });
+      tokens.push({ kind: 'redirect', operator, offset: pos });
       pos += redirect[0].length;
       continue;
     }
+    if (source.startsWith('((', pos)) throw new ShellParseError('compound-command', pos);
     const operator = OPERATORS.find((candidate) => source.startsWith(candidate, pos));
     if (operator !== undefined) {
       tokens.push({ kind: 'operator', operator, offset: pos });
@@ -178,7 +200,9 @@ function tokenize(source: string, maxTokens: number): Token[] {
 function scanWord(source: string, start: number): { readonly word: ShellWord; readonly end: number } {
   let pos = start;
   let value = '';
+  let pattern = '';
   let dynamic = false;
+  let expandable = false;
   while (pos < source.length) {
     const char = source[pos]!;
     if (WORD_BREAKS.has(char)) break;
@@ -186,9 +210,13 @@ function scanWord(source: string, start: number): { readonly word: ShellWord; re
       const next = source[pos + 1];
       if (next === undefined) {
         value += char;
+        pattern += quoteForPattern(char);
         pos += 1;
       } else {
-        if (next !== '\n') value += next;
+        if (next !== '\n') {
+          value += next;
+          pattern += quoteForPattern(next);
+        }
         pos += 2;
       }
       continue;
@@ -196,13 +224,16 @@ function scanWord(source: string, start: number): { readonly word: ShellWord; re
     if (char === "'") {
       const close = source.indexOf("'", pos + 1);
       if (close < 0) throw new ShellParseError('unterminated-quote', pos);
-      value += source.slice(pos + 1, close);
+      const quoted = source.slice(pos + 1, close);
+      value += quoted;
+      pattern += quoteForPattern(quoted);
       pos = close + 1;
       continue;
     }
     if (char === '"') {
       const quoted = scanDoubleQuoted(source, pos);
       value += quoted.value;
+      pattern += quoteForPattern(quoted.value);
       dynamic ||= quoted.dynamic;
       pos = quoted.end;
       continue;
@@ -213,12 +244,28 @@ function scanWord(source: string, start: number): { readonly word: ShellWord; re
       dynamic = true;
       continue;
     }
+    if (UNQUOTED_EXPANSIONS.includes(char)) expandable = true;
     value += char;
+    pattern += char;
     pos += 1;
   }
   const text = source.slice(start, pos);
-  const literal = !dynamic && !DYNAMIC_VALUE.test(value) && !expandsTildePrefix(text);
-  return { word: { text, value: literal ? value : undefined }, end: pos };
+  return { word: wordOf(text, value, pattern, dynamic, expandable || text.startsWith('~')), end: pos };
+}
+
+function wordOf(text: string, value: string, pattern: string, dynamic: boolean, expandable: boolean): ShellWord {
+  if (dynamic) return { text, value: undefined };
+  const literal = expandable ? {} : { literal: value };
+  if (expandsTildePrefix(text)) return { text, value: undefined };
+  if (!DYNAMIC_VALUE.test(value)) return { text, value, ...literal };
+  if (NON_GLOB_DYNAMIC_VALUE.test(value)) return { text, value: undefined, ...literal };
+  return { text, value: undefined, ...literal, pattern };
+}
+
+function quoteForPattern(text: string): string {
+  let quoted = '';
+  for (const char of text) quoted += GLOB_SPECIAL.includes(char) ? `\\${char}` : char;
+  return quoted;
 }
 
 function scanDoubleQuoted(
@@ -292,17 +339,19 @@ function expandsTildePrefix(text: string): boolean {
   return text.startsWith('~') && text !== '~' && !text.startsWith('~/');
 }
 
-function parseScript(cursor: Cursor): ShellScript {
+function parseScript(cursor: Cursor, nested: boolean): ShellScript {
   const statements: ShellStatement[] = [];
   skipNewlines(cursor);
   while (cursor.index < cursor.tokens.length) {
+    if (nested && isOperatorToken(cursor.tokens[cursor.index], ')')) break;
     const body = parseAndOr(cursor);
     const token = cursor.tokens[cursor.index];
-    if (token !== undefined && token.kind !== 'newline' && !isOperator(token, ';') && !isOperator(token, '&')) {
+    const closes = nested && isOperatorToken(token, ')');
+    if (token !== undefined && !closes && token.kind !== 'newline' && !isOperator(token, ';') && !isOperator(token, '&')) {
       throw unexpected(token);
     }
     statements.push({ body, background: token !== undefined && isOperator(token, '&') });
-    cursor.index += 1;
+    if (!closes) cursor.index += 1;
     skipNewlines(cursor);
   }
   return { statements };
@@ -341,15 +390,15 @@ function parsePipeline(cursor: Cursor): ShellPipeline {
 }
 
 function parseCommand(cursor: Cursor): ShellCommand {
+  const first = cursor.tokens[cursor.index];
+  if (first !== undefined && isOperator(first, '(')) return parseSubshell(cursor, first.offset);
   const assignments: ShellAssignment[] = [];
   const words: ShellWord[] = [];
-  let redirects = 0;
+  const redirects: ShellRedirect[] = [];
   for (;;) {
     const token = cursor.tokens[cursor.index];
     if (token?.kind === 'redirect') {
-      if (cursor.tokens[cursor.index + 1]?.kind !== 'word') throw new ShellParseError('syntax', token.offset);
-      cursor.index += 2;
-      redirects += 1;
+      redirects.push(parseRedirect(cursor, token.operator, token.offset));
       continue;
     }
     if (token?.kind !== 'word') break;
@@ -366,11 +415,37 @@ function parseCommand(cursor: Cursor): ShellCommand {
     words.push(token.word);
     cursor.index += 1;
   }
-  if (assignments.length === 0 && words.length === 0 && redirects === 0) {
+  if (assignments.length === 0 && words.length === 0 && redirects.length === 0) {
     const token = cursor.tokens[cursor.index];
     throw token === undefined ? new ShellParseError('syntax', cursor.length) : unexpected(token);
   }
-  return { assignments, words };
+  return { kind: 'simple', assignments, words, redirects };
+}
+
+function parseSubshell(cursor: Cursor, offset: number): ShellSubshell {
+  if (cursor.depth >= SHELL_PARSE_MAX_SUBSHELL_DEPTH) throw new ShellParseError('too-large', offset);
+  cursor.index += 1;
+  cursor.depth += 1;
+  const script = parseScript(cursor, true);
+  cursor.depth -= 1;
+  const close = cursor.tokens[cursor.index];
+  if (close === undefined || !isOperator(close, ')') || script.statements.length === 0) {
+    throw new ShellParseError('syntax', close?.offset ?? cursor.length);
+  }
+  cursor.index += 1;
+  const redirects: ShellRedirect[] = [];
+  for (;;) {
+    const token = cursor.tokens[cursor.index];
+    if (token?.kind !== 'redirect') return { kind: 'subshell', script, redirects };
+    redirects.push(parseRedirect(cursor, token.operator, token.offset));
+  }
+}
+
+function parseRedirect(cursor: Cursor, operator: string, offset: number): ShellRedirect {
+  const target = cursor.tokens[cursor.index + 1];
+  if (target?.kind !== 'word') throw new ShellParseError('syntax', offset);
+  cursor.index += 2;
+  return { operator, target: target.word };
 }
 
 function assignmentOf(word: ShellWord): ShellAssignment | undefined {
@@ -388,6 +463,10 @@ function isOperator(token: Token, operator: ShellOperator): boolean {
   return token.kind === 'operator' && token.operator === operator;
 }
 
+function isOperatorToken(token: Token | undefined, operator: ShellOperator): boolean {
+  return token !== undefined && isOperator(token, operator);
+}
+
 function unexpected(token: Token): ShellParseError {
-  return new ShellParseError(isOperator(token, '(') ? 'subshell' : 'syntax', token.offset);
+  return new ShellParseError('syntax', token.offset);
 }

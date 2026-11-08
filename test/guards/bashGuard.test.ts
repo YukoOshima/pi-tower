@@ -255,12 +255,19 @@ describe('cwd tracking', () => {
     expect(guard('cd packages && cd .. && git clean -fdx')).toBe(GIT_CLEAN_VETO);
   });
 
-  it('tracks cd across ; and newlines', () => {
-    expect(guard(`cd ${slot}; git reset --hard`)).toBeUndefined();
-    expect(guard(`cd ${slot}\ngit clean -fdx`)).toBeUndefined();
+  it('runs the command after ; or a newline whether the cd before it succeeded or failed', () => {
+    expect(guard(`cd ${slot}; git reset --hard`)).toBe(GIT_RESET_VETO);
+    expect(guard(`cd ${slot}\ngit clean -fdx`)).toBe(GIT_CLEAN_VETO);
+    expect(guard(`cd ${slot}; git reset --hard`, slot)).toBeUndefined();
+    expect(guard(`cd ${slot}; rm -rf node_modules`)).toBeUndefined();
     expect(guard(`cd ${slot} && cd ../.. && git reset --hard`)).toBe(GIT_RESET_VETO);
     expect(guard('cd .tower && rm -rf comms')).toBe(rmVeto('comms'));
     expect(guard('cd .tower/worktrees/wt-1 && rm -rf node_modules')).toBeUndefined();
+  });
+
+  it('carries both outcomes of a negated cd into the next statement', () => {
+    expect(guard(`! cd ${repo}; git reset --hard`, slot)).toBe(GIT_RESET_VETO);
+    expect(guard(`! cd ${slot}; git reset --hard`)).toBe(GIT_RESET_VETO);
   });
 
   it('analyzes the right-hand side of || in the cwd where the left side failed', () => {
@@ -385,11 +392,23 @@ describe('wrappers and nested shells', () => {
     expect(guard(command)).toBe(veto);
   });
 
+  it('re-parses quoted scripts that contain $, globs or brackets', () => {
+    expect(guard("bash -c 'echo $HOME; rm -rf .tower/comms'")).toBe(rmVeto('.tower/comms'));
+    expect(guard("bash -c '[ -d build ] && rm -rf build'")).toBeUndefined();
+    expect(guard("bash -c 'rm -f *.log'", slot)).toBeUndefined();
+    expect(guard("bash -c 'rm -rf .tower/*'")).toBe(UNANALYZABLE_VETO);
+    expect(guard("bash -c 'cd \"$HOME\" && rm -rf .tower'")).toBe(UNANALYZABLE_VETO);
+    expect(guard("eval '[ -d build ] && rm -rf build'")).toBeUndefined();
+    expect(guard("eval '[ -d .tower ] && rm -rf .tower'")).toBe(rmVeto('.tower'));
+    expect(guard(`trap '[ -n "$tmp" ] && rm -rf ${repo}/.tower/comms' EXIT`)).toBe(rmVeto(`${repo}/.tower/comms`));
+  });
+
   it('allows nested scripts that are safe', () => {
     expect(guard(`bash -c 'cd ${slot} && git clean -fdx'`)).toBeUndefined();
     expect(guard("bash -c 'echo rm -rf .tower'")).toBeUndefined();
     expect(guard("bash -c ''")).toBeUndefined();
     expect(guard('bash scripts/build.sh && rm -rf node_modules')).toBeUndefined();
+    expect(guard('bash --version && rm -rf node_modules')).toBeUndefined();
   });
 
   it('re-parses nested scripts up to depth 4 and vetoes deeper nesting', () => {
@@ -484,9 +503,8 @@ describe('conservative vetoes', () => {
     'rm -rf `pwd`/.tower',
     'echo "$(rm -rf .tower)"',
     'X=$(rm -rf .tower)',
-    '(rm -rf .tower)',
-    'ls && (cd sub && rm -rf build)',
     '{ rm -rf .tower; }',
+    '((1 + 2)) && rm -f x',
     'cat <<EOF\nrm -rf .tower\nEOF',
     "cat <<'EOF' > notes.md\nrm -rf build\nEOF",
     'diff <(ls) <(ls); rm -f x',
@@ -502,7 +520,6 @@ describe('conservative vetoes', () => {
     "rm -rf $'.tower'",
     'rm -rf .tower/*',
     'rm -rf build?',
-    'rm -rf "[ab]"',
     'rm -rf {a,b}',
     'rm -rf ~other/x',
     'X=rm; $X -rf .tower',
@@ -542,6 +559,197 @@ describe('conservative vetoes', () => {
 
   it('vetoes commands beyond the parse budget', () => {
     expect(guard(`rm -f x${' y'.repeat(10_001)}`)).toBe(UNANALYZABLE_VETO);
+  });
+});
+
+describe('exit and sequential statements', () => {
+  it.each([
+    ['[ -f done.flag ] && exit 0; rm -rf .tower/comms', rmVeto('.tower/comms')],
+    ['test -d dist && exit; git clean -fdx', GIT_CLEAN_VETO],
+    ['git diff --quiet && exit 0\ngit reset --hard', GIT_RESET_VETO],
+    ['false && exit; rm -rf .tower/comms', rmVeto('.tower/comms')],
+    ['[ -f done.flag ] && exit 0\nrm -rf .tower/comms', rmVeto('.tower/comms')],
+    ['test -d dist && exit\n\ngit clean -fdx', GIT_CLEAN_VETO],
+    ["bash -c '[ -f done.flag ] && exit 0; rm -rf .tower/comms'", rmVeto('.tower/comms')],
+    ["bash -c 'test -d dist && exit\ngit clean -fdx'", GIT_CLEAN_VETO],
+    ["sh -c 'git diff --quiet && exit 0; git reset --hard'", GIT_RESET_VETO],
+    ["eval 'false && exit'; rm -rf .tower/comms", rmVeto('.tower/comms')],
+    ['eval "test -d dist && exit"\ngit clean -fdx', GIT_CLEAN_VETO],
+    ['exit >/nonexistent/x; rm -rf .tower/comms', rmVeto('.tower/comms')],
+    ['exit 2>/dev/null; git reset --hard', GIT_RESET_VETO],
+    ['builtin exit >/nonexistent/x\nrm -rf .tower/comms', rmVeto('.tower/comms')],
+    ['exit 1 </nonexistent/x || git clean -fdx', GIT_CLEAN_VETO],
+    ['(exit); rm -rf .tower/comms', rmVeto('.tower/comms')],
+  ])('keeps analyzing what runs after a conditional or redirected exit in %j', (command, veto) => {
+    expect(guard(command)).toBe(veto);
+  });
+
+  it('still treats an unconditional exit without redirections as the end of the script', () => {
+    expect(guard('exit; rm -rf .tower/comms')).toBeUndefined();
+    expect(guard('exit 0\ngit clean -fdx')).toBeUndefined();
+    expect(guard(`cd ${slot} || exit 1; git clean -fdx`)).toBeUndefined();
+    expect(guard(`cd ${slot} || exit 1\ngit reset --hard`)).toBeUndefined();
+    expect(guard('exit >/dev/null && rm -rf .tower/comms')).toBeUndefined();
+  });
+});
+
+describe('git clean option clusters', () => {
+  it.each([
+    'git clean -fdxe.env',
+    'git clean -xfde_build',
+    'git clean -fdxe/node_modules',
+    'git clean -fdx -e.env',
+    'git clean -dfx -e.idea -e.vscode',
+    'git clean -fdxe .env',
+    'git clean -fd -x -e.cache -- ',
+    'git clean -qfdx',
+  ])('vetoes %j at the main checkout', (command) => {
+    expect(guard(command)).toBe(GIT_CLEAN_VETO);
+  });
+
+  it('never treats a dash-leading argument before -- as a pathspec', () => {
+    expect(guard('git clean -fdx -e.env', join(repo, 'packages'))).toBeUndefined();
+    expect(guard('git clean -fdx -e.tower/comms', join(repo, 'packages'))).toBeUndefined();
+    expect(guard('git clean -fdx -- -e.env')).toBeUndefined();
+  });
+
+  it.each(['git clean -ndxe.env', 'git clean -fde.env', 'git clean -de.x', 'git clean -ie.env -fdx'])(
+    'allows %j (dry-run, no -x, or an -x inside the exclude value)',
+    (command) => {
+      expect(guard(command)).toBeUndefined();
+    },
+  );
+
+  it('allows clustered cleans inside a worktree', () => {
+    expect(guard('git clean -fdxe.env', slot)).toBeUndefined();
+    expect(guard(`cd ${slot} && git clean -dfx -e.idea -e.vscode`)).toBeUndefined();
+  });
+});
+
+describe('bounded rm globs', () => {
+  it.each(['rm -f dist/*.js', 'rm -rf build/*', 'rm -f *.log', 'rm -rf dist/ build/ *.tsbuildinfo', 'rm -rf .cache*'])(
+    'allows %j inside a worktree',
+    (command) => {
+      expect(guard(command, slot)).toBeUndefined();
+      expect(guard(`cd ${slot} && ${command}`)).toBeUndefined();
+    },
+  );
+
+  it('allows globs whose directory is outside the main checkout and not above .tower', () => {
+    expect(guard('rm -rf /tmp/pi-test-*')).toBeUndefined();
+    expect(guard('rm -f ~/scratch/*.log', repo, '/work')).toBeUndefined();
+    expect(guard(`rm -rf ${slot}/dist/*`)).toBeUndefined();
+    expect(guard('rm -rf .tower/worktrees/wt-1/*')).toBeUndefined();
+  });
+
+  it.each([
+    'rm -rf .tower/*',
+    'rm -rf .t*',
+    'rm -f *.log',
+    'rm -rf ./*',
+    'rm -rf .tower/worktrees/*',
+    'rm -rf .tower/comms/*.md',
+    'rm -rf /work/*',
+    'rm -rf /*',
+    'rm -rf ../*',
+    'rm -rf */dist',
+    'rm -rf dist*/x',
+    'rm -rf "$OUT"/*',
+    'rm -rf ~other/*',
+    'rm -rf {dist,build}/*',
+    'rm -rf -- -*',
+  ])('vetoes %j at the main checkout', (command) => {
+    expect(guard(command)).toBe(UNANALYZABLE_VETO);
+  });
+
+  it('vetoes globs that leave the worktree or sit in a non-final segment', () => {
+    expect(guard('rm -rf ../*', slot)).toBe(UNANALYZABLE_VETO);
+    expect(guard('rm -rf ../../comms/*', slot)).toBe(UNANALYZABLE_VETO);
+    expect(guard('rm -rf */node_modules', slot)).toBe(UNANALYZABLE_VETO);
+    expect(guard('rm -rf ~/*', repo, '/work')).toBe(UNANALYZABLE_VETO);
+    expect(guard('cd - && rm -rf build/*')).toBe(UNANALYZABLE_VETO);
+  });
+
+  it('treats quoted glob characters as literal file names', () => {
+    expect(guard('rm -rf "[ab]"')).toBeUndefined();
+    expect(guard("rm -f 'a*b'")).toBeUndefined();
+    expect(guard("rm -rf '.tower/comms'*")).toBe(UNANALYZABLE_VETO);
+    expect(guard("rm -rf .tower/comms/'*'")).toBe(rmVeto('.tower/comms/*'));
+  });
+
+  it('still reports a protected literal operand next to a glob', () => {
+    expect(guard('rm -rf ../../comms dist/*', slot)).toBe(rmVeto('../../comms'));
+    expect(guard(`rm -rf ${repo}/.tower/comms *.log`, slot)).toBe(rmVeto(`${repo}/.tower/comms`));
+  });
+});
+
+describe('git clean scope inside .tower', () => {
+  it('vetoes a pathspec-less clean that runs inside .tower/comms', () => {
+    expect(guard('cd .tower/comms/inbox && git clean -fdx')).toBe(GIT_CLEAN_VETO);
+    expect(guard('git -C .tower/comms/missions clean -fdx')).toBe(GIT_CLEAN_VETO);
+    expect(guard('git clean -fdx', join(repo, '.tower', 'comms'))).toBe(GIT_CLEAN_VETO);
+  });
+
+  it('vetoes a pathspec-less clean in .tower outside the worktree slots', () => {
+    expect(guard('git clean -ffdx', join(repo, '.tower', 'worktrees'))).toBe(GIT_CLEAN_VETO);
+    expect(guard(`cd ${slot} && cd .. && git clean -ffdx`)).toBe(GIT_CLEAN_VETO);
+    expect(guard('git -C .tower/agents clean -fdx')).toBe(GIT_CLEAN_VETO);
+  });
+
+  it('still allows the same clean at a slot root or below', () => {
+    expect(guard('git clean -ffdx', slot)).toBeUndefined();
+    expect(guard('git clean -fdx', join(slot, 'packages', 'core'))).toBeUndefined();
+    expect(guard('git -C .tower/worktrees/wt-1 clean -ffdx')).toBeUndefined();
+  });
+});
+
+describe('wrapper option clusters', () => {
+  it.each([
+    ["env -iS 'rm -rf .tower/comms'", UNANALYZABLE_VETO],
+    ["env -vS'rm -rf .tower/comms'", UNANALYZABLE_VETO],
+    ['sudo -Eu root rm -rf .tower/comms', rmVeto('.tower/comms')],
+    ['sudo -uroot rm -rf .tower/comms', rmVeto('.tower/comms')],
+    ['sudo -nEu root -- rm -rf .tower/comms', rmVeto('.tower/comms')],
+    ['sudo FOO=1 rm -rf .tower/comms', rmVeto('.tower/comms')],
+    ['sudo -u root FOO=1 BAR="a b" rm -rf .tower/comms', rmVeto('.tower/comms')],
+    ['doas -u root FOO=1 rm -rf .tower/comms', rmVeto('.tower/comms')],
+    ['nice -n10 rm -rf .tower/comms', rmVeto('.tower/comms')],
+    ['exec -cla name rm -rf .tower/comms', rmVeto('.tower/comms')],
+    ['time -p rm -rf .tower/comms', rmVeto('.tower/comms')],
+    ['env -iu PATH rm -rf .tower/comms', rmVeto('.tower/comms')],
+    ["echo 'rm -rf .tower/comms' | sudo -s", UNANALYZABLE_VETO],
+    ['sudo -i < cleanup.sh && rm -f x', UNANALYZABLE_VETO],
+    [`sudo GIT_DIR=${repo}/.git git -C ${slot} reset --hard`, UNANALYZABLE_VETO],
+  ])('parses %j', (command, veto) => {
+    expect(guard(command)).toBe(veto);
+  });
+
+  it('applies chdir options given inside a cluster', () => {
+    expect(guard(`env -iC ${repo} git reset --hard`, slot)).toBe(GIT_RESET_VETO);
+    expect(guard(`env -iC${repo} git reset --hard`, slot)).toBe(GIT_RESET_VETO);
+    expect(guard(`env -iC ${slot} git clean -fdx`)).toBeUndefined();
+    expect(guard(`sudo -nD ${slot} git clean -fdx`)).toBeUndefined();
+    expect(guard(`sudo -nD${repo} git reset --hard`, slot)).toBe(GIT_RESET_VETO);
+  });
+});
+
+describe('subshells', () => {
+  it('analyzes commands inside ( … )', () => {
+    expect(guard('(rm -rf .tower)')).toBe(rmVeto('.tower'));
+    expect(guard('( (rm -rf .tower/comms) )')).toBe(rmVeto('.tower/comms'));
+    expect(guard('(cd .tower && rm -rf comms) | cat')).toBe(rmVeto('comms'));
+    expect(guard('ls && (cd sub && rm -rf build)')).toBeUndefined();
+    expect(guard(`(cd ${slot} && git clean -fdx) && npm test`)).toBeUndefined();
+  });
+
+  it('does not carry cd or exit out of a subshell', () => {
+    expect(guard(`(cd ${slot}) && git clean -fdx`)).toBe(GIT_CLEAN_VETO);
+    expect(guard(`(cd ${slot} && exit) || git reset --hard`)).toBe(GIT_RESET_VETO);
+    expect(guard('(exit 0) && rm -rf .tower/comms')).toBe(rmVeto('.tower/comms'));
+  });
+
+  it('vetoes subshells nested beyond the parser limit', () => {
+    expect(guard(`${'( '.repeat(40)}rm -f x${' )'.repeat(40)}`)).toBe(UNANALYZABLE_VETO);
   });
 });
 

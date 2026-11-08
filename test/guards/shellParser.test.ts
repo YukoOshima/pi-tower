@@ -1,6 +1,13 @@
 import { describe, expect, it } from 'vitest';
 
-import { parseShell, type ShellCommand, type ShellScript } from '../../src/guards/shellParser.ts';
+import {
+  parseShell,
+  SHELL_PARSE_MAX_SUBSHELL_DEPTH,
+  type ShellCommand,
+  type ShellScript,
+  type ShellSimpleCommand,
+  type ShellSubshell,
+} from '../../src/guards/shellParser.ts';
 
 function script(source: string): ShellScript {
   const parsed = parseShell(source);
@@ -8,16 +15,32 @@ function script(source: string): ShellScript {
   return parsed.script;
 }
 
-function commands(source: string): ShellCommand[] {
-  return script(source).statements.flatMap((statement) =>
+function topCommands(parsed: ShellScript): ShellCommand[] {
+  return parsed.statements.flatMap((statement) =>
     [statement.body.first, ...statement.body.rest.map((link) => link.pipeline)].flatMap(
       (pipeline) => pipeline.commands,
     ),
   );
 }
 
+function simpleCommands(parsed: ShellScript): ShellSimpleCommand[] {
+  return topCommands(parsed).flatMap((command) =>
+    command.kind === 'simple' ? [command] : simpleCommands(command.script),
+  );
+}
+
+function commands(source: string): ShellSimpleCommand[] {
+  return simpleCommands(script(source));
+}
+
 function values(source: string): (string | undefined)[][] {
   return commands(source).map((command) => command.words.map((word) => word.value));
+}
+
+function subshell(source: string): ShellSubshell {
+  const [command] = topCommands(script(source));
+  if (command?.kind !== 'subshell') throw new Error(`expected "${source}" to start with a subshell`);
+  return command;
 }
 
 describe('parseShell structure', () => {
@@ -56,6 +79,22 @@ describe('parseShell structure', () => {
     expect(values('cmd >out 2>&1 <in arg &>/dev/null 3>>log {fd}>x >|y <>z <<<"here" &>>all')).toEqual([
       ['cmd', 'arg'],
     ]);
+    const [command] = commands('cmd >out 2>&1 arg <<<"here"');
+    expect(command!.redirects.map((redirect) => [redirect.operator, redirect.target.value])).toEqual([
+      ['>', 'out'],
+      ['>&', '1'],
+      ['<<<', 'here'],
+    ]);
+    expect(commands('exit')[0]!.redirects).toEqual([]);
+  });
+
+  it('parses subshells with their own statements and trailing redirections', () => {
+    const parsed = subshell('(cd a && b; c\n d) >log 2>&1 | e');
+    expect(parsed.script.statements).toHaveLength(3);
+    expect(parsed.redirects.map((redirect) => redirect.operator)).toEqual(['>', '>&']);
+    expect(values('(cd a && b; c\n d) >log 2>&1 | e')).toEqual([['cd', 'a'], ['b'], ['c'], ['d'], ['e']]);
+    expect(values('! ( (a) ) && (b) & (c)')).toEqual([['a'], ['b'], ['c']]);
+    expect(script('( (a) )').statements[0]!.body.first.commands[0]!.kind).toBe('subshell');
   });
 
   it('separates prefix assignments from the command words', () => {
@@ -137,6 +176,49 @@ describe('parseShell words', () => {
   it('scans ANSI-C strings with escaped quotes', () => {
     expect(values("echo $'it\\'s' ; rm x")).toEqual([['echo', undefined], ['rm', 'x']]);
   });
+
+  it.each([
+    ['*.ts', '*.ts'],
+    ['dist/*.js', 'dist/*.js'],
+    ["'*'.ts", '\\*.ts'],
+    ['a\\*b?', 'a\\*b?'],
+    ['"[x]"*', '\\[x\\]*'],
+    ["'a b'/c*", 'a b/c*'],
+    ['/tmp/pi-test-*', '/tmp/pi-test-*'],
+  ])('keeps a glob pattern for %s', (word, pattern) => {
+    const [command] = commands(`rm ${word}`);
+    expect(command!.words[1]!.value).toBeUndefined();
+    expect(command!.words[1]!.pattern).toBe(pattern);
+  });
+
+  it.each(['$x*', '"$x"/*', '{a,b}*', "'{a}'*", '~user/*', 'a\\$*', 'a$'])(
+    'keeps no glob pattern for %s',
+    (word) => {
+      const [command] = commands(`rm ${word}`);
+      expect(command!.words[1]!.pattern).toBeUndefined();
+    },
+  );
+
+  it('keeps no glob pattern for literal words', () => {
+    expect(commands('rm build')[0]!.words[1]).toEqual({ text: 'build', value: 'build', literal: 'build' });
+  });
+
+  it.each([
+    ["'[ -f done.flag ] && rm -rf x'", '[ -f done.flag ] && rm -rf x'],
+    ['"echo \\$HOME *.log {a,b}"', 'echo $HOME *.log {a,b}'],
+    ["'~/x'", '~/x'],
+    ['a\\*b', 'a*b'],
+    ['plain', 'plain'],
+  ])('keeps the exact argv string of %s', (word, literal) => {
+    expect(commands(`bash -c ${word}`)[0]!.words[2]!.literal).toBe(literal);
+  });
+
+  it.each(['"$x"', '*.ts', 'a?', '[ab]', '{a,b}', '~/x', '~', '~user', "$'x'"])(
+    'keeps no exact argv string for the expanding word %s',
+    (word) => {
+      expect(commands(`bash -c ${word}`)[0]!.words[2]!.literal).toBeUndefined();
+    },
+  );
 });
 
 describe('parseShell failures', () => {
@@ -150,11 +232,16 @@ describe('parseShell failures', () => {
     ['echo ${a$(b)}', 'expansion'],
     ['echo ${a:-"b}"}', 'expansion'],
     ['echo ${a', 'expansion'],
-    ['(a)', 'subshell'],
-    ['a; (b)', 'subshell'],
-    ['a && (b)', 'subshell'],
-    ['f() { a; }', 'subshell'],
-    ['echo a(b)', 'subshell'],
+    ['f() { a; }', 'syntax'],
+    ['echo a(b)', 'syntax'],
+    ['()', 'syntax'],
+    ['(a', 'syntax'],
+    ['( ; )', 'syntax'],
+    ['(a) b', 'syntax'],
+    ['(a)(b)', 'syntax'],
+    ['X=1 (a)', 'syntax'],
+    ['((1 + 2))', 'compound-command'],
+    ['a && ((x > 1))', 'compound-command'],
     ['{ a; }', 'brace-group'],
     ['if a; then b; fi', 'compound-command'],
     ['for x in a; do b; done', 'compound-command'],
@@ -195,6 +282,15 @@ describe('parseShell failures', () => {
     const parsed = parseShell('a b c d', { maxTokens: 3 });
     expect(parsed.ok).toBe(false);
     if (!parsed.ok) expect(parsed.reason).toBe('too-large');
+  });
+
+  it('bounds subshell nesting', () => {
+    const nest = (depth: number): string => `${'( '.repeat(depth)}a${' )'.repeat(depth)}`;
+    expect(parseShell(nest(SHELL_PARSE_MAX_SUBSHELL_DEPTH)).ok).toBe(true);
+    const parsed = parseShell(nest(SHELL_PARSE_MAX_SUBSHELL_DEPTH + 1));
+    expect(parsed.ok).toBe(false);
+    if (!parsed.ok) expect(parsed.reason).toBe('too-large');
+    expect(parseShell(nest(3_000)).ok).toBe(false);
   });
 
   it('accepts here-strings, background jobs and trailing separators', () => {
