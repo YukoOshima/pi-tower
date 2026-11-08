@@ -1,0 +1,17 @@
+{
+  "orchestrator": "anthropic/claude-opus-5-5:high",
+  "worker": "anthropic/claude-sonnet-5-5:medium",
+  "reviewer": {
+    "model": "openai/gpt-5.5",
+    "thinkingLevel": "high",
+    "description": "independent second opinion from another vendor"
+  },
+  "models": {
+    "fast": {
+      "model": "anthropic/claude-haiku-5-5",
+      "description": "cheap and quick: docs, small fixes, surveys"
+    }
+  },
+  "maxRunningAgents": 4,
+  "agentTimeoutMs": 3600000
+}
