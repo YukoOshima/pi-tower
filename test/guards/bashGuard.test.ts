@@ -533,6 +533,27 @@ describe('command -v and -V', () => {
   });
 });
 
+describe('shell startup files', () => {
+  it.each([
+    "BASH_ENV=/dev/stdin bash -c true <<< 'rm -rf .tower/comms'",
+    "ENV=/dev/stdin sh -ic true <<< 'rm -rf .tower/comms'",
+    "export BASH_ENV=/dev/stdin; bash -c true <<< 'git reset --hard'",
+    "declare -x BASH_ENV=/dev/stdin\nbash -c true <<< 'rm -rf .tower/comms'",
+    "BASH_ENV=/dev/stdin; export BASH_ENV; bash script.sh <<< 'rm -rf .tower/comms'",
+    "env BASH_ENV=/dev/stdin bash -c true <<< 'rm -rf .tower/comms'",
+    "sudo ENV=/dev/stdin sh -ic true <<< 'git clean -fdx'",
+    "BASH_ENV=./cleanup.sh bash --version; rm -f x",
+  ])('vetoes a nested shell after BASH_ENV or ENV is assigned in %j', (command) => {
+    expect(guard(command)).toBe(UNANALYZABLE_VETO);
+  });
+
+  it('keeps analyzing nested shells when no startup file is assigned', () => {
+    expect(guard('bash -c true && rm -rf build')).toBeUndefined();
+    expect(guard('MY_ENV=1 bash scripts/build.sh; rm -f x')).toBeUndefined();
+    expect(guard('BASH_ENV=/dev/stdin; rm -rf build')).toBeUndefined();
+  });
+});
+
 describe('quoting and parsing', () => {
   it('allows a command that only mentions the keywords in string literals', () => {
     for (const command of [

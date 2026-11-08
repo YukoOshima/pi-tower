@@ -56,6 +56,7 @@ interface WalkResult {
 interface GuardState {
   gitRedirected: boolean;
   homeRedirected: boolean;
+  startupRedirected: boolean;
 }
 
 interface GuardContext {
@@ -81,7 +82,7 @@ export function analyzeTowerBashCommand(target: TowerBashGuardTarget): string | 
   const ctx: GuardContext = {
     layout: towerLayout(target.mainCheckout, target.home ?? homedir()),
     depth: 0,
-    state: { gitRedirected: false, homeRedirected: false },
+    state: { gitRedirected: false, homeRedirected: false, startupRedirected: false },
   };
   return analyzeSource(target.command, [resolve(target.cwd)], ctx).veto;
 }
@@ -200,6 +201,7 @@ function homeOf(ctx: GuardContext): Cwd {
 function noteAssignment(name: string, state: GuardState): void {
   if (GIT_REDIRECT_ENV.test(name)) state.gitRedirected = true;
   if (name === 'HOME') state.homeRedirected = true;
+  if (name === 'BASH_ENV' || name === 'ENV') state.startupRedirected = true;
 }
 
 function commandDescribesOnly(args: readonly ShellWord[]): boolean {
@@ -233,6 +235,7 @@ function analyzeWrapped(wrapped: WrappedCommand, cwds: readonly Cwd[], ctx: Guar
 }
 
 function analyzeNestedShell(args: readonly ShellWord[], cwds: readonly Cwd[], ctx: GuardContext): WalkResult {
+  if (ctx.state.startupRedirected) return vetoed(UNANALYZABLE_VETO);
   let command = false;
   let stdin = false;
   let index = 0;
