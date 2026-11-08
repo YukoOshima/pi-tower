@@ -61,20 +61,26 @@ interface ToolCallState {
   isError?: boolean;
 }
 
+interface Latch {
+  readonly promise: Promise<void>;
+  readonly open: () => void;
+}
+
 interface AgentRun {
   readonly taskId: string;
   readonly startedAt: number;
   readonly usage: MutableUsage;
   readonly undelivered: string[];
-  readonly done: Promise<void>;
-  readonly resolveDone: () => void;
+  readonly finalized: Latch;
+  readonly promptDone: Latch;
   stopRequest?: StopRequest;
   lastText?: string;
   lastError?: string;
   streamed: boolean;
-  settled: boolean;
+  agentSettled: boolean;
   abortedBySession: boolean;
   finished: boolean;
+  promptSettled: boolean;
   timeoutTimer?: ReturnType<typeof setTimeout>;
   graceTimer?: ReturnType<typeof setTimeout>;
 }
@@ -157,8 +163,14 @@ export class TowerAgentRuntime {
     if (problem !== undefined) return { ok: false, reason: problem };
     const reserved: string[] = [];
     try {
-      const agentId = this.reserveId('agent', reserved);
-      const taskId = this.reserveId('task', reserved);
+      let agentId: string;
+      let taskId: string;
+      try {
+        agentId = this.reserveId('agent', reserved);
+        taskId = this.reserveId('task', reserved);
+      } catch (error) {
+        return { ok: false, reason: `tower spawn failed: ${errorMessage(error)}` };
+      }
       return await this.startAgent(spec, agentId, taskId);
     } finally {
       for (const id of reserved) this.reservedIds.delete(id);
@@ -187,7 +199,12 @@ export class TowerAgentRuntime {
     }
     const reserved: string[] = [];
     try {
-      const taskId = this.reserveId('task', reserved);
+      let taskId: string;
+      try {
+        taskId = this.reserveId('task', reserved);
+      } catch (error) {
+        return { ok: false, reason: `tower resume failed: ${errorMessage(error)}` };
+      }
       const gate = this.limiter.acquire();
       if (!gate.ok) return gate;
       this.launch(record, this.newRun(taskId), prompt, true);
@@ -226,11 +243,11 @@ export class TowerAgentRuntime {
     const run = activeRun(found);
     if (run === undefined) return 'idle';
     if (endingNaturally(found.record, run)) {
-      await settledWithin(run.done, this.stopGraceMs);
+      await settledWithin(run.finalized.promise, this.stopGraceMs);
       if (run.finished) return 'idle';
     }
     this.requestStop(found.record, run, { status: 'stopped', reason });
-    await run.done;
+    await run.finalized.promise;
     return 'stopped';
   }
 
@@ -255,14 +272,14 @@ export class TowerAgentRuntime {
 
   list(activeOnly = false): TowerAgentInfo[] {
     return this.liveRecords()
-      .filter((record) => !activeOnly || record.status === 'running')
+      .filter((record) => !activeOnly || isActive(record))
       .map((record) => this.describe(record));
   }
 
   activeAgentIds(): ReadonlySet<string> {
     return new Set(
       this.liveRecords()
-        .filter((record) => record.status === 'running')
+        .filter((record) => isActive(record))
         .map((record) => record.agentId),
     );
   }
@@ -313,10 +330,16 @@ export class TowerAgentRuntime {
       status: 'running',
       disposed: false,
     };
+    try {
+      record.unsubscribe = session.subscribe((event) => {
+        this.onSessionEvent(record, event);
+      });
+    } catch (error) {
+      this.limiter.release();
+      await settle(() => session.dispose());
+      return { ok: false, reason: `tower spawn failed: ${errorMessage(error)}` };
+    }
     this.agents.set(agentId, record);
-    record.unsubscribe = session.subscribe((event) => {
-      this.onSessionEvent(record, event);
-    });
     this.launch(record, run, spec.prompt, false);
     return { ok: true, agentId, taskId };
   }
@@ -327,7 +350,7 @@ export class TowerAgentRuntime {
     if (record.status === 'running') {
       return `tower agent ${describeAgent(record)} is still running task ${record.run.taskId} — steer it or stop it instead of resuming`;
     }
-    if (record.session.isStreaming) {
+    if (!record.run.promptSettled || record.session.isStreaming) {
       return `tower agent ${describeAgent(record)} is still winding down its previous run — retry shortly`;
     }
     return undefined;
@@ -358,21 +381,18 @@ export class TowerAgentRuntime {
   }
 
   private newRun(taskId: string): AgentRun {
-    let resolveDone: () => void = () => undefined;
-    const done = new Promise<void>((resolve) => {
-      resolveDone = resolve;
-    });
     return {
       taskId,
       startedAt: this.now(),
       usage: emptyUsage(),
       undelivered: [],
-      done,
-      resolveDone,
+      finalized: latch(),
+      promptDone: latch(),
       streamed: false,
-      settled: false,
+      agentSettled: false,
       abortedBySession: false,
       finished: false,
+      promptSettled: false,
     };
   }
 
@@ -410,19 +430,19 @@ export class TowerAgentRuntime {
     }
     completion.then(
       () => {
-        this.finishRun(record, run);
+        this.onPromptSettled(record, run);
       },
       (error: unknown) => {
-        this.finishRun(record, run, { error });
+        this.onPromptSettled(record, run, { error });
       },
     );
   }
 
   private requestStop(record: AgentRecord, run: AgentRun, request: StopRequest): void {
-    if (run.finished) return;
+    if (run.promptSettled) return;
     run.stopRequest ??= request;
     clearTimeout(run.timeoutTimer);
-    if (run.graceTimer === undefined) {
+    if (!run.finished && run.graceTimer === undefined) {
       run.graceTimer = setTimeout(() => {
         this.finishRun(record, run);
       }, this.stopGraceMs);
@@ -431,10 +451,26 @@ export class TowerAgentRuntime {
     void settle(() => record.session.abort());
   }
 
+  private onPromptSettled(record: AgentRecord, run: AgentRun, failure?: { readonly error: unknown }): void {
+    if (run.promptSettled) return;
+    run.promptSettled = true;
+    clearTimeout(run.timeoutTimer);
+    clearTimeout(run.graceTimer);
+    try {
+      this.limiter.release();
+      if (run.finished) {
+        this.discardQueued(record, run);
+      } else {
+        this.finishRun(record, run, failure);
+      }
+    } finally {
+      run.promptDone.open();
+    }
+  }
+
   private finishRun(record: AgentRecord, run: AgentRun, failure?: { readonly error: unknown }): void {
     if (run.finished) return;
     run.finished = true;
-    clearTimeout(run.timeoutTimer);
     clearTimeout(run.graceTimer);
     try {
       this.discardQueued(record, run);
@@ -444,7 +480,6 @@ export class TowerAgentRuntime {
       record.stopReason = outcome.stopReason;
       record.endedAt = at;
       record.streaming = undefined;
-      this.limiter.release();
       this.emit({
         type: 'finished',
         agentId: record.agentId,
@@ -458,7 +493,7 @@ export class TowerAgentRuntime {
         at,
       });
     } finally {
-      run.resolveDone();
+      run.finalized.open();
     }
   }
 
@@ -473,7 +508,7 @@ export class TowerAgentRuntime {
       return;
     }
     if (own !== undefined) {
-      const index = discarded.findIndex((text) => text.trim() === own.trim());
+      const index = discarded.indexOf(own);
       if (index !== -1) discarded.splice(index, 1);
     }
     run.undelivered.push(...discarded);
@@ -482,18 +517,29 @@ export class TowerAgentRuntime {
   private async disposeRecord(record: AgentRecord, reason: string): Promise<void> {
     if (record.disposed) return;
     record.disposed = true;
+    const run = record.run;
     if (record.status === 'running') {
-      this.requestStop(record, record.run, { status: 'stopped', reason });
-      await record.run.done;
+      this.requestStop(record, run, { status: 'stopped', reason });
+      await run.finalized.promise;
     }
-    record.unsubscribe();
     this.agents.delete(record.agentId);
     for (const taskId of record.taskIds) this.taskOwners.delete(taskId);
-    await settle(() => record.session.dispose());
+    const teardown = run.promptDone.promise.then(async () => {
+      record.unsubscribe();
+      await settle(() => record.session.dispose());
+    });
+    await settledWithin(teardown, this.stopGraceMs);
   }
 
   private onSessionEvent(record: AgentRecord, event: AgentSessionEvent): void {
     const run = record.run;
+    if (
+      (event.type === 'agent_start' || event.type === 'compaction_start') &&
+      run.stopRequest !== undefined &&
+      !run.promptSettled
+    ) {
+      void settle(() => record.session.abort());
+    }
     if (run.finished) return;
     switch (event.type) {
       case 'agent_start':
@@ -525,7 +571,7 @@ export class TowerAgentRuntime {
         return;
       }
       case 'agent_settled':
-        run.settled = true;
+        run.agentSettled = true;
         if (event.aborted) run.abortedBySession = true;
         return;
       default:
@@ -571,6 +617,7 @@ export class TowerAgentRuntime {
       sessionId: session.sessionId,
       sessionFile: session.sessionFile,
       status: record.status,
+      windingDown: record.status !== 'running' && !run.promptSettled,
       runs: record.taskIds.length,
       createdAt: record.createdAt,
       startedAt: run.startedAt,
@@ -620,12 +667,16 @@ function activeRun(found: AgentLookup): AgentRun | undefined {
   return record.run;
 }
 
+function isActive(record: AgentRecord): boolean {
+  return record.status === 'running' || !record.run.promptSettled;
+}
+
 function acceptsSteer(record: AgentRecord, run: AgentRun): boolean {
   return (
     record.status === 'running' &&
     record.run === run &&
     !run.finished &&
-    !run.settled &&
+    !run.agentSettled &&
     run.stopRequest === undefined &&
     record.session.isStreaming
   );
@@ -715,6 +766,14 @@ function errorMessage(error: unknown): string {
 
 function randomId(prefix: 'agent' | 'task'): string {
   return `${prefix}-${randomUUID().slice(0, 8)}`;
+}
+
+function latch(): Latch {
+  let open: () => void = () => undefined;
+  const promise = new Promise<void>((resolve) => {
+    open = resolve;
+  });
+  return { promise, open };
 }
 
 async function settle(action: () => unknown): Promise<void> {

@@ -70,6 +70,7 @@ describe('TowerAgentRuntime', () => {
         sessionId: agentId,
         sessionFile: undefined,
         status: 'running',
+        windingDown: false,
         runs: 1,
         createdAt: 1_000,
         startedAt: 1_000,
@@ -232,16 +233,18 @@ describe('TowerAgentRuntime', () => {
       const { agentId } = started(await colliding.spawn(spec()));
       expect(limiter.snapshot().inflight).toBe(1);
 
-      await expect(colliding.spawn(spec({ name: 'agent-beta' }))).rejects.toThrow(
-        'could not allocate a unique tower task id',
-      );
+      expect(await colliding.spawn(spec({ name: 'agent-beta' }))).toEqual({
+        ok: false,
+        reason: 'tower spawn failed: could not allocate a unique tower task id',
+      });
       expect(limiter.snapshot().inflight).toBe(1);
       const finished = nextEvent(colliding, 'finished');
       factory.session(agentId).settle();
       await finished;
-      await expect(colliding.resume(agentId, 'continue')).rejects.toThrow(
-        'could not allocate a unique tower task id',
-      );
+      expect(await colliding.resume(agentId, 'continue')).toEqual({
+        ok: false,
+        reason: 'tower resume failed: could not allocate a unique tower task id',
+      });
       expect(limiter.snapshot().inflight).toBe(0);
       await colliding.disposeAll();
     });
@@ -599,24 +602,47 @@ describe('TowerAgentRuntime', () => {
       expect(factory.session(agentId).abortCalls).toBe(0);
     });
 
-    it('finalizes the run after the grace period when the session ignores the abort', async () => {
+    it('finalizes the status after the grace period but keeps the slot until pi settles', async () => {
       const { agentId } = started(await runtime.spawn(spec()));
       const session = factory.session(agentId);
       session.ignoreAbort = true;
 
       expect(await runtime.stop(agentId)).toBe('stopped');
 
-      expect(runtime.get(agentId)?.status).toBe('stopped');
-      expect(limiter.snapshot().inflight).toBe(0);
-      const refused = await runtime.resume(agentId, 'continue');
-      expect(refused.ok).toBe(false);
-      if (refused.ok) throw new Error('expected resume to be refused');
-      expect(refused.reason).toContain('still winding down');
+      expect(runtime.get(agentId)).toMatchObject({ status: 'stopped', stopReason: 'user', windingDown: true });
+      expect(limiter.snapshot().inflight).toBe(1);
+      expect(runtime.activeAgentIds()).toEqual(new Set([agentId]));
+      expect(runtime.list(true).map((info) => info.agentId)).toEqual([agentId]);
+      expect(await runtime.resume(agentId, 'continue')).toEqual({
+        ok: false,
+        reason: `tower agent "agent-alpha" (${agentId}) is still winding down its previous run — retry shortly`,
+      });
 
       session.settle();
       await Promise.resolve();
       expect(events.filter((event) => event.type === 'finished')).toHaveLength(1);
+      expect(runtime.get(agentId)).toMatchObject({ status: 'stopped', windingDown: false });
+      expect(limiter.snapshot().inflight).toBe(0);
+      expect(runtime.activeAgentIds()).toEqual(new Set());
       expect((await runtime.resume(agentId, 'continue')).ok).toBe(true);
+    });
+
+    it('refuses to resume until the previous prompt settled, even when the session is not streaming', async () => {
+      const { agentId } = started(await runtime.spawn(spec()));
+      const session = factory.session(agentId);
+      session.beginSettling();
+      const stopping = runtime.stop(agentId);
+      expect(await stopping).toBe('stopped');
+      expect(session.isStreaming).toBe(false);
+
+      const refused = await runtime.resume(agentId, 'continue');
+
+      expect(refused.ok).toBe(false);
+      expect(session.prompts).toHaveLength(1);
+      session.resolvePrompt();
+      await Promise.resolve();
+      expect((await runtime.resume(agentId, 'continue')).ok).toBe(true);
+      expect(session.prompts).toHaveLength(2);
     });
 
     it('keeps a run that is completing naturally idle instead of relabelling it stopped', async () => {
@@ -656,7 +682,38 @@ describe('TowerAgentRuntime', () => {
       expect(await runtime.stop(agentId)).toBe('stopped');
 
       expect(session.abortCalls).toBe(1);
-      expect(runtime.get(agentId)).toMatchObject({ status: 'stopped', stopReason: 'user' });
+      expect(runtime.get(agentId)).toMatchObject({ status: 'stopped', stopReason: 'user', windingDown: true });
+      expect(limiter.snapshot().inflight).toBe(1);
+
+      session.startRun();
+      await Promise.resolve();
+
+      expect(session.abortCalls).toBe(2);
+      expect(session.isStreaming).toBe(false);
+      expect(runtime.get(agentId)).toMatchObject({ status: 'stopped', windingDown: false });
+      expect(limiter.snapshot().inflight).toBe(0);
+      expect(events.filter((event) => event.type === 'finished')).toHaveLength(1);
+    });
+
+    it('keeps the stop sticky across every agent_start until the prompt settles', async () => {
+      factory.configure = (session) => {
+        session.startsStreaming = false;
+      };
+      const { agentId } = started(await runtime.spawn(spec()));
+      const session = factory.session(agentId);
+      session.ignoreAbort = true;
+      const stopping = runtime.stop(agentId);
+
+      session.startRun();
+      session.emit({ type: 'compaction_start', reason: 'threshold' });
+      expect(await stopping).toBe('stopped');
+      session.emit({ type: 'agent_start' });
+
+      expect(session.abortCalls).toBe(4);
+      session.resolvePrompt();
+      await Promise.resolve();
+      session.emit({ type: 'agent_start' });
+      expect(session.abortCalls).toBe(4);
     });
   });
 
@@ -879,6 +936,28 @@ describe('TowerAgentRuntime', () => {
       expect(runtime.list()).toEqual([]);
       expect(await runtime.spawn(spec())).toMatchObject({ ok: false });
       expect(await runtime.resume(alpha.agentId, 'continue')).toMatchObject({ ok: false });
+      expect(limiter.snapshot().inflight).toBe(0);
+    });
+
+    it('tears a winding-down session down only after its prompt settles, keeping the stop armed', async () => {
+      factory.configure = (session) => {
+        session.startsStreaming = false;
+      };
+      const { agentId } = started(await runtime.spawn(spec()));
+      const session = factory.session(agentId);
+
+      expect(await runtime.dispose(agentId)).toBe(true);
+
+      expect(runtime.get(agentId)).toBeUndefined();
+      expect(session.disposed).toBe(false);
+      expect(session.listenerCount).toBe(1);
+      expect(limiter.snapshot().inflight).toBe(1);
+      session.startRun();
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(session.abortCalls).toBe(2);
+      expect(session.disposed).toBe(true);
+      expect(session.listenerCount).toBe(0);
       expect(limiter.snapshot().inflight).toBe(0);
     });
 

@@ -56,9 +56,16 @@ export interface PiSessionFactoryOptions {
 
 export class PiTowerAgentSession implements TowerAgentSession {
   readonly session: AgentSession;
+  private guardedSteers: string[] = [];
+  private readonly unsubscribeQueue: () => void;
 
   constructor(session: AgentSession) {
     this.session = session;
+    this.unsubscribeQueue = session.subscribe((event) => {
+      if (event.type === 'queue_update') {
+        this.guardedSteers = retainQueued(this.guardedSteers, event.steering);
+      }
+    });
   }
 
   get sessionId(): string {
@@ -85,14 +92,28 @@ export class PiTowerAgentSession implements TowerAgentSession {
     return this.session.prompt(text, { expandPromptTemplates: false, source: 'extension' });
   }
 
-  steer(text: string): Promise<TowerSteerDisposition> {
-    return this.session.steer(text.startsWith('/') ? ` ${text}` : text, undefined, {
-      source: 'extension',
-    });
+  async steer(text: string): Promise<TowerSteerDisposition> {
+    if (!text.startsWith('/')) return this.session.steer(text, undefined, { source: 'extension' });
+    const guarded = ` ${text}`;
+    const disposition = await this.session.steer(guarded, undefined, { source: 'extension' });
+    if (
+      disposition === 'queued' &&
+      countOf(this.session.getSteeringMessages(), guarded) > countOf(this.guardedSteers, guarded)
+    ) {
+      this.guardedSteers.push(guarded);
+    }
+    return disposition;
   }
 
   discardQueued(): readonly string[] {
-    return this.session.clearQueue().steering.map((text) => (text.startsWith(' /') ? text.slice(1) : text));
+    const guarded = this.guardedSteers;
+    this.guardedSteers = [];
+    return this.session.clearQueue().steering.map((text) => {
+      const index = guarded.indexOf(text);
+      if (index === -1) return text;
+      guarded.splice(index, 1);
+      return text.slice(1);
+    });
   }
 
   abort(): Promise<void> {
@@ -110,9 +131,24 @@ export class PiTowerAgentSession implements TowerAgentSession {
         await runner.emit({ type: 'session_shutdown', reason: 'quit' });
       }
     } finally {
+      this.unsubscribeQueue();
       this.session.dispose();
     }
   }
+}
+
+function retainQueued(guarded: readonly string[], queued: readonly string[]): string[] {
+  const remaining = [...queued];
+  return guarded.filter((text) => {
+    const index = remaining.indexOf(text);
+    if (index === -1) return false;
+    remaining.splice(index, 1);
+    return true;
+  });
+}
+
+function countOf(texts: readonly string[], text: string): number {
+  return texts.filter((candidate) => candidate === text).length;
 }
 
 export function createPiSessionFactory(options: PiSessionFactoryOptions): TowerAgentSessionFactory {

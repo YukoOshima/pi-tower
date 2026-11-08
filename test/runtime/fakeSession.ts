@@ -70,12 +70,17 @@ export class FakeSession implements TowerAgentSession {
 
   async abort(): Promise<void> {
     this.abortCalls += 1;
-    if (this.ignoreAbort) return;
+    if (this.ignoreAbort || !this.isStreaming) return;
     this.emit({
       type: 'message_end',
       message: fauxAssistantMessage('', { stopReason: 'error', errorMessage: 'This operation was aborted' }),
     });
     this.settle(true);
+  }
+
+  startRun(): void {
+    this.isStreaming = true;
+    this.emit({ type: 'agent_start' });
   }
 
   subscribe(listener: AgentSessionEventListener): () => void {

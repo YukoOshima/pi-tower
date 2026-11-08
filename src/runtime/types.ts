@@ -57,6 +57,7 @@ export interface TowerAgentInfo {
   readonly sessionId: string;
   readonly sessionFile?: string;
   readonly status: TowerAgentStatus;
+  readonly windingDown: boolean;
   readonly runs: number;
   readonly createdAt: number;
   readonly startedAt: number;

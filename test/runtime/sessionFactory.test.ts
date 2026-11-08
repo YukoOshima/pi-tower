@@ -31,7 +31,13 @@ import {
   PiTowerAgentSession,
   type PiSessionFactoryOptions,
 } from '../../src/runtime/sessionFactory.ts';
-import type { TowerAgentEvent, TowerAgentSession, TowerAgentSpec } from '../../src/runtime/types.ts';
+import type {
+  TowerAgentEvent,
+  TowerAgentSession,
+  TowerAgentSessionFactory,
+  TowerAgentSpec,
+  TowerRunStartResult,
+} from '../../src/runtime/types.ts';
 import { deferred, nextEvent } from './fakeSession.ts';
 
 const FIXTURE_EXTENSION = fileURLToPath(new URL('./fixtures/towerExtension.ts', import.meta.url));
@@ -97,14 +103,14 @@ function leakingExtensionSource(): string {
 function userTexts(context: { readonly messages: readonly Message[] }): string[] {
   return context.messages.flatMap((message) => {
     if (message.role !== 'user') return [];
-    if (typeof message.content === 'string') return [message.content.trim()];
-    return [
-      message.content
-        .map((block) => (block.type === 'text' ? block.text : ''))
-        .join('')
-        .trim(),
-    ];
+    if (typeof message.content === 'string') return [message.content];
+    return [message.content.map((block) => (block.type === 'text' ? block.text : '')).join('')];
   });
+}
+
+function started(result: TowerRunStartResult): string {
+  if (!result.ok) throw new Error(result.reason);
+  return result.agentId;
 }
 
 function untilAborted(signal: AbortSignal | undefined): Promise<void> {
@@ -493,12 +499,20 @@ describe('createPiSessionFactory', () => {
   describe('with TowerAgentRuntime', () => {
     let runtime: TowerAgentRuntime;
     let events: TowerAgentEvent[];
+    let sessions: Map<string, TowerAgentSession>;
+
+    function capturingFactory(): TowerAgentSessionFactory {
+      const create = factory({ repoRoot: sandbox.repoRoot });
+      return async (request) => {
+        const session = await create(request);
+        sessions.set(request.agentId, session);
+        return session;
+      };
+    }
 
     beforeEach(() => {
-      runtime = new TowerAgentRuntime({
-        sessionFactory: factory({ repoRoot: sandbox.repoRoot }),
-        limiter: new TowerRateLimiter(),
-      });
+      sessions = new Map();
+      runtime = new TowerAgentRuntime({ sessionFactory: capturingFactory(), limiter: new TowerRateLimiter() });
       events = [];
       runtime.onEvent((event) => {
         events.push(event);
@@ -600,11 +614,16 @@ describe('createPiSessionFactory', () => {
 
         expect(await runtime.steer(agentId, 'STALE-STEER-1 urgent directive')).toBe('steered');
         expect(await runtime.steer(agentId, '/STALE-STEER-2 looks like a command')).toBe('steered');
+        expect(await runtime.steer(agentId, ' /STALE-STEER-3 began with a space')).toBe('steered');
         if (ending === 'stop') expect(await runtime.stop(agentId)).toBe('stopped');
 
         expect(await finished).toMatchObject({
           status: ending === 'stop' ? 'stopped' : 'timed_out',
-          undeliveredSteers: ['STALE-STEER-1 urgent directive', '/STALE-STEER-2 looks like a command'],
+          undeliveredSteers: [
+            'STALE-STEER-1 urgent directive',
+            '/STALE-STEER-2 looks like a command',
+            ' /STALE-STEER-3 began with a space',
+          ],
         });
         finished = nextEvent(runtime, 'finished');
         expect((await runtime.resume(agentId, 'RESUME PROMPT')).ok).toBe(true);
@@ -731,7 +750,7 @@ describe('createPiSessionFactory', () => {
       expect(await runtime.steer(agentId, '/review the diff')).toBe('steered');
 
       expect(await finished).toMatchObject({ status: 'idle', summary: 'DONE', undeliveredSteers: [] });
-      expect(seen).toEqual([['FIRST PROMPT 5', '/deploy the branch now', '/review the diff']]);
+      expect(seen).toEqual([['FIRST PROMPT 5', ' /deploy the branch now', ' /review the diff']]);
     });
 
     it('stops a running session mid-tool and records the user stop', async () => {
@@ -750,6 +769,129 @@ describe('createPiSessionFactory', () => {
       expect(Date.now() - startedAt).toBeLessThan(5_000);
       expect(runtime.get(agentId)).toMatchObject({ status: 'stopped', stopReason: 'user' });
       expect(sandbox.faux.getPendingResponseCount()).toBe(1);
+    });
+
+    it('aborts a run stopped synchronously after spawn, before pi started it: the tool never runs', async () => {
+      sandbox.faux.setResponses([
+        fauxAssistantMessage(fauxToolCall('bash', { command: 'echo RAN > ran.txt' })),
+        fauxAssistantMessage('DONE'),
+      ]);
+      const agentId = started(await runtime.spawn(spec({ prompt: 'RUN THE TOOL' })));
+      const streamingAtStop = sessions.get(agentId)?.isStreaming;
+      const stopping = runtime.stop(agentId);
+
+      expect(streamingAtStop).toBe(false);
+      expect(await stopping).toBe('stopped');
+      await vi.waitFor(() => {
+        expect(runtime.limiter.snapshot().inflight).toBe(0);
+      });
+      await delay(300);
+      expect(existsSync(join(sandbox.cwd, 'ran.txt'))).toBe(false);
+      expect(sandbox.faux.state.callCount).toBeLessThanOrEqual(1);
+      expect(events.map((event) => event.type)).toEqual(['started', 'finished']);
+      expect(runtime.get(agentId)).toMatchObject({ status: 'stopped', stopReason: 'user', windingDown: false });
+    });
+
+    it('aborts a run whose prompt sat in a slow input handler when stopped, even after a forced finalize', async () => {
+      const graceful = new TowerAgentRuntime({
+        sessionFactory: capturingFactory(),
+        limiter: new TowerRateLimiter(),
+        stopGraceMs: 150,
+      });
+      try {
+        sandbox.faux.setResponses([
+          fauxAssistantMessage(fauxToolCall('bash', { command: 'echo RAN > ran-slow-input.txt' })),
+          fauxAssistantMessage('DONE'),
+        ]);
+        const slowInput: ExtensionFactory = (pi) => {
+          pi.on('input', async (event) => {
+            if (event.text.includes('SLOW START')) await delay(600);
+            return { action: 'continue' };
+          });
+        };
+        const agentId = started(
+          await graceful.spawn(spec({ prompt: 'SLOW START prompt', extensionFactories: [slowInput] })),
+        );
+
+        expect(await graceful.stop(agentId)).toBe('stopped');
+
+        expect(graceful.limiter.snapshot().inflight).toBe(1);
+        expect(graceful.activeAgentIds()).toEqual(new Set([agentId]));
+        expect((await graceful.resume(agentId, 'continue')).ok).toBe(false);
+        expect(graceful.get(agentId)).toMatchObject({ status: 'stopped', stopReason: 'user', windingDown: true });
+        await delay(900);
+        await vi.waitFor(
+          () => {
+            expect(graceful.limiter.snapshot().inflight).toBe(0);
+          },
+          { timeout: 5_000 },
+        );
+        await delay(300);
+        expect(existsSync(join(sandbox.cwd, 'ran-slow-input.txt'))).toBe(false);
+        expect(sandbox.faux.state.callCount).toBeLessThanOrEqual(1);
+        expect(graceful.activeAgentIds()).toEqual(new Set());
+        expect(graceful.get(agentId)?.windingDown).toBe(false);
+      } finally {
+        await graceful.disposeAll();
+      }
+    });
+
+    it('refuses a resume until a force-finalized run settles in pi, and runs no untracked turn', async () => {
+      const graceful = new TowerAgentRuntime({
+        sessionFactory: capturingFactory(),
+        limiter: new TowerRateLimiter(),
+        stopGraceMs: 100,
+      });
+      try {
+        const settling = deferred();
+        const seen: string[][] = [];
+        sandbox.faux.setResponses([
+          fauxAssistantMessage('FIRST-DONE'),
+          (context) => {
+            seen.push(userTexts(context));
+            return fauxAssistantMessage(fauxToolCall('bash', { command: 'echo RAN > ran-resumed.txt' }));
+          },
+          fauxAssistantMessage('SECOND-DONE'),
+        ]);
+        let slowed = false;
+        const slowSettle: ExtensionFactory = (pi) => {
+          pi.on('agent_settled', async () => {
+            if (slowed) return;
+            slowed = true;
+            settling.resolve();
+            await delay(800);
+          });
+        };
+        const agentId = started(
+          await graceful.spawn(spec({ prompt: 'FIRST PROMPT 6', extensionFactories: [slowSettle] })),
+        );
+        await settling.promise;
+
+        expect(await graceful.stop(agentId)).toBe('stopped');
+        expect(await graceful.resume(agentId, 'RESUME PROMPT 6')).toEqual({
+          ok: false,
+          reason: `tower agent "agent-alpha" (${agentId}) is still winding down its previous run — retry shortly`,
+        });
+        expect(graceful.limiter.snapshot().inflight).toBe(1);
+        await vi.waitFor(
+          () => {
+            expect(graceful.get(agentId)?.windingDown).toBe(false);
+          },
+          { timeout: 5_000 },
+        );
+        await delay(200);
+        expect(sandbox.faux.state.callCount).toBe(1);
+        expect(existsSync(join(sandbox.cwd, 'ran-resumed.txt'))).toBe(false);
+        expect(graceful.limiter.snapshot().inflight).toBe(0);
+
+        const finished = nextEvent(graceful, 'finished');
+        expect((await graceful.resume(agentId, 'RESUME PROMPT 6')).ok).toBe(true);
+        expect(await finished).toMatchObject({ status: 'idle', summary: 'SECOND-DONE' });
+        expect(seen).toEqual([['FIRST PROMPT 6', 'RESUME PROMPT 6']]);
+        expect(existsSync(join(sandbox.cwd, 'ran-resumed.txt'))).toBe(true);
+      } finally {
+        await graceful.disposeAll();
+      }
     });
 
     it('fails a run on a provider 429 and feeds the limiter', async () => {
