@@ -272,7 +272,8 @@ describe('cwd tracking', () => {
 
   it('analyzes the right-hand side of || in the cwd where the left side failed', () => {
     expect(guard(`cd ${slot} || git clean -fdx`)).toBe(GIT_CLEAN_VETO);
-    expect(guard(`cd ${slot} || exit 1; git clean -fdx`)).toBeUndefined();
+    expect(guard(`cd ${slot} || exit 1; git clean -fdx`)).toBe(GIT_CLEAN_VETO);
+    expect(guard(`cd ${slot} || exit 1; git clean -fdx`, slot)).toBeUndefined();
     expect(guard(`cd ${slot} || echo missing; git clean -fdx`)).toBe(GIT_CLEAN_VETO);
     expect(guard(`! cd ${slot} || git reset --hard`)).toBeUndefined();
   });
@@ -648,17 +649,47 @@ describe('exit and sequential statements', () => {
     expect(guard(command)).toBe(veto);
   });
 
-  it('still treats an unconditional exit without redirections as the end of the script', () => {
-    expect(guard('exit; rm -rf .tower/comms')).toBeUndefined();
-    expect(guard('exit 0\ngit clean -fdx')).toBeUndefined();
-    expect(guard('exit 300; rm -rf .tower/comms')).toBeUndefined();
-    expect(guard('exit $?; rm -rf .tower/comms')).toBeUndefined();
-    expect(guard('exit "$?"\ngit reset --hard')).toBeUndefined();
-    expect(guard(`cd ${slot} || exit 1; git clean -fdx`)).toBeUndefined();
-    expect(guard(`cd ${slot} || exit 1; git reset --hard`)).toBeUndefined();
-    expect(guard(`cd ${slot} || exit 1\ngit reset --hard`)).toBeUndefined();
-    expect(guard(`cd ${slot} || exit $?; git reset --hard`)).toBeUndefined();
-    expect(guard('exit >/dev/null && rm -rf .tower/comms')).toBeUndefined();
+  it.each([
+    ['exit; rm -rf .tower/comms', rmVeto('.tower/comms')],
+    ['exit 0\ngit clean -fdx', GIT_CLEAN_VETO],
+    ['exit 300; rm -rf .tower/comms', rmVeto('.tower/comms')],
+    ['exit $?; rm -rf .tower/comms', rmVeto('.tower/comms')],
+    ['exit "$?"\ngit reset --hard', GIT_RESET_VETO],
+    ['exit >/dev/null && rm -rf .tower/comms', rmVeto('.tower/comms')],
+    [`cd ${slot} || exit 1; git clean -fdx`, GIT_CLEAN_VETO],
+    [`cd ${slot} || exit 1; git reset --hard`, GIT_RESET_VETO],
+    [`cd ${slot} || exit 1\ngit reset --hard`, GIT_RESET_VETO],
+    [`cd ${slot} || exit $?; git reset --hard`, GIT_RESET_VETO],
+  ])('never treats exit as the end of the script in %j', (command, veto) => {
+    expect(guard(command)).toBe(veto);
+  });
+
+  it('still allows exit idioms whose later statements are safe where they run', () => {
+    expect(guard(`cd ${slot} || exit 1; git reset --hard`, slot)).toBeUndefined();
+    expect(guard(`cd ${slot} || exit 1\ngit clean -fdx`, slot)).toBeUndefined();
+    expect(guard('exit 0; rm -rf node_modules', slot)).toBeUndefined();
+    expect(guard('[ -d build ] || exit 0; rm -rf build')).toBeUndefined();
+  });
+
+  it.each([
+    ['noglob exit; rm -rf .tower/comms', rmVeto('.tower/comms')],
+    ['nocorrect exit; rm -rf .tower/comms', rmVeto('.tower/comms')],
+    ['true; - exit; rm -rf .tower/comms', rmVeto('.tower/comms')],
+    ['noglob exit\ngit reset --hard', GIT_RESET_VETO],
+    ['cd .tower/worktrees/wt-9 || noglob exit 1; git reset --hard', GIT_RESET_VETO],
+    ['command -v exit; rm -rf .tower/comms', rmVeto('.tower/comms')],
+    ['command -pv exit && rm -rf .tower/comms', rmVeto('.tower/comms')],
+    ['command -V exit; git clean -fdx', GIT_CLEAN_VETO],
+    ['\\time exit; rm -rf .tower/comms', rmVeto('.tower/comms')],
+    ['"time" exit; rm -rf .tower/comms', rmVeto('.tower/comms')],
+    ['/usr/bin/time exit; rm -rf .tower/comms', rmVeto('.tower/comms')],
+    ['time -v exit; rm -rf .tower/comms', rmVeto('.tower/comms')],
+    ['time -f %e exit; git reset --hard', GIT_RESET_VETO],
+    ['builtin -x exit; rm -rf .tower/comms', rmVeto('.tower/comms')],
+    ['command -x exit; rm -rf .tower/comms', rmVeto('.tower/comms')],
+    ['/usr/bin/command exit; rm -rf .tower/comms', rmVeto('.tower/comms')],
+  ])('keeps analyzing after an exit reached through a wrapper in %j', (command, veto) => {
+    expect(guard(command)).toBe(veto);
   });
 
   it.each([

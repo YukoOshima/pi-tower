@@ -183,7 +183,7 @@ function analyzeInvocation(
   if (name === 'cd') return analyzeCd(args, cwds, homeOf(ctx));
   if (name === 'pushd') return analyzePushd(args, cwds, homeOf(ctx));
   if (name === 'popd') return analyzePopd(args, cwds);
-  if (name === 'exit') return exitTerminates(args) ? { ok: [], fail: [] } : passthrough(cwds);
+  if (name === 'exit') return passthrough(cwds);
   if (name === 'enable') return vetoed(UNANALYZABLE_VETO);
   if (name === 'source' || name === '.') return analyzeSourcedScript(args, cwds, homeOf(ctx));
   if (DECLARATION_BUILTINS.has(name)) return analyzeDeclaration(args, cwds, ctx.state);
@@ -263,12 +263,6 @@ function readsStdin(script: ShellWord, cwds: readonly Cwd[], home: Cwd): boolean
   const path = script.literal;
   if (path === undefined) return false;
   return cwds.some((cwd) => STDIN_SCRIPT_PATH.test(resolveOperand(cwd, path, home) ?? ''));
-}
-
-function exitTerminates(args: readonly ShellWord[]): boolean {
-  const [code, ...rest] = args;
-  if (code === undefined) return true;
-  return rest.length === 0 && (/^\d+$/.test(code.value ?? '') || code.text === '$?' || code.text === '"$?"');
 }
 
 function analyzeEval(args: readonly ShellWord[], cwds: readonly Cwd[], ctx: GuardContext): WalkResult {
