@@ -74,9 +74,11 @@ for (const definition of SCENARIOS.filter((scenario) => settings.scenarios.inclu
   const begin = Date.now();
   const dir = root.scenarioDir(definition.id);
   let timer: NodeJS.Timeout | undefined;
+  const running = definition.run({ settings, root, report, dir });
+  running.catch(() => undefined);
   try {
     await Promise.race([
-      definition.run({ settings, root, report, dir }),
+      running,
       new Promise<never>((_, reject) => {
         timer = setTimeout(() => {
           reject(new Error(`scenario timeout after ${String(settings.scenarioTimeoutMs)}ms`));

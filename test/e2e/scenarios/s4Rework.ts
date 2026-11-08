@@ -61,10 +61,11 @@ export const s4Rework: ScenarioDefinition = {
     report.note(`drive finished with ${String(nudges)} nudge(s)`);
 
     const reviews = reviewFiles(repo).map((review) => ({ name: review.name, fields: frontmatter(review.text) })).filter((review) => review.fields.target === mission.branch);
-    for (const review of reviews) report.note(`review ${review.name}: reviewer=${String(review.fields.reviewer)} round=${String(review.fields.round)} status=${String(review.fields.status)} merge=${String(review.fields.merge)}`);
-    const first = reviews.find((review) => review.fields.round === '1');
-    const second = reviews.find((review) => review.fields.round === '2');
-    report.check('round 1 finds the planted defect (p1 verdict, no merge)', first !== undefined && /^p1-/.test(first.fields.status ?? '') && first.fields.merge !== 'merge', first === undefined ? 'no round-1 review' : `${first.name}: status=${String(first.fields.status)} merge=${String(first.fields.merge)}`);
+    for (const review of reviews) report.note(`review ${review.name}: reviewer=${String(review.fields.reviewer)} seq=${String(review.fields.seq)} round=${String(review.fields.round)} status=${String(review.fields.status)} merge=${String(review.fields.merge)}`);
+    report.note('rounds are numbered per reviewer (kimi parity, survey 8.2); seq orders the reviews of a branch');
+    const first = reviews.find((review) => review.fields.seq === '1');
+    const second = reviews.find((review) => review.fields.seq === '2');
+    report.check('the first review (seq 1) finds the planted defect (p1 verdict, no merge)', first !== undefined && /^p1-/.test(first.fields.status ?? '') && first.fields.merge !== 'merge', first === undefined ? 'no seq-1 review' : `${first.name}: status=${String(first.fields.status)} merge=${String(first.fields.merge)}`);
     report.check('the p1 verdict flips the mission completed → active', statuses.join(' → ').includes('completed → active'), `observed M1 statuses: ${statuses.join(' → ')}`);
 
     const runs = rpc.toolRuns(go);
@@ -83,7 +84,7 @@ export const s4Rework: ScenarioDefinition = {
       /Round 1 by reviewer-r1|round 1 by reviewer-r1/.test(briefing),
       clip(briefing.split('\n').find((line) => /round 1 by reviewer-r1/i.test(line)) ?? '(no round-1 history in the reviewer-r2 briefing)', 240),
     );
-    report.check('round 2 is clean with a merge verdict', second !== undefined && second.fields.status === 'clean' && second.fields.merge === 'merge', second === undefined ? 'no round-2 review' : `${second.name}: status=${String(second.fields.status)} merge=${String(second.fields.merge)}`);
+    report.check('the second review (seq 2, by the fresh reviewer) is clean with a merge verdict', second !== undefined && second.fields.reviewer === 'reviewer-r2' && second.fields.status === 'clean' && second.fields.merge === 'merge', second === undefined ? 'no seq-2 review' : `${second.name}: status=${String(second.fields.status)} merge=${String(second.fields.merge)}`);
     const numbers = git(repo, ['show', 'main:numbers.txt']).split('\n');
     report.check('the fixed change merges into main', statuses.at(-1) === 'merged' && numbers.at(-1) === '4', `main:numbers.txt=${JSON.stringify(numbers)}; ${git(repo, ['log', '--oneline', '-1', 'main'])}`);
     await rpc.command('/tower off');

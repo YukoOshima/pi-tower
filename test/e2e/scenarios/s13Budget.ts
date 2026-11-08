@@ -38,13 +38,19 @@ export const s13Budget: ScenarioDefinition = {
     const concurrency = status.text.split('\n').find((line) => line.startsWith('Concurrency:'));
     report.check('/tower status shows budget 1 and inflight 1 while the first worker runs', concurrency?.includes('budget: 1 agent(s) · inflight: 1') === true, concurrency ?? status.text);
 
-    await rpc.waitFor(
+    const retried = await rpc.waitFor(
       (event) => event.type === 'tool_execution_end' && event.toolName === 'TowerSpawn' && event.isError !== true && textOf(event.result?.content).includes(`name: ${SECOND}`),
       6 * 60_000,
       `the retried spawn of ${SECOND}`,
       span.to,
     );
-    report.check(`${SECOND} spawns once ${FIRST} has finished`, true, `TowerSpawn ${SECOND} succeeded after ${FIRST} finished`);
+    const retriedAt = rpc.events.indexOf(retried);
+    const firstDone = rpc.customMessages('tower-agent-notification', span.from).find((message) => message.text.includes(`name="${FIRST}"`));
+    report.check(
+      `${SECOND} spawns once ${FIRST} has finished`,
+      firstDone !== undefined && firstDone.index < retriedAt,
+      [`${FIRST} finished notification at event #${String(firstDone?.index)}: ${clip(firstDone?.text.split('\n').find((line) => line.startsWith('Title:')) ?? '', 120)}`, `retried TowerSpawn ${SECOND} succeeded at event #${String(retriedAt)}: ${clip(textOf(retried.result?.content).split('\n').slice(0, 5).join(' | '), 200)}`],
+    );
     await rpc.waitIdle(TURN_TIMEOUT_MS, 3000);
     await rpc.waitFor(
       (event) => event.type === 'message_end' && event.message?.customType === 'tower-agent-notification' && textOf(event.message?.content).includes(`name="${SECOND}"`),
