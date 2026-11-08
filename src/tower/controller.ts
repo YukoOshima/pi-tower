@@ -136,6 +136,7 @@ export class TowerController implements TowerToolHost {
   private readonly abortedSpawns = new Set<string>();
   private readonly retainedOutputs = new Map<string, TowerAgentOutput>();
   private readonly pendingWrites = new Set<Promise<unknown>>();
+  private readonly deathChains = new Map<string, Promise<void>>();
   private ctx: ExtensionContext | undefined;
   private boundSessionId: string | undefined;
   private boundRepoRoot: string | undefined;
@@ -638,13 +639,26 @@ export class TowerController implements TowerToolHost {
 
   private onRuntimeEvent(event: TowerAgentEvent): void {
     if (event.type === 'started') {
-      this.track(this.clearTowerAgentDeath(event.agentId));
+      if (event.resumed) {
+        this.enqueueDeathWork(event.agentId, () => this.clearTowerAgentDeath(event.agentId));
+      }
       return;
     }
     if (event.type !== 'finished') return;
-    this.track(this.recordTowerAgentDeath(event));
+    this.enqueueDeathWork(event.agentId, () => this.recordTowerAgentDeath(event));
     this.deliverAgentNotification(event);
     this.retireFinishedReviewer(event);
+  }
+
+  private enqueueDeathWork(agentId: string, work: () => Promise<void>): void {
+    const previous = this.deathChains.get(agentId) ?? Promise.resolve();
+    const next = previous.then(work, work).catch(() => undefined);
+    this.deathChains.set(agentId, next);
+    this.track(
+      next.finally(() => {
+        if (this.deathChains.get(agentId) === next) this.deathChains.delete(agentId);
+      }),
+    );
   }
 
   private track(promise: Promise<unknown>): void {
