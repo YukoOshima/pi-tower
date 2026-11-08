@@ -472,6 +472,22 @@ describe('wrappers and nested shells', () => {
     expect(guard('source ~/.nvm/nvm.sh && rm -rf node_modules')).toBeUndefined();
     expect(guard(". '/tmp/a b/env.sh'; rm -f x")).toBeUndefined();
   });
+
+  it('runs a nested shell script operand under ~/ like any other script file', () => {
+    expect(guard('bash ~/scripts/clean.sh && rm -rf dist', slot)).toBeUndefined();
+    expect(guard('bash ~/scripts/clean.sh && rm -rf dist')).toBeUndefined();
+    expect(guard('sh -e ~/scripts/clean.sh; rm -f x', slot)).toBeUndefined();
+  });
+
+  it.each([
+    "bash /dev/stdin <<< 'echo hi'; rm -f y",
+    'bash "$S"; rm -f y',
+    'bash *.sh && rm -rf dist',
+    "bash ~/../../dev/stdin <<< 'rm -rf .tower/comms'",
+    "bash ~/scripts/clean.sh -c 'rm -rf .tower'",
+  ])('still vetoes the nested shell script operand in %j', (command) => {
+    expect(guard(command, slot)).toBe(UNANALYZABLE_VETO);
+  });
 });
 
 describe('wrapper long options', () => {
@@ -571,6 +587,23 @@ describe('shell startup files', () => {
     expect(guard("bash --rcfile ~/.bashrc -ic 'rm -rf build'")).toBeUndefined();
     expect(guard("bash --init-file=./ci.rc -ic 'rm -rf build'")).toBeUndefined();
     expect(guard("bash --rcfile ./ci.rc -ic 'rm -rf .tower/comms'")).toBe(rmVeto('.tower/comms'));
+  });
+
+  it.each([
+    "bash -rcfile /dev/stdin -ic true <<< 'rm -rf .tower/comms'",
+    "bash -init-file /dev/fd/0 -ic true <<< 'git reset --hard'",
+    "bash -norc -rcfile /proc/self/fd/0 -i <<< 'rm -rf .tower/comms'",
+    "sudo bash -rcfile /dev/stdin -ic true <<< 'rm -rf .tower/comms'",
+  ])('reads a leading single-dash bash long option like its -- form in %j', (command) => {
+    expect(guard(command)).toBe(UNANALYZABLE_VETO);
+  });
+
+  it('treats single-dash long options as long only where bash itself does', () => {
+    expect(guard("bash -login -c 'rm -rf .tower/comms'")).toBe(rmVeto('.tower/comms'));
+    expect(guard("bash -noprofile -norc -c 'git reset --hard'")).toBe(GIT_RESET_VETO);
+    expect(guard('bash -version && rm -rf build')).toBeUndefined();
+    expect(guard("bash -e -rcfile 'rm -rf .tower/comms' x")).toBe(rmVeto('.tower/comms'));
+    expect(guard("zsh -rcfile 'rm -rf .tower/comms' x")).toBe(rmVeto('.tower/comms'));
   });
 });
 
