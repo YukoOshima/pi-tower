@@ -433,6 +433,70 @@ describe('wrappers and nested shells', () => {
     expect(guard("sh -s < cleanup.txt && rm -f x")).toBe(UNANALYZABLE_VETO);
     expect(guard("bash script.sh -c 'rm -rf .tower'")).toBe(UNANALYZABLE_VETO);
   });
+
+  it.each([
+    "bash /dev/stdin <<< 'rm -rf .tower/comms'",
+    'sh /dev/fd/0 < cleanup.sh && rm -f x',
+    "bash /proc/self/fd/0 <<< 'rm -rf .tower/comms'",
+    "bash /dev/fd/3 3<<< 'rm -rf .tower/comms'",
+    "bash -x -- //dev/./stdin <<< 'rm -rf .tower/comms'",
+    "zsh /dev/stdin <<< 'git reset --hard'",
+    "source /dev/stdin <<< 'rm -rf .tower/comms'",
+    ". /dev/fd/0 <<< 'rm -rf .tower/comms'",
+    "builtin source -- /dev/stdin <<< 'git reset --hard'",
+    "cd /dev && source ./stdin <<< 'rm -rf .tower/comms'",
+  ])('vetoes the stdin script operand in %j', (command) => {
+    expect(guard(command)).toBe(UNANALYZABLE_VETO);
+  });
+
+  it('still allows sourcing and running script files', () => {
+    expect(guard('source .venv/bin/activate && rm -rf build')).toBeUndefined();
+    expect(guard('. ./env.sh; rm -f x')).toBeUndefined();
+    expect(guard('bash scripts/clean.sh; rm -rf node_modules')).toBeUndefined();
+  });
+});
+
+describe('wrapper long options', () => {
+  it.each([
+    ['env --ch=.tower rm -rf comms', rmVeto('comms')],
+    ['env --chd .tower rm -rf comms', rmVeto('comms')],
+    ['env --unse PATH rm -rf .tower/comms', rmVeto('.tower/comms')],
+    ['env --ignore-env rm -rf .tower/comms', rmVeto('.tower/comms')],
+    ['sudo --us root rm -rf .tower/comms', rmVeto('.tower/comms')],
+    ['sudo --preserve-env=PATH rm -rf .tower/comms', rmVeto('.tower/comms')],
+    ['nice --adj=5 rm -rf .tower/comms', rmVeto('.tower/comms')],
+    ["env --spl='rm -rf .tower/comms'", UNANALYZABLE_VETO],
+    ['env --i rm -rf .tower/comms', UNANALYZABLE_VETO],
+    ['env --frobnicate rm -f x', UNANALYZABLE_VETO],
+    [`sudo --ch ${slot} git clean -fdx`, UNANALYZABLE_VETO],
+    ['command --help; rm -f x', UNANALYZABLE_VETO],
+  ])('resolves unique abbreviations and vetoes unknown options in %j', (command, veto) => {
+    expect(guard(command)).toBe(veto);
+  });
+
+  it('applies an abbreviated chdir option to the wrapped command', () => {
+    expect(guard(`env --chd ${slot} git clean -fdx`)).toBeUndefined();
+    expect(guard(`sudo --chd=${slot} git clean -fdx`)).toBeUndefined();
+    expect(guard(`env --ch=${repo} git reset --hard`, slot)).toBe(GIT_RESET_VETO);
+  });
+});
+
+describe('zsh precommand modifiers', () => {
+  it.each([
+    ["zsh -c 'noglob rm -rf .tower/comms'", rmVeto('.tower/comms')],
+    ["zsh -c 'nocorrect rm -rf .tower/comms'", rmVeto('.tower/comms')],
+    ["zsh -c 'true; - rm -rf .tower/comms'", rmVeto('.tower/comms')],
+    ["zsh -c '=rm -rf .tower/comms'", rmVeto('.tower/comms')],
+    ["zsh -c 'repeat 1 rm -rf .tower/comms'", UNANALYZABLE_VETO],
+    ["zsh -c 'foreach x (a) rm -rf .tower/comms; end'", UNANALYZABLE_VETO],
+  ])('analyzes %j', (command, veto) => {
+    expect(guard(command)).toBe(veto);
+  });
+
+  it('carries cd through noglob like the current shell', () => {
+    expect(guard(`noglob cd ${slot} && git reset --hard`)).toBeUndefined();
+    expect(guard(`noglob cd ${repo} && git reset --hard`, slot)).toBe(GIT_RESET_VETO);
+  });
 });
 
 describe('quoting and parsing', () => {
@@ -587,9 +651,59 @@ describe('exit and sequential statements', () => {
   it('still treats an unconditional exit without redirections as the end of the script', () => {
     expect(guard('exit; rm -rf .tower/comms')).toBeUndefined();
     expect(guard('exit 0\ngit clean -fdx')).toBeUndefined();
+    expect(guard('exit 300; rm -rf .tower/comms')).toBeUndefined();
+    expect(guard('exit $?; rm -rf .tower/comms')).toBeUndefined();
+    expect(guard('exit "$?"\ngit reset --hard')).toBeUndefined();
     expect(guard(`cd ${slot} || exit 1; git clean -fdx`)).toBeUndefined();
+    expect(guard(`cd ${slot} || exit 1; git reset --hard`)).toBeUndefined();
     expect(guard(`cd ${slot} || exit 1\ngit reset --hard`)).toBeUndefined();
+    expect(guard(`cd ${slot} || exit $?; git reset --hard`)).toBeUndefined();
     expect(guard('exit >/dev/null && rm -rf .tower/comms')).toBeUndefined();
+  });
+
+  it.each([
+    ['exit --help; rm -rf .tower/comms', rmVeto('.tower/comms')],
+    ['exit --help\ngit reset --hard', GIT_RESET_VETO],
+    ['\\exit --help; rm -rf .tower/comms', rmVeto('.tower/comms')],
+    ['builtin exit --help; rm -rf .tower/comms', rmVeto('.tower/comms')],
+    ['command exit --help; rm -rf .tower/comms', rmVeto('.tower/comms')],
+    ["eval 'exit --help'; rm -rf .tower/comms", rmVeto('.tower/comms')],
+    ["bash -c 'exit --help; rm -rf .tower/comms'", rmVeto('.tower/comms')],
+    ['(cd .tower; exit --help; rm -rf comms)', rmVeto('comms')],
+    ['exit --help || git clean -fdx', GIT_CLEAN_VETO],
+    ['exit 1 2; rm -rf .tower/comms', rmVeto('.tower/comms')],
+    ['exit foo; git clean -fdx', GIT_CLEAN_VETO],
+    ['exit -1; rm -rf .tower/comms', rmVeto('.tower/comms')],
+    ['exit -- 0; rm -rf .tower/comms', rmVeto('.tower/comms')],
+    ['exit "$CODE"\ngit reset --hard', GIT_RESET_VETO],
+  ])('keeps analyzing after an exit that may return in %j', (command, veto) => {
+    expect(guard(command)).toBe(veto);
+  });
+
+  it.each([
+    'enable -n exit; exit; rm -rf .tower/comms',
+    'builtin enable -n exit\nexit\nrm -rf .tower/comms',
+    "bash -c 'enable -n exit; exit; rm -rf .tower/comms'",
+    "eval 'enable -n exit'; exit; git reset --hard",
+    'enable; rm -f x',
+  ])('vetoes %j because enable can disable builtins', (command) => {
+    expect(guard(command)).toBe(UNANALYZABLE_VETO);
+  });
+});
+
+describe('pipelines', () => {
+  it("carries the last element's cd forward for lastpipe and zsh/ksh pipelines", () => {
+    expect(guard('shopt -s lastpipe; true | cd .tower; rm -rf comms')).toBe(rmVeto('comms'));
+    expect(guard("zsh -c 'true | cd .tower; rm -rf comms'")).toBe(rmVeto('comms'));
+    expect(guard("ksh -c 'printf x | cd .tower && rm -rf comms'")).toBe(rmVeto('comms'));
+    expect(guard(`true | cd ${slot}; git reset --hard`)).toBe(GIT_RESET_VETO);
+  });
+
+  it('keeps the input cwd for every pipeline element', () => {
+    expect(guard(`cd ${slot} | cat; git reset --hard`)).toBe(GIT_RESET_VETO);
+    expect(guard(`true | cd ${slot}; git reset --hard`, slot)).toBeUndefined();
+    expect(guard('ls | grep x; rm -rf node_modules')).toBeUndefined();
+    expect(guard('true | exit; rm -rf .tower/comms')).toBe(rmVeto('.tower/comms'));
   });
 });
 

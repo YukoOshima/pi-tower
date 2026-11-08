@@ -128,6 +128,8 @@ const COMPOUND_COMMAND_WORDS: readonly string[] = [
   'done',
   'function',
   'coproc',
+  'repeat',
+  'foreach',
 ];
 
 const RESERVED_WORDS: ReadonlyMap<string, ShellParseFailure> = new Map<string, ShellParseFailure>([

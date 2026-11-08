@@ -251,6 +251,8 @@ describe('parseShell failures', () => {
     ['select x in a; do b; done', 'compound-command'],
     ['function f { a; }', 'compound-command'],
     ['coproc a', 'compound-command'],
+    ['repeat 2 a', 'compound-command'],
+    ['foreach x (a) b; end', 'compound-command'],
     ['FOO=1 if a; then b; fi', 'compound-command'],
     ['cat <<EOF\nx\nEOF', 'heredoc'],
     ['cat <<-EOF\n\tx\n\tEOF', 'heredoc'],

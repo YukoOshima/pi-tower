@@ -134,16 +134,14 @@ function walkAndOr(andOr: ShellAndOr, cwds: readonly Cwd[], ctx: GuardContext): 
 }
 
 function walkPipeline(pipeline: ShellPipeline, cwds: readonly Cwd[], ctx: GuardContext): WalkResult {
-  const [only, ...others] = pipeline.commands;
-  if (only !== undefined && others.length === 0) {
-    const result = walkCommand(only, cwds, ctx);
-    return pipeline.negated ? { veto: result.veto, ok: result.fail, fail: result.ok } : result;
-  }
+  let last: WalkResult = passthrough(cwds);
   for (const command of pipeline.commands) {
-    const result = walkCommand(command, cwds, ctx);
-    if (result.veto !== undefined) return result;
+    last = walkCommand(command, cwds, ctx);
+    if (last.veto !== undefined) return last;
   }
-  return passthrough(cwds);
+  const result =
+    pipeline.commands.length === 1 ? last : { ok: union(cwds, last.ok), fail: union(cwds, last.fail) };
+  return pipeline.negated ? { ok: result.fail, fail: result.ok } : result;
 }
 
 function walkCommand(command: ShellCommand, cwds: readonly Cwd[], ctx: GuardContext): WalkResult {
@@ -185,7 +183,9 @@ function analyzeInvocation(
   if (name === 'cd') return analyzeCd(args, cwds, homeOf(ctx));
   if (name === 'pushd') return analyzePushd(args, cwds, homeOf(ctx));
   if (name === 'popd') return analyzePopd(args, cwds);
-  if (name === 'exit') return { ok: [], fail: [] };
+  if (name === 'exit') return exitTerminates(args) ? { ok: [], fail: [] } : passthrough(cwds);
+  if (name === 'enable') return vetoed(UNANALYZABLE_VETO);
+  if (name === 'source' || name === '.') return analyzeSourcedScript(args, cwds, homeOf(ctx));
   if (DECLARATION_BUILTINS.has(name)) return analyzeDeclaration(args, cwds, ctx.state);
   if (name === 'git') return analyzeGit(args, cwds, ctx);
   if (name === 'rm') return analyzeRm(args, cwds, ctx.layout, homeOf(ctx));
@@ -245,13 +245,30 @@ function analyzeNestedShell(args: readonly ShellWord[], cwds: readonly Cwd[], ct
   }
   const operand = args[index];
   if (!command) {
-    if (operand === undefined || stdin) return vetoed(UNANALYZABLE_VETO);
+    if (operand === undefined || stdin || readsStdin(operand, cwds, homeOf(ctx))) return vetoed(UNANALYZABLE_VETO);
     const lateCommandFlag = args.slice(index + 1).some((word) => /^-[a-zA-Z]*c[a-zA-Z]*$/.test(word.value ?? ''));
     return lateCommandFlag ? vetoed(UNANALYZABLE_VETO) : passthrough(cwds);
   }
   if (operand === undefined) return passthrough(cwds);
   if (operand.literal === undefined || ctx.depth >= MAX_NESTED_PARSE_DEPTH) return vetoed(UNANALYZABLE_VETO);
   return childFlow(analyzeSource(operand.literal, cwds, { ...ctx, depth: ctx.depth + 1 }), cwds);
+}
+
+function analyzeSourcedScript(args: readonly ShellWord[], cwds: readonly Cwd[], home: Cwd): WalkResult {
+  const script = args[0]?.value === '--' ? args[1] : args[0];
+  return script !== undefined && readsStdin(script, cwds, home) ? vetoed(UNANALYZABLE_VETO) : passthrough(cwds);
+}
+
+function readsStdin(script: ShellWord, cwds: readonly Cwd[], home: Cwd): boolean {
+  const path = script.literal;
+  if (path === undefined) return false;
+  return cwds.some((cwd) => STDIN_SCRIPT_PATH.test(resolveOperand(cwd, path, home) ?? ''));
+}
+
+function exitTerminates(args: readonly ShellWord[]): boolean {
+  const [code, ...rest] = args;
+  if (code === undefined) return true;
+  return rest.length === 0 && (/^\d+$/.test(code.value ?? '') || code.text === '$?' || code.text === '"$?"');
 }
 
 function analyzeEval(args: readonly ShellWord[], cwds: readonly Cwd[], ctx: GuardContext): WalkResult {
@@ -568,7 +585,7 @@ function isLongOption(arg: string, option: string): boolean {
 }
 
 function normalizeCommandName(raw: string): string {
-  let name = raw;
+  let name = raw.startsWith('=') ? raw.slice(1) : raw;
   const separator = Math.max(name.lastIndexOf('/'), name.lastIndexOf('\\'));
   if (separator >= 0) name = name.slice(separator + 1);
   name = name.toLowerCase();
@@ -604,7 +621,7 @@ function vetoOutcome(vetoes: readonly (string | undefined)[], cwds: readonly Cwd
   return veto === undefined ? passthrough(cwds) : vetoed(veto);
 }
 
-type WrapperOptionKind = 'value' | 'chdir' | 'split' | 'shell';
+type WrapperOptionKind = 'flag' | 'value' | 'chdir' | 'split' | 'shell';
 
 interface WrapperOptions {
   readonly short: ReadonlyMap<string, WrapperOptionKind>;
@@ -654,9 +671,26 @@ const PRIVILEGE_OPTIONS = wrapperOptions(
     '--chdir': 'chdir',
     '--login': 'shell',
     '--shell': 'shell',
+    '--askpass': 'flag',
+    '--background': 'flag',
+    '--bell': 'flag',
+    '--edit': 'flag',
+    '--help': 'flag',
+    '--list': 'flag',
+    '--non-interactive': 'flag',
+    '--preserve-env': 'flag',
+    '--preserve-groups': 'flag',
+    '--remove-timestamp': 'flag',
+    '--reset-timestamp': 'flag',
+    '--set-home': 'flag',
+    '--stdin': 'flag',
+    '--validate': 'flag',
+    '--version': 'flag',
   },
   true,
 );
+
+const INFO_LONG_OPTIONS: Readonly<Record<string, WrapperOptionKind>> = { '--help': 'flag', '--version': 'flag' };
 
 const WRAPPER_OPTIONS: ReadonlyMap<string, WrapperOptions> = new Map([
   ['sudo', PRIVILEGE_OPTIONS],
@@ -665,19 +699,51 @@ const WRAPPER_OPTIONS: ReadonlyMap<string, WrapperOptions> = new Map([
     'env',
     wrapperOptions(
       { a: 'value', u: 'value', C: 'chdir', S: 'split' },
-      { '--argv0': 'value', '--unset': 'value', '--chdir': 'chdir', '--split-string': 'split' },
+      {
+        ...INFO_LONG_OPTIONS,
+        '--argv0': 'value',
+        '--unset': 'value',
+        '--chdir': 'chdir',
+        '--split-string': 'split',
+        '--ignore-environment': 'flag',
+        '--null': 'flag',
+        '--block-signal': 'flag',
+        '--default-signal': 'flag',
+        '--ignore-signal': 'flag',
+        '--list-signal-handling': 'flag',
+        '--debug': 'flag',
+      },
       true,
     ),
   ],
   ['command', wrapperOptions({})],
   ['exec', wrapperOptions({ a: 'value' })],
-  ['nohup', wrapperOptions({})],
+  ['nohup', wrapperOptions({}, INFO_LONG_OPTIONS)],
   ['builtin', wrapperOptions({})],
-  ['nice', wrapperOptions({ n: 'value' }, { '--adjustment': 'value' })],
-  ['time', wrapperOptions({ f: 'value', o: 'value' }, { '--format': 'value', '--output': 'value' })],
+  ['nice', wrapperOptions({ n: 'value' }, { ...INFO_LONG_OPTIONS, '--adjustment': 'value' })],
+  [
+    'time',
+    wrapperOptions(
+      { f: 'value', o: 'value' },
+      {
+        ...INFO_LONG_OPTIONS,
+        '--format': 'value',
+        '--output': 'value',
+        '--append': 'flag',
+        '--portability': 'flag',
+        '--quiet': 'flag',
+        '--verbose': 'flag',
+      },
+    ),
+  ],
+  ['noglob', wrapperOptions({})],
+  ['nocorrect', wrapperOptions({})],
+  ['-', wrapperOptions({})],
 ]);
 
-const CURRENT_SHELL_WRAPPERS: ReadonlySet<string> = new Set(['command', 'builtin', 'time']);
+const CURRENT_SHELL_WRAPPERS: ReadonlySet<string> = new Set(['command', 'builtin', 'time', 'noglob', 'nocorrect', '-']);
+
+const STDIN_SCRIPT_PATH = /^\/(?:dev\/(?:stdin|fd\/\d+)|proc\/self\/fd\/\d+)$/;
 
 const NESTED_SHELLS: ReadonlySet<string> = new Set(['sh', 'bash', 'dash', 'zsh', 'ksh', 'ash']);
 
@@ -713,8 +779,8 @@ function dropLeadingOptions(args: readonly ShellWord[], options: WrapperOptions)
     if (arg === '--') return { rest: args.slice(i + 1), chdir, shell };
     if (arg.startsWith('--')) {
       const equals = arg.indexOf('=');
-      const kind = options.long.get(equals < 0 ? arg : arg.slice(0, equals));
-      if (kind === 'split') return { rest: [], unanalyzable: true };
+      const kind = longOptionKind(equals < 0 ? arg : arg.slice(0, equals), options);
+      if (kind === undefined || kind === 'split') return { rest: [], unanalyzable: true };
       if (kind === 'shell') shell = true;
       if (kind === 'chdir') chdir = equals < 0 ? args[i + 1] : { text: arg, value: arg.slice(equals + 1) };
       if (equals < 0 && (kind === 'value' || kind === 'chdir')) i += 1;
@@ -733,6 +799,13 @@ function dropLeadingOptions(args: readonly ShellWord[], options: WrapperOptions)
     }
   }
   return { rest: [], chdir, shell };
+}
+
+function longOptionKind(name: string, options: WrapperOptions): WrapperOptionKind | undefined {
+  const exact = options.long.get(name);
+  if (exact !== undefined) return exact;
+  const matches = [...options.long].filter(([option]) => option.startsWith(name));
+  return matches.length === 1 ? matches[0]![1] : undefined;
 }
 
 function dropWrapperOperands(args: readonly ShellWord[], options: WrapperOptions, state: GuardState): WrappedCommand {
