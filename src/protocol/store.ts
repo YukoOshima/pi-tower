@@ -1920,3 +1920,1281 @@ export class TowerStore {
     await this.appendLog(callerName, 'finding.file', { type: input.type, slug: slugify(input.title) }, rel);
     return rel;
   }
+
+  async submitReview(callerName: string, input: TowerReviewInput): Promise<TowerReviewResult> {
+    return this.runPrepared(
+      async () => {
+        const snapshot = await this.loadSnapshot();
+        this.assertReviewSubmission(callerName, input, snapshot.state);
+        const reviewFiles = await this.reviewFileNames();
+        const existing = await this.reviewsFor(input.target);
+        const nextReviewSeq = await this.nextReviewSeq();
+        const reviewedCommit = await branchTip(this.repoRoot, input.target);
+        const inbox = await this.listInboxSnapshot();
+        const options: TowerReviewLockedOptions = {
+          existing,
+          nextReviewSeq,
+          reviewedCommit,
+          inboxItems: inbox.items,
+          activityLogRefs: new Map(),
+        };
+        await this.submitReviewLocked(callerName, input, structuredClone(snapshot.state), {
+          ...options,
+          validateOnly: true,
+        });
+        return { snapshot, reviewFiles, inboxFiles: inbox.files, options };
+      },
+      (prepared) =>
+        this.withStateLock(async () => {
+          const state = await this.assertPreparationCurrent(
+            prepared.snapshot,
+            prepared.inboxFiles,
+            prepared.reviewFiles,
+          );
+          if ((await branchTip(this.repoRoot, input.target)) !== prepared.options.reviewedCommit) {
+            throw new TowerPreparationConflict();
+          }
+          return this.submitReviewLocked(callerName, input, state, prepared.options);
+        }),
+    );
+  }
+
+  private assertReviewSubmission(
+    callerName: string,
+    input: TowerReviewInput,
+    state: TowerState,
+  ): TowerRosterEntry | undefined {
+    let callerEntry: TowerRosterEntry | undefined;
+    if (callerName !== TOWER_NAME) {
+      callerEntry = this.findAgent(state, callerName);
+      if (callerEntry?.kind !== 'reviewer' || callerEntry.reviewTarget !== input.target) {
+        throw new TowerProtocolError(
+          `agent "${callerName}" is not an assigned reviewer for "${input.target}"`,
+        );
+      }
+    }
+    if (!/^(clean|p[12]-\d+items)$/.test(input.status)) {
+      throw new TowerProtocolError(
+        `review status must be clean | p1-Nitems | p2-Nitems, got "${input.status}"`,
+      );
+    }
+    if (!['merge', 'fix-then-merge', 'hold'].includes(input.merge)) {
+      throw new TowerProtocolError(
+        `review merge verdict must be merge | fix-then-merge | hold, got "${input.merge}"`,
+      );
+    }
+    return callerEntry;
+  }
+
+  private async submitReviewLocked(
+    callerName: string,
+    input: TowerReviewInput,
+    state: TowerState,
+    options: TowerReviewLockedOptions,
+  ): Promise<TowerReviewResult> {
+    const callerEntry = this.assertReviewSubmission(callerName, input, state);
+    const existing = options.existing;
+    const reviewedCommit = options.reviewedCommit;
+    const reviewMissionId =
+      callerEntry === undefined
+        ? resolveMissionByBranch(state, input.target)?.id
+        : callerEntry.reviewMissionId;
+    const reviewMission =
+      reviewMissionId !== undefined
+        ? state.missions.find((mission) => mission.id === reviewMissionId)
+        : resolveMissionByBranch(state, input.target);
+    const activityLogErrors: string[] = [];
+    let review = await this.findReviewRecovery(
+      state,
+      callerName,
+      input,
+      existing,
+      reviewedCommit,
+      reviewMission,
+      options.inboxItems,
+      options.activityLogRefs,
+    );
+    const myRounds = existing.filter((candidate) => candidate.reviewer === callerName).length;
+    if (review === undefined && myRounds >= MAX_REVIEW_ROUNDS) {
+      throw new TowerProtocolError(
+        `branch "${input.target}" has already been through ${String(MAX_REVIEW_ROUNDS)} review rounds by "${callerName}" — the rework loop is not converging, so another round from the same reviewer is refused; redirect instead: reassign the work (spawn a different worker or a fresh reviewer), split the mission into smaller pieces, or descope it (TowerMission status=abandoned)`,
+      );
+    }
+    if (options.validateOnly === true) {
+      if (review === undefined) {
+        const round = myRounds + 1;
+        review = {
+          reviewer: callerName,
+          target: input.target,
+          round,
+          status: input.status,
+          merge: input.merge,
+          reviewedCommit,
+          date: dateDash(),
+          file: join(REVIEWS_DIR, reviewFileName({ target: input.target, reviewer: callerName, round })),
+          mtimeMs: 0,
+          seq: options.nextReviewSeq,
+          mission: reviewMissionId,
+        };
+      }
+      await this.storeReviewMessages(
+        state,
+        callerName,
+        input,
+        review,
+        reviewMission,
+        activityLogErrors,
+        options.inboxItems,
+        options.activityLogRefs,
+        true,
+      );
+      return { review, storedMessages: [] };
+    }
+    if (
+      review !== undefined &&
+      !(await this.hasCachedActivityLogRef('review.write', review.file, options.activityLogRefs))
+    ) {
+      try {
+        await this.appendLog(
+          callerName,
+          'review.write',
+          {
+            target: input.target,
+            round: review.round,
+            verdict: review.status,
+            reviewed: review.reviewedCommit.slice(0, 7),
+          },
+          review.file,
+        );
+      } catch (error) {
+        activityLogErrors.push(
+          `review ${review.file} was stored, but appending its review.write activity log failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+    if (review === undefined) {
+      const round = myRounds + 1;
+      const seq = options.nextReviewSeq;
+      const date = dateDash();
+      const frontmatter = renderFrontmatter({
+        date,
+        reviewer: callerName,
+        target: input.target,
+        round: String(round),
+        seq: String(seq),
+        status: input.status,
+        merge: input.merge,
+        reviewed_commit: reviewedCommit,
+        mission: reviewMissionId,
+      });
+      const content = `${frontmatter}\n\n${reviewDocumentBody(input)}\n`;
+      const rel = await this.writeUnique(
+        join(REVIEWS_DIR, reviewFileName({ target: input.target, reviewer: callerName, round })),
+        content,
+      );
+      review = {
+        reviewer: callerName,
+        target: input.target,
+        round,
+        status: input.status,
+        merge: input.merge,
+        reviewedCommit,
+        date,
+        file: rel,
+        mtimeMs: (await stat(this.abs(rel))).mtimeMs,
+        seq,
+        mission: reviewMissionId,
+      };
+      try {
+        await this.appendLog(
+          callerName,
+          'review.write',
+          {
+            target: input.target,
+            round,
+            verdict: input.status,
+            reviewed: reviewedCommit.slice(0, 7),
+          },
+          rel,
+        );
+      } catch (error) {
+        activityLogErrors.push(
+          `review ${rel} was stored, but appending its review.write activity log failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+    if (input.status !== 'clean' && reviewMission?.status === 'completed') {
+      reviewMission.status = 'active';
+      await this.save(state);
+      await this.renderMissionsIndex(state);
+      await this.renderMissionFile(reviewMission);
+      try {
+        await this.appendLog(
+          callerName,
+          'mission.rework',
+          { id: reviewMission.id, verdict: input.status },
+          join(MISSIONS_DIR, missionFileName(reviewMission.id, reviewMission.slug)),
+        );
+      } catch (error) {
+        activityLogErrors.push(
+          `mission ${reviewMission.id} was marked active, but appending mission.rework activity log failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+    const { storedMessages, notificationErrors } = await this.storeReviewMessages(
+      state,
+      callerName,
+      input,
+      review,
+      reviewMission,
+      activityLogErrors,
+      options.inboxItems,
+      options.activityLogRefs,
+    );
+    return {
+      review,
+      storedMessages,
+      notificationError:
+        notificationErrors.length > 0
+          ? `review ${review.file} was stored, but storing review-result notification(s) failed: ${notificationErrors.join(' | ')}`
+          : undefined,
+      activityLogError:
+        activityLogErrors.length > 0 ? activityLogErrors.join(' | ') : undefined,
+    };
+  }
+
+  private async findReviewRecovery(
+    state: TowerState,
+    callerName: string,
+    input: TowerReviewInput,
+    existing: readonly TowerReviewInfo[],
+    reviewedCommit: string,
+    reviewMission: TowerMission | undefined,
+    inboxItems: readonly TowerInboxItem[],
+    activityLogRefs: Map<string, boolean>,
+  ): Promise<TowerReviewInfo | undefined> {
+    const expectedBody = reviewDocumentBody(input);
+    const recipients = this.reviewRecipients(state, callerName, input, reviewMission);
+    for (const candidate of existing.toReversed()) {
+      if (
+        candidate.reviewer !== callerName ||
+        candidate.reviewedCommit !== reviewedCommit ||
+        candidate.status !== input.status ||
+        candidate.merge !== input.merge
+      ) {
+        continue;
+      }
+      const { body } = parseFrontmatter(await readFile(this.abs(candidate.file), 'utf8'));
+      if (body !== expectedBody) continue;
+      if (!(await this.hasCachedActivityLogRef('review.write', candidate.file, activityLogRefs))) {
+        return candidate;
+      }
+      let needsRecovery = false;
+      for (const recipient of recipients) {
+        const message = inboxItems.find((item) =>
+          this.isReviewResultMessage(item, callerName, recipient, candidate, reviewMission, input),
+        );
+        if (
+          message === undefined ||
+          !(await this.hasCachedActivityLogRef('inbox.send', message.file, activityLogRefs))
+        ) {
+          needsRecovery = true;
+          break;
+        }
+      }
+      if (needsRecovery) return candidate;
+      return undefined;
+    }
+    return undefined;
+  }
+
+  private async storeReviewMessages(
+    state: TowerState,
+    callerName: string,
+    input: TowerReviewInput,
+    review: TowerReviewInfo,
+    reviewMission: TowerMission | undefined,
+    activityLogErrors: string[],
+    inboxItems: readonly TowerInboxItem[],
+    activityLogRefs: Map<string, boolean>,
+    validateOnly = false,
+  ): Promise<{
+    readonly storedMessages: readonly TowerSendResult[];
+    readonly notificationErrors: readonly string[];
+  }> {
+    const recipients = this.reviewRecipients(state, callerName, input, reviewMission);
+    const body = this.reviewNotificationBody(review, reviewMission, input);
+    const storedMessages: TowerSendResult[] = [];
+    const notificationErrors: string[] = [];
+    for (const recipient of recipients) {
+      const existing = inboxItems.find((item) =>
+        this.isReviewResultMessage(item, callerName, recipient, review, reviewMission, input),
+      );
+      if (existing !== undefined) {
+        storedMessages.push({
+          item: existing,
+          missionId: reviewMission?.id ?? review.mission,
+        });
+        const logPresent = await this.hasCachedActivityLogRef(
+          'inbox.send',
+          existing.file,
+          activityLogRefs,
+        );
+        if (validateOnly) continue;
+        if (!logPresent) {
+          try {
+            await this.appendLog(
+              callerName,
+              'inbox.send',
+              { to: recipient, subject: slugify('review-result') },
+              existing.file,
+            );
+          } catch (error) {
+            activityLogErrors.push(
+              `inbox message ${existing.file} was stored, but appending its inbox.send activity log failed: ${error instanceof Error ? error.message : String(error)}`,
+            );
+          }
+        }
+        continue;
+      }
+      if (validateOnly) continue;
+      try {
+        const sent = await this.sendDetailedSnapshot(
+          callerName,
+          {
+            to: recipient,
+            subject: 'review-result',
+            body,
+            scope: reviewMission?.id ?? review.mission,
+            action: 'review-result',
+          },
+          state,
+        );
+        storedMessages.push(sent);
+        if (sent.activityLogError !== undefined) activityLogErrors.push(sent.activityLogError);
+      } catch (error) {
+        notificationErrors.push(
+          `${recipient}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+    return { storedMessages, notificationErrors };
+  }
+
+  private reviewRecipients(
+    state: TowerState,
+    callerName: string,
+    input: TowerReviewInput,
+    reviewMission: TowerMission | undefined,
+  ): readonly string[] {
+    const owner =
+      reviewMission !== undefined && isOpenMission(reviewMission) && reviewMission.owner !== undefined
+        ? state.roster.agents.find(
+            (agent) =>
+              agent.name === reviewMission.owner &&
+              agent.kind === 'worker' &&
+              agent.missionId === reviewMission.id &&
+              agent.diedAt === undefined,
+          )
+        : undefined;
+    const recipients: string[] = [];
+    if (input.status !== 'clean' && owner !== undefined && owner.name !== callerName) {
+      recipients.push(owner.name);
+    }
+    if (callerName !== TOWER_NAME) recipients.push(TOWER_NAME);
+    return recipients;
+  }
+
+  private reviewNotificationBody(
+    review: TowerReviewInfo,
+    reviewMission: TowerMission | undefined,
+    input: TowerReviewInput,
+  ): string {
+    return [
+      `file: ${review.file}`,
+      `target: ${review.target}`,
+      `mission: ${reviewMission?.id ?? review.mission ?? '(none)'}`,
+      `round: ${String(review.round)}`,
+      `verdict: ${input.status}`,
+      `merge recommendation: ${input.merge}`,
+      `reviewedCommit: ${review.reviewedCommit}`,
+      `owner: ${reviewMission?.owner ?? '(none)'}`,
+    ].join('\n');
+  }
+
+  private isReviewResultMessage(
+    item: TowerInboxItem,
+    callerName: string,
+    recipient: string,
+    review: TowerReviewInfo,
+    reviewMission: TowerMission | undefined,
+    input: TowerReviewInput,
+  ): boolean {
+    return (
+      item.from === callerName &&
+      item.to === recipient &&
+      item.subject === 'review-result' &&
+      item.scope === (reviewMission?.id ?? review.mission) &&
+      item.action === 'review-result' &&
+      item.body === this.reviewNotificationBody(review, reviewMission, input)
+    );
+  }
+
+  private async hasActivityLogRef(action: string, rel: string): Promise<boolean> {
+    const handle = await open(this.abs(ACTIVITY_LOG), 'r').catch(
+      (error: NodeJS.ErrnoException) => {
+        if (error.code === 'ENOENT') return undefined;
+        throw error;
+      },
+    );
+    if (handle === undefined) return false;
+    try {
+      const { size } = await handle.stat();
+      const actionNeedle = Buffer.from(` ${action} `);
+      const refNeedle = Buffer.from(`ref=${rel}`);
+      const matches = (line: Buffer): boolean =>
+        line.includes(actionNeedle) &&
+        line.length >= refNeedle.length &&
+        line.subarray(line.length - refNeedle.length).equals(refNeedle);
+      let remainder = Buffer.alloc(0);
+      let end = size;
+      while (end > 0) {
+        const start = Math.max(0, end - 16 * 1024);
+        const buffer = Buffer.allocUnsafe(end - start);
+        const { bytesRead } = await handle.read(buffer, 0, buffer.length, start);
+        const content = Buffer.concat([buffer.subarray(0, bytesRead), remainder]);
+        let lineEnd = content.length;
+        for (;;) {
+          const newline = lineEnd === 0 ? -1 : content.lastIndexOf(0x0a, lineEnd - 1);
+          if (newline === -1) {
+            if (start === 0 && matches(content.subarray(0, lineEnd))) return true;
+            remainder = Buffer.from(content.subarray(0, lineEnd));
+            break;
+          }
+          if (matches(content.subarray(newline + 1, lineEnd))) return true;
+          lineEnd = newline;
+        }
+        end = start;
+      }
+      return false;
+    } finally {
+      await handle.close();
+    }
+  }
+
+  private async hasCachedActivityLogRef(
+    action: string,
+    rel: string,
+    cache: Map<string, boolean>,
+  ): Promise<boolean> {
+    const key = `${action}\0${rel}`;
+    const cached = cache.get(key);
+    if (cached !== undefined) return cached;
+    const present = await this.hasActivityLogRef(action, rel);
+    cache.set(key, present);
+    return present;
+  }
+
+  async reviewsFor(target: string): Promise<readonly TowerReviewInfo[]> {
+    let files: string[];
+    try {
+      files = await readdir(this.abs(REVIEWS_DIR));
+    } catch {
+      return [];
+    }
+    const prefix = `review-${targetSlug(target)}-`;
+    const candidates = files.filter((file) => file.startsWith(prefix) && file.endsWith('.md'));
+    const loaded = await mapWithConcurrency(
+      candidates,
+      TOWER_FILE_IO_CONCURRENCY,
+      async (file): Promise<TowerReviewInfo | undefined> => {
+        const rel = join(REVIEWS_DIR, file);
+        let text: string;
+        try {
+          text = await readFrontmatterPrefix(this.abs(rel));
+        } catch {
+          return undefined;
+        }
+        const { fields } = parseFrontmatter(text);
+        const round = Number.parseInt(fields['round'] ?? '', 10);
+        if (Number.isNaN(round)) return undefined;
+        const seq = Number.parseInt(fields['seq'] ?? '', 10);
+        const { mtimeMs } = await stat(this.abs(rel));
+        return {
+          reviewer: fields['reviewer'] ?? 'unknown',
+          target: fields['target'] ?? target,
+          round,
+          status: fields['status'] ?? '',
+          merge: fields['merge'] ?? '',
+          reviewedCommit: fields['reviewed_commit'] ?? '',
+          date: fields['date'] ?? '',
+          file: rel,
+          mtimeMs,
+          seq: Number.isNaN(seq) ? undefined : seq,
+          mission: fields['mission'],
+        };
+      },
+    );
+    const reviews = loaded.filter((review): review is TowerReviewInfo => review !== undefined);
+    reviews.sort(
+      (a, b) =>
+        (a.seq ?? -1) - (b.seq ?? -1) ||
+        a.mtimeMs - b.mtimeMs ||
+        a.round - b.round ||
+        a.file.localeCompare(b.file),
+    );
+    return reviews;
+  }
+
+  async latestReview(target: string): Promise<TowerReviewInfo | undefined> {
+    const reviews = await this.reviewsFor(target);
+    return reviews.at(-1);
+  }
+
+  private async reviewFileNames(): Promise<readonly string[]> {
+    try {
+      return (await readdir(this.abs(REVIEWS_DIR)))
+        .filter((file) => file.startsWith('review-') && file.endsWith('.md'))
+        .toSorted();
+    } catch {
+      return [];
+    }
+  }
+
+  private async nextReviewSeq(): Promise<number> {
+    const candidates = await this.reviewFileNames();
+    const sequences = await mapWithConcurrency(
+      candidates,
+      TOWER_FILE_IO_CONCURRENCY,
+      async (file): Promise<number | undefined> => {
+        let text: string;
+        try {
+          text = await readFrontmatterPrefix(this.abs(join(REVIEWS_DIR, file)));
+        } catch {
+          return undefined;
+        }
+        const seq = Number.parseInt(parseFrontmatter(text).fields['seq'] ?? '', 10);
+        return Number.isNaN(seq) ? undefined : seq;
+      },
+    );
+    let max = 0;
+    for (const seq of sequences) {
+      if (seq !== undefined && seq > max) max = seq;
+    }
+    return max + 1;
+  }
+
+  async merge(
+    branch: string,
+    runtime: TowerMissionRuntimeOptions = {},
+  ): Promise<TowerMergeResult> {
+    return this.withStateLock(async () => {
+      const state = await this.load();
+      const block = async (reason: string, message: string): Promise<TowerProtocolError> => {
+        await this.appendLog(TOWER_NAME, 'merge.blocked', { branch, reason });
+        return new TowerProtocolError(message);
+      };
+      const mission = resolveMissionByBranch(state, branch);
+      if (mission === undefined) {
+        const closed = state.missions.filter((candidate) => candidate.branch === branch);
+        if (closed.length > 0) {
+          throw await block(
+            'branch-owned-by-closed-missions',
+            `merge blocked: branch "${branch}" resolves only to closed mission(s) ${closed.map((candidate) => `${candidate.id} (${candidate.status})`).join(', ')} — TowerMerge never flips a closed mission's status; re-plan the work under a new title if it should land`,
+          );
+        }
+        throw new TowerProtocolError(`no tower mission owns branch "${branch}"`);
+      }
+
+      const gate = await this.missionGate(state, mission, runtime);
+      if (!gate.ready) {
+        const primary = gate.blocks[0]!;
+        throw await block(primary.reason, primary.message);
+      }
+      const observation = gate.observations.branch!;
+      const evaluatedBranchTip = observation.tip;
+
+      if (gate.noop) {
+        const currentBranchTip = await branchTip(this.repoRoot, branch);
+        if (currentBranchTip !== evaluatedBranchTip) {
+          await this.appendLog(TOWER_NAME, 'merge.advanced', {
+            branch,
+            evaluated: evaluatedBranchTip.slice(0, 7),
+            current: currentBranchTip.slice(0, 7),
+          });
+          return {
+            status: 'advanced',
+            mergeCommit: gate.observations.headTip,
+            evaluatedBranchTip,
+            currentBranchTip,
+            conflictsWith: [],
+            noop: true,
+          };
+        }
+        mission.status = 'merged';
+        await this.save(state);
+        await this.renderMissionsIndex(state);
+        await this.renderMissionFile(mission);
+        await this.appendLog(TOWER_NAME, 'merge.noop', { branch, kind: 'survey' });
+        return {
+          status: 'noop',
+          mergeCommit: gate.observations.headTip,
+          evaluatedBranchTip,
+          currentBranchTip,
+          conflictsWith: [],
+          noop: true,
+        };
+      }
+
+      const mergeCommit = await mergeNoFf(
+        this.repoRoot,
+        evaluatedBranchTip,
+        `Merge branch '${branch}'`,
+      );
+      const headTip = await branchTip(this.repoRoot, 'HEAD');
+      if (!(await isAncestor(this.repoRoot, evaluatedBranchTip, headTip))) {
+        throw new TowerProtocolError(
+          `recovery-required: merge of ${branch} returned but HEAD ${headTip} does not contain the evaluated commit ${evaluatedBranchTip} — mission ${mission.id} was not marked merged; inspect the base checkout before retrying`,
+        );
+      }
+      const currentBranchTip = await branchTip(this.repoRoot, branch);
+      if (currentBranchTip !== evaluatedBranchTip) {
+        await this.appendLog(TOWER_NAME, 'merge.advanced', {
+          branch,
+          evaluated: evaluatedBranchTip.slice(0, 7),
+          current: currentBranchTip.slice(0, 7),
+          merge_commit: mergeCommit.slice(0, 7),
+        });
+        return {
+          status: 'advanced',
+          mergeCommit,
+          evaluatedBranchTip,
+          currentBranchTip,
+          conflictsWith: [],
+        };
+      }
+
+      const changedSet = new Set(observation.changedFiles);
+      const otherMissions = state.missions.filter(
+        (other) => other.branch !== branch && isOpenMission(other),
+      );
+      const conflicts = await mapWithConcurrency(
+        otherMissions,
+        TOWER_GIT_CONCURRENCY,
+        async (
+          other,
+        ): Promise<{ readonly branch: string; readonly files: readonly string[] } | undefined> => {
+          if (!(await branchExists(this.repoRoot, other.branch))) return undefined;
+          const otherChanged = await diffNameOnly(
+            this.repoRoot,
+            await this.diffBase(state, other),
+            other.branch,
+          );
+          const overlap = otherChanged.filter((file) => changedSet.has(file));
+          return overlap.length > 0 ? { branch: other.branch, files: overlap } : undefined;
+        },
+      );
+      const conflictsWith = conflicts.filter(
+        (conflict): conflict is { readonly branch: string; readonly files: readonly string[] } =>
+          conflict !== undefined,
+      );
+
+      mission.status = 'merged';
+      await this.save(state);
+      await this.renderMissionsIndex(state);
+      await this.renderMissionFile(mission);
+      await this.appendLog(TOWER_NAME, 'merge', {
+        branch,
+        base: state.base,
+        merge_commit: mergeCommit.slice(0, 7),
+        review_waived: gate.reviewBinding === 'clean-rebase-waived' ? 'yes' : undefined,
+      });
+      return {
+        status: 'merged',
+        mergeCommit,
+        evaluatedBranchTip,
+        currentBranchTip,
+        conflictsWith,
+      };
+    });
+  }
+
+  async missionGate(
+    state: TowerState,
+    mission: TowerMission,
+    runtime: TowerMissionRuntimeOptions = {},
+  ): Promise<TowerMissionGateResult> {
+    const [reviews, observations] = await Promise.all([
+      this.reviewsFor(mission.branch),
+      this.observeMissionGit(state, mission),
+    ]);
+    const activeAgentIds =
+      typeof runtime.activeAgentIds === 'function'
+        ? runtime.activeAgentIds()
+        : runtime.activeAgentIds;
+    const workers = state.roster.agents
+      .filter(
+        (agent) =>
+          agent.kind === 'worker' &&
+          (agent.missionId === mission.id ||
+            agent.branch === mission.branch ||
+            agent.worktree === mission.worktree),
+      )
+      .map((agent) => ({
+        agentId: agent.agentId,
+        name: agent.name,
+        status:
+          activeAgentIds === undefined
+            ? ('unknown' as const)
+            : activeAgentIds.has(agent.agentId)
+              ? ('busy' as const)
+              : ('idle' as const),
+      }));
+    return evaluateMissionGate({ state, mission, reviews, workers, observations });
+  }
+
+  private async observeMissionGit(
+    state: TowerState,
+    mission: TowerMission,
+  ): Promise<TowerMissionGitObservations> {
+    const checkedOutBranch = async (): Promise<string | undefined> => {
+      try {
+        return await currentBranch(this.repoRoot);
+      } catch (error) {
+        if (error instanceof GitError) throw error;
+        return undefined;
+      }
+    };
+    const [baseTip, headTip, checkout, dirtyEntries, hasBranch] = await Promise.all([
+      branchTip(this.repoRoot, state.base),
+      branchTip(this.repoRoot, 'HEAD'),
+      checkedOutBranch(),
+      listBaseDirtyEntries(this.repoRoot),
+      branchExists(this.repoRoot, mission.branch),
+    ]);
+    const baseDirtyFiles = dirtyEntries.map((entry) => entry.path);
+    if (!hasBranch) return { baseTip, headTip, checkedOutBranch: checkout, baseDirtyFiles };
+    const tip = await branchTip(this.repoRoot, mission.branch);
+    const [baseIsAncestor, spawnBaseIsAncestor] = await Promise.all([
+      isAncestor(this.repoRoot, baseTip, tip),
+      mission.spawnBase === undefined
+        ? Promise.resolve(false)
+        : isAncestor(this.repoRoot, mission.spawnBase, tip),
+    ]);
+    const diffBase = spawnBaseIsAncestor ? mission.spawnBase! : baseTip;
+    const [changedFiles, mergeTouchedFiles] = await Promise.all([
+      diffNameOnly(this.repoRoot, diffBase, tip),
+      diffNameOnly(this.repoRoot, headTip, tip),
+    ]);
+    return {
+      baseTip,
+      headTip,
+      checkedOutBranch: checkout,
+      baseDirtyFiles,
+      branch: { tip, baseIsAncestor, diffBase, changedFiles, mergeTouchedFiles },
+    };
+  }
+
+  async rebaseMission(
+    callerName: string,
+    id: string,
+    runtime: TowerMissionRuntimeOptions = {},
+  ): Promise<TowerRebaseMissionResult> {
+    return this.withStateLock(async () => {
+      if (callerName !== TOWER_NAME) {
+        throw new TowerProtocolError(
+          `agent "${callerName}" cannot rebase a mission branch — only the tower runs TowerRebase; a worker rebases only when the tower asks it to`,
+        );
+      }
+      const state = await this.load();
+      const mission = state.missions.find((candidate) => candidate.id === id);
+      if (mission === undefined) {
+        throw new TowerProtocolError(`unknown mission "${id}"`);
+      }
+      if (!isOpenMission(mission)) {
+        throw new TowerProtocolError(
+          `mission ${id} is ${mission.status} — only open missions rebase; closed missions are historical records`,
+        );
+      }
+      if (mission.kind === 'survey') {
+        throw new TowerProtocolError(
+          `mission ${id} is a read-only survey — it has no work branch to rebase`,
+        );
+      }
+      const activeAgentIds =
+        typeof runtime.activeAgentIds === 'function'
+          ? runtime.activeAgentIds()
+          : runtime.activeAgentIds;
+      const workers = state.roster.agents.filter(
+        (agent) =>
+          agent.kind === 'worker' &&
+          (agent.missionId === mission.id ||
+            agent.branch === mission.branch ||
+            agent.worktree === mission.worktree),
+      );
+      const busyWorkers = workers.filter(
+        (worker) => activeAgentIds?.has(worker.agentId) === true,
+      );
+      if (busyWorkers.length > 0) {
+        throw new TowerProtocolError(
+          `worker(s) ${busyWorkers.map((worker) => worker.name).join(', ')} are mid-turn — rebasing under a running worker could race its edits; TowerSend a message asking for a worker-run rebase, or retry once every worker is idle`,
+        );
+      }
+      if (activeAgentIds === undefined && workers.length > 0) {
+        throw new TowerProtocolError(
+          `worker runtime for ${workers.map((worker) => worker.name).join(', ')} cannot be observed authoritatively — unknown is not idle; retry TowerRebase from the main tower agent`,
+        );
+      }
+      if (!(await branchExists(this.repoRoot, mission.branch))) {
+        throw new TowerProtocolError(
+          `mission ${id} has no branch "${mission.branch}" yet — spawn a worker to create it before rebasing`,
+        );
+      }
+      const worktreeAbs = this.abs(join(WORKTREES_DIR, mission.worktree));
+      if (!(await isRegisteredWorktree(this.repoRoot, worktreeAbs))) {
+        throw new TowerProtocolError(
+          `mission ${id} has no registered worktree at ${join(WORKTREES_DIR, mission.worktree)} — spawn a worker to create it before rebasing`,
+        );
+      }
+      if (await isWorktreeDirty(worktreeAbs)) {
+        throw new TowerProtocolError(
+          `worktree ${mission.worktree} has uncommitted changes — rebasing under uncommitted work could lose it; have the worker commit or stash first, then retry`,
+        );
+      }
+      const gitDir = resolve(worktreeAbs, (await git(worktreeAbs, ['rev-parse', '--git-dir'])).trim());
+      if (existsSync(join(gitDir, 'rebase-merge')) || existsSync(join(gitDir, 'rebase-apply'))) {
+        throw new TowerProtocolError(
+          `worktree ${mission.worktree} already has a rebase in progress — finish or abort it (git rebase --continue / --abort in the worktree) before the tower rebases the branch`,
+        );
+      }
+      const baseCommit = await branchTip(this.repoRoot, state.base);
+      const fromCommit = await branchTip(this.repoRoot, mission.branch);
+      const checkedOut = await git(worktreeAbs, ['rev-parse', '--abbrev-ref', 'HEAD']);
+      if (checkedOut !== mission.branch) {
+        throw new TowerProtocolError(
+          `worktree ${mission.worktree} is on "${checkedOut}", not mission branch "${mission.branch}" — restore the registered checkout before rebasing; nothing was changed`,
+        );
+      }
+      const worktreeHead = await branchTip(worktreeAbs, 'HEAD');
+      if (worktreeHead !== fromCommit) {
+        throw new TowerProtocolError(
+          `worktree ${mission.worktree} HEAD ${worktreeHead} does not match mission branch "${mission.branch}" at ${fromCommit} — repair the diverged checkout before rebasing; nothing was changed`,
+        );
+      }
+      if (await isAncestor(this.repoRoot, baseCommit, fromCommit)) {
+        await this.appendLog(TOWER_NAME, 'rebase.mission', { id, result: 'up-to-date' });
+        return { status: 'up-to-date' };
+      }
+
+      let rebaseErrorMessage: string | undefined;
+      try {
+        await git(worktreeAbs, ['rebase', baseCommit]);
+      } catch (error) {
+        rebaseErrorMessage = error instanceof Error ? error.message : 'non-Error thrown value';
+      }
+      if (rebaseErrorMessage !== undefined) {
+        let conflicted: string;
+        let inProgress: boolean;
+        try {
+          conflicted = await git(worktreeAbs, ['diff', '--name-only', '--diff-filter=U']);
+          inProgress =
+            existsSync(join(gitDir, 'rebase-merge')) || existsSync(join(gitDir, 'rebase-apply'));
+        } catch (error) {
+          throw new TowerProtocolError(
+            `recovery-required: rebase of mission ${id} failed and its state could not be inspected: ${error instanceof Error ? error.message : String(error)} — no waiver was recorded and the mission was not marked blocked`,
+          );
+        }
+        const files = conflicted.split('\n').filter((file) => file.trim().length > 0);
+        if (inProgress) {
+          try {
+            await git(worktreeAbs, ['rebase', '--abort']);
+          } catch (error) {
+            throw new TowerProtocolError(
+              `recovery-required: rebase of mission ${id} failed and git rebase --abort also failed: ${error instanceof Error ? error.message : String(error)} — no recovery is claimed, no waiver was recorded, and the mission was not marked blocked`,
+            );
+          }
+        }
+        await this.assertRebaseRecovered(worktreeAbs, gitDir, mission, fromCommit);
+        if (inProgress && files.length > 0) {
+          mission.blockers.push(
+            `tower rebase onto ${state.base} conflicted in: ${files.join(', ')} — the rebase was aborted and your worktree is back to the pre-rebase state. Resolve it yourself: run \`git rebase ${state.base}\` in your worktree, fix the listed conflicts, \`git add\` the resolved files, then continue with \`GIT_EDITOR=true git rebase --continue\` (a plain \`git rebase --continue\` opens an editor and hangs a non-interactive shell). Re-run your tests, then clear this blocker (TowerMission clear_blockers) and TowerSend the tower asking for a fresh review — a worker-run rebase is not covered by the clean-rebase waiver, so the moved tip needs a new clean review before the merge can land`,
+          );
+          mission.status = 'blocked';
+          await this.save(state);
+          await this.renderMissionsIndex(state);
+          await this.renderMissionFile(mission);
+          await this.appendLog(TOWER_NAME, 'rebase.mission', {
+            id,
+            result: 'conflict',
+            files: files.join(','),
+          });
+          return { status: 'conflict', fromCommit, files };
+        }
+        throw new TowerProtocolError(
+          `rebase of mission ${id} failed: ${rebaseErrorMessage} — no rebase conflict with unmerged paths was observed, so the mission was not marked blocked and no review waiver was recorded`,
+        );
+      }
+
+      let toCommit: string;
+      const problems: string[] = [];
+      try {
+        toCommit = await branchTip(this.repoRoot, mission.branch);
+        if ((await git(worktreeAbs, ['rev-parse', '--abbrev-ref', 'HEAD'])) !== mission.branch) {
+          problems.push('the worktree no longer has the mission branch checked out');
+        }
+        if ((await branchTip(worktreeAbs, 'HEAD')) !== toCommit) {
+          problems.push('worktree HEAD and the mission branch tip differ');
+        }
+        if (await isWorktreeDirty(worktreeAbs)) problems.push('the worktree is dirty');
+        if (!(await isAncestor(this.repoRoot, baseCommit, toCommit))) {
+          problems.push('the rebased branch does not contain the evaluated base commit');
+        }
+      } catch (error) {
+        throw new TowerProtocolError(
+          `recovery-required: rebase of mission ${id} returned success but its postconditions could not be inspected: ${error instanceof Error ? error.message : String(error)} — no review waiver was recorded`,
+        );
+      }
+      if (problems.length > 0) {
+        throw new TowerProtocolError(
+          `recovery-required: rebase of mission ${id} returned success but its postconditions failed (${problems.join('; ')}) — no review waiver was recorded; inspect the worktree and branch before retrying`,
+        );
+      }
+      mission.lastRebase = { fromCommit, toCommit };
+      await this.save(state);
+      await this.renderMissionsIndex(state);
+      await this.renderMissionFile(mission);
+      await this.appendLog(TOWER_NAME, 'rebase.mission', {
+        id,
+        result: 'clean',
+        from: fromCommit.slice(0, 7),
+        to: toCommit.slice(0, 7),
+      });
+      return { status: 'rebased', fromCommit, toCommit };
+    });
+  }
+
+  private async assertRebaseRecovered(
+    worktreeAbs: string,
+    gitDir: string,
+    mission: TowerMission,
+    fromCommit: string,
+  ): Promise<void> {
+    const problems: string[] = [];
+    if (existsSync(join(gitDir, 'rebase-merge')) || existsSync(join(gitDir, 'rebase-apply'))) {
+      problems.push('a rebase is still in progress');
+    }
+    try {
+      if ((await git(worktreeAbs, ['rev-parse', '--abbrev-ref', 'HEAD'])) !== mission.branch) {
+        problems.push('the mission branch is not checked out');
+      }
+      if ((await branchTip(worktreeAbs, 'HEAD')) !== fromCommit) {
+        problems.push('worktree HEAD was not restored to the pre-rebase commit');
+      }
+      if ((await branchTip(this.repoRoot, mission.branch)) !== fromCommit) {
+        problems.push('the mission branch tip was not restored');
+      }
+      if (await isWorktreeDirty(worktreeAbs)) problems.push('the worktree is not clean');
+    } catch (error) {
+      problems.push(`recovery inspection failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    if (problems.length > 0) {
+      throw new TowerProtocolError(
+        `recovery-required: rebase recovery for mission ${mission.id} failed its postconditions (${problems.join('; ')}) — no recovery is claimed, no waiver was recorded, and the mission was not marked blocked`,
+      );
+    }
+  }
+
+  async diffBase(state: TowerState, mission: TowerMission): Promise<string> {
+    if (
+      mission.spawnBase !== undefined &&
+      (await isAncestor(this.repoRoot, mission.spawnBase, mission.branch))
+    ) {
+      return mission.spawnBase;
+    }
+    return state.base;
+  }
+
+  async addWorktree(worktree: string, branch: string, base: string): Promise<TowerAddWorktreeResult> {
+    const rel = join(WORKTREES_DIR, worktree);
+    let spawnBase: string | undefined;
+    if (await branchExists(this.repoRoot, branch)) {
+      const state = await this.load();
+      const mission = state.missions.find((m) => m.worktree === worktree && m.branch === branch);
+      const registered = await isRegisteredWorktree(this.repoRoot, this.abs(rel));
+      const checkedOut = registered
+        ? await tryGit(this.abs(rel), ['rev-parse', '--abbrev-ref', 'HEAD'])
+        : null;
+      if (mission?.owner === undefined && checkedOut?.trim() !== branch) {
+        throw new TowerProtocolError(unownedBranchMessage(branch));
+      }
+      await worktreeAdd(this.repoRoot, this.abs(rel), branch);
+      await this.appendLog(TOWER_NAME, 'worktree.add', { worktree, branch, base, spawn_base: spawnBase });
+      return { rel, spawnBase };
+    }
+    const dirty = await listBaseDirtyEntries(this.repoRoot);
+    if (dirty.some((entry) => entry.unmerged)) {
+      throw new TowerProtocolError(
+        'the base checkout has unmerged paths (an in-progress merge, rebase, or cherry-pick) — finish or abort it before spawning workers',
+      );
+    }
+    if (dirty.length > 0) {
+      let checkout: string;
+      try {
+        checkout = await currentBranch(this.repoRoot);
+      } catch {
+        throw new TowerProtocolError(
+          `the main checkout is in a detached HEAD state with uncommitted changes, and the recorded base is "${base}" — a WIP snapshot would carry detached-HEAD content into the mission branch; check out "${base}" (\`git checkout ${base}\`) or commit/stash the changes before spawning workers`,
+        );
+      }
+      if (checkout !== base) {
+        throw new TowerProtocolError(
+          `the main checkout is on "${checkout}" with uncommitted changes, not the recorded base "${base}" — a WIP snapshot would carry "${checkout}" content into the mission branch; switch back to "${base}" (\`git checkout ${base}\`) or commit/stash the changes before spawning workers`,
+        );
+      }
+    }
+    spawnBase =
+      (await snapshotBaseWip(
+        this.repoRoot,
+        base,
+        dirty.map((entry) => entry.path),
+        `tower: snapshot of uncommitted base checkout changes (worktree ${worktree})`,
+      )) ?? undefined;
+    try {
+      await worktreeAddNewBranch(this.repoRoot, this.abs(rel), branch, spawnBase ?? base);
+    } catch (error) {
+      if (await branchExists(this.repoRoot, branch)) {
+        throw new TowerProtocolError(unownedBranchMessage(branch));
+      }
+      throw error;
+    }
+    await this.appendLog(TOWER_NAME, 'worktree.add', { worktree, branch, base, spawn_base: spawnBase });
+    return { rel, spawnBase };
+  }
+
+  async teardown(options: TowerTeardownOptions = {}): Promise<readonly string[]> {
+    const state = await this.load();
+    const dryRun = options.dryRun === true;
+    const force = options.force === true;
+    const liveAgentIds = options.liveAgentIds ?? new Set<string>();
+    const excluded = new Map<string, string>();
+    for (const raw of options.exclude ?? []) {
+      const trimmed = raw.trim().replace(/\/+$/, '');
+      if (trimmed.length === 0) continue;
+      const short = trimmed.startsWith(`${WORKTREES_DIR}/`)
+        ? trimmed.slice(WORKTREES_DIR.length + 1)
+        : trimmed;
+      excluded.set(short, raw);
+    }
+    const report: string[] = [];
+    const kept = async (
+      mission: TowerMission,
+      rel: string,
+      reason: string,
+      log: Record<string, string | number | undefined>,
+    ): Promise<void> => {
+      report.push(`${dryRun ? 'would keep' : 'kept'} ${rel} (${reason})`);
+      if (!dryRun) {
+        await this.appendLog(TOWER_NAME, 'worktree.keep', {
+          worktree: mission.worktree,
+          ...log,
+        });
+      }
+    };
+    for (const mission of state.missions) {
+      const rel = join(WORKTREES_DIR, mission.worktree);
+      const absPath = this.abs(rel);
+      const wasExcluded = excluded.delete(mission.worktree);
+      if (!(await isRegisteredWorktree(this.repoRoot, absPath))) {
+        report.push(`already removed ${rel}`);
+        if (!dryRun) {
+          await this.appendLog(TOWER_NAME, 'worktree.remove.skipped', {
+            worktree: mission.worktree,
+            reason: 'already-removed',
+          });
+        }
+        continue;
+      }
+      if (wasExcluded) {
+        await kept(mission, rel, 'excluded', { reason: 'excluded' });
+        continue;
+      }
+      const liveAgent = state.roster.agents.find(
+        (agent) => agent.worktree === mission.worktree && liveAgentIds.has(agent.agentId),
+      );
+      if (liveAgent !== undefined) {
+        await kept(mission, rel, `live agent: ${liveAgent.name}`, {
+          reason: 'live-agent',
+          agent: liveAgent.name,
+        });
+        continue;
+      }
+      if (!force) {
+        if (await isWorktreeDirty(absPath)) {
+          await kept(mission, rel, 'uncommitted changes — rerun with force to remove', {
+            reason: 'uncommitted-changes',
+          });
+          continue;
+        }
+      }
+      if (dryRun) {
+        report.push(`would remove ${rel}`);
+        continue;
+      }
+      try {
+        await worktreeRemove(this.repoRoot, absPath);
+        report.push(`removed ${rel}`);
+        await this.appendLog(TOWER_NAME, 'worktree.remove', { worktree: mission.worktree });
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error);
+        report.push(`failed to remove ${rel}: ${reason}`);
+        await this.appendLog(TOWER_NAME, 'worktree.remove.failed', {
+          worktree: mission.worktree,
+          reason,
+        });
+      }
+    }
+    for (const original of excluded.values()) {
+      report.push(`excluded worktree "${original}" matched no mission worktree`);
+    }
+    if (!dryRun) {
+      await this.appendLog(TOWER_NAME, 'teardown', { force: force ? 'yes' : undefined });
+    }
+    return report;
+  }
+
+  private async renderMissionsIndex(state: TowerState): Promise<void> {
+    const rows = state.missions.map(
+      (m) =>
+        `| ${m.id} | ${m.title} | ${m.branch} | ${m.worktree} | ${STATUS_EMOJI[m.status]} | ${m.owner ?? '—'} |`,
+    );
+    const deps = state.missions
+      .flatMap((m) => m.deps.map((dep) => `${dep} → ${m.id}`))
+      .join('\n');
+    const scopes = state.missions
+      .map((m) => `- ${m.id}${m.kind === 'survey' ? ' (survey — informational, reserves nothing)' : ''}: ${m.scope.join(', ')}`)
+      .join('\n');
+    const content = [
+      '# MISSIONS',
+      '',
+      '<!-- Generated by tower tools from state.json — do not edit by hand. -->',
+      '',
+      '| ID | Mission | Branch | Worktree | Status | Owner |',
+      '| -- | ------- | ------ | -------- | ------ | ----- |',
+      ...rows,
+      '',
+      'Status: 🟡 planned · 🔵 active · 🟢 completed · 🔴 blocked · ⏸️ paused · ✅ merged · 🚫 abandoned',
+      `Mode: ${state.mode} — Base: ${state.base}`,
+      '',
+      '## Dependency Flow',
+      deps.length > 0 ? deps : '(none)',
+      '',
+      '## Scope Map',
+      scopes.length > 0 ? scopes : '(none)',
+      '',
+    ].join('\n');
+    await writeFile(this.abs(MISSIONS_INDEX), content, 'utf8');
+  }
+
+  private async renderMissionFile(mission: TowerMission): Promise<void> {
+    const rel = join(MISSIONS_DIR, missionFileName(mission.id, mission.slug));
+    const content = [
+      `# Mission ${mission.id}: ${mission.title}${mission.kind === 'survey' ? ' 🔍 (read-only survey)' : ''}`,
+      '',
+      '<!-- Generated by tower tools from state.json — update via the TowerMission tool. -->',
+      '',
+      '| Branch | Worktree | Status | Scope | Owner |',
+      '| ------ | -------- | ------ | ----- | ----- |',
+      `| ${mission.branch} | ${mission.worktree} | ${STATUS_EMOJI[mission.status]} | ${mission.scope.join(', ')} | ${mission.owner ?? '—'} |`,
+      '',
+      ...(mission.context !== undefined
+        ? ['## Context — the user\'s own words, verbatim', '', mission.context, '']
+        : []),
+      '## Tasks',
+      ...(mission.tasks.length > 0
+        ? mission.tasks.map(
+            (t) =>
+              `- [${t.done ? 'x' : t.dropped === true ? '-' : ' '}] ${t.text}${t.dropped === true ? ' (dropped)' : ''}`,
+          )
+        : ['- [ ] (no tasks recorded)']),
+      '',
+      '## Dependencies',
+      mission.deps.length > 0 ? mission.deps.join(', ') : '(none)',
+      '',
+      '## Blockers',
+      ...(mission.blockers.length > 0 ? mission.blockers.map((b) => `- ${b}`) : ['- (none)']),
+      '',
+      '## Notes',
+      ...(mission.notes.length > 0 ? mission.notes.map((n) => `- ${n}`) : ['- (none)']),
+      '',
+    ].join('\n');
+    await writeFile(this.abs(rel), content, 'utf8');
+  }
+
+  abs(rel: string): string {
+    return join(this.repoRoot, rel);
+  }
+
+  private async writeUnique(rel: string, content: string): Promise<string> {
+    const dot = rel.lastIndexOf('.');
+    const stem = dot === -1 ? rel : rel.slice(0, dot);
+    const ext = dot === -1 ? '' : rel.slice(dot);
+    for (let attempt = 0; attempt < 100; attempt++) {
+      const candidate = attempt === 0 ? rel : `${stem}-${attempt + 1}${ext}`;
+      const temporary = `${candidate}.tmp-${String(process.pid)}-${randomUUID()}`;
+      try {
+        const handle = await open(this.abs(temporary), 'wx');
+        try {
+          await handle.writeFile(content, 'utf8');
+        } finally {
+          await handle.close();
+        }
+        await link(this.abs(temporary), this.abs(candidate));
+        await rm(this.abs(temporary), { force: true });
+        return candidate;
+      } catch (error) {
+        await rm(this.abs(temporary), { force: true });
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code === 'EEXIST') continue;
+        if (code === 'EPERM' || code === 'ENOTSUP' || code === 'EOPNOTSUPP' || code === 'ENOSYS') {
+          try {
+            await writeFile(this.abs(candidate), content, { encoding: 'utf8', flag: 'wx' });
+            return candidate;
+          } catch (fallbackError) {
+            if ((fallbackError as NodeJS.ErrnoException).code === 'EEXIST') continue;
+            throw fallbackError;
+          }
+        }
+        throw error;
+      }
+    }
+    throw new TowerProtocolError(`could not create a unique file for ${rel}`);
+  }
+}
+
+function reviewDocumentBody(input: TowerReviewInput): string {
+  const checks = (input.checks ?? []).map((check) => `- [x] ${check}`).join('\n');
+  return [
+    '## Findings',
+    '',
+    input.findings.trim(),
+    '',
+    '## Checks',
+    checks.length > 0 ? checks : '- [x] (reviewer reported no formal checks)',
+    '',
+    '## Decision',
+    input.decision.trim(),
+  ].join('\n');
+}
+
+function singleLine(value: string): string {
+  return value.replaceAll(/\s+/g, ' ').trim();
+}
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== 'ESRCH';
+  }
+}
