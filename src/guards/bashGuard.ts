@@ -774,6 +774,8 @@ const GIT_REDIRECT_ENV = /^GIT_(?:DIR|WORK_TREE|INDEX_FILE|COMMON_DIR|CONFIG\w*)
 
 const ENV_ASSIGNMENT = /^([A-Za-z_][A-Za-z0-9_]*)=/;
 
+const WRAPPER_ASSIGNMENT = /^([^=]+)=/;
+
 function dropLeadingOptions(args: readonly ShellWord[], options: WrapperOptions): WrappedCommand {
   let chdir: ShellWord | undefined;
   let shell = false;
@@ -818,7 +820,8 @@ function dropWrapperOperands(args: readonly ShellWord[], options: WrapperOptions
   let i = wrapped.rest[0]?.value === '-' ? 1 : 0;
   for (; i < wrapped.rest.length; i += 1) {
     const word = wrapped.rest[i]!;
-    const variable = ENV_ASSIGNMENT.exec(word.value ?? word.text)?.[1];
+    const variable =
+      word.value === undefined ? ENV_ASSIGNMENT.exec(word.text)?.[1] : WRAPPER_ASSIGNMENT.exec(word.value)?.[1];
     if (variable === undefined) break;
     noteAssignment(variable, state);
   }

@@ -884,8 +884,19 @@ describe('wrapper option clusters', () => {
     ["echo 'rm -rf .tower/comms' | sudo -s", UNANALYZABLE_VETO],
     ['sudo -i < cleanup.sh && rm -f x', UNANALYZABLE_VETO],
     [`sudo GIT_DIR=${repo}/.git git -C ${slot} reset --hard`, UNANALYZABLE_VETO],
+    ['env A-B=1 rm -rf .tower/comms', rmVeto('.tower/comms')],
+    ['sudo A-B=1 x.y=2 rm -rf .tower/comms', rmVeto('.tower/comms')],
+    ['doas -u root a:b=1 rm -rf .tower/comms', rmVeto('.tower/comms')],
+    ['env -- -x=1 rm -rf .tower/comms', rmVeto('.tower/comms')],
+    ['env $X=1 true; rm -f x', UNANALYZABLE_VETO],
   ])('parses %j', (command, veto) => {
     expect(guard(command)).toBe(veto);
+  });
+
+  it('skips every operand with a non-leading = as an assignment', () => {
+    expect(guard('env A-B=1 rm -rf node_modules')).toBeUndefined();
+    expect(guard('sudo A-B=1 NODE_ENV=test rm -rf build')).toBeUndefined();
+    expect(guard(`env x.y=1 GIT_WORK_TREE=${repo} git -C ${slot} clean -fdx`)).toBe(UNANALYZABLE_VETO);
   });
 
   it('applies chdir options given inside a cluster', () => {
