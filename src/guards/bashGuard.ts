@@ -248,6 +248,11 @@ function analyzeNestedShell(args: readonly ShellWord[], cwds: readonly Cwd[], ct
     }
     if (arg.startsWith('--')) {
       if (SHELL_INFO_OPTIONS.has(arg)) return passthrough(cwds);
+      const equals = arg.indexOf('=');
+      if (SHELL_STARTUP_FILE_OPTIONS.has(equals < 0 ? arg : arg.slice(0, equals))) {
+        const file = equals < 0 ? scriptPath(args[index + 1]) : arg.slice(equals + 1);
+        if (readsStdin(file, cwds, homeOf(ctx))) return vetoed(UNANALYZABLE_VETO);
+      }
       if (SHELL_VALUE_OPTIONS.has(arg)) index += 1;
       continue;
     }
@@ -258,7 +263,7 @@ function analyzeNestedShell(args: readonly ShellWord[], cwds: readonly Cwd[], ct
   }
   const operand = args[index];
   if (!command) {
-    if (operand === undefined || stdin || readsStdin(operand.literal, cwds, homeOf(ctx))) {
+    if (operand === undefined || stdin || readsStdin(scriptPath(operand), cwds, homeOf(ctx))) {
       return vetoed(UNANALYZABLE_VETO);
     }
     const lateCommandFlag = args.slice(index + 1).some((word) => /^-[a-zA-Z]*c[a-zA-Z]*$/.test(word.value ?? ''));
@@ -271,7 +276,11 @@ function analyzeNestedShell(args: readonly ShellWord[], cwds: readonly Cwd[], ct
 
 function analyzeSourcedScript(args: readonly ShellWord[], cwds: readonly Cwd[], home: Cwd): WalkResult {
   const script = args[0]?.value === '--' ? args[1] : args[0];
-  return script !== undefined && readsStdin(script.literal, cwds, home) ? vetoed(UNANALYZABLE_VETO) : passthrough(cwds);
+  return script !== undefined && readsStdin(scriptPath(script), cwds, home) ? vetoed(UNANALYZABLE_VETO) : passthrough(cwds);
+}
+
+function scriptPath(word: ShellWord | undefined): string | undefined {
+  return word?.value ?? word?.literal;
 }
 
 function readsStdin(path: string | undefined, cwds: readonly Cwd[], home: Cwd): boolean {
@@ -759,6 +768,8 @@ const STDIN_SCRIPT_PATH = /^\/(?:dev\/(?:stdin|fd\/\d+)|proc\/.*(?:\/fd\/\d+|\/d
 const NESTED_SHELLS: ReadonlySet<string> = new Set(['sh', 'bash', 'dash', 'zsh', 'ksh', 'ash']);
 
 const SHELL_VALUE_OPTIONS: ReadonlySet<string> = new Set(['--rcfile', '--init-file', '--emulate']);
+
+const SHELL_STARTUP_FILE_OPTIONS: ReadonlySet<string> = new Set(['--rcfile', '--init-file']);
 
 const SHELL_INFO_OPTIONS: ReadonlySet<string> = new Set(['--version', '--help']);
 

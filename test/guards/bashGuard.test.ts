@@ -450,6 +450,7 @@ describe('wrappers and nested shells', () => {
     "bash /proc/self/root/dev/stdin <<< 'rm -rf .tower/comms'",
     "sh /proc/1/root/dev/fd/0 <<< 'git reset --hard'",
     "source /proc/self/root/proc/self/fd/0 <<< 'rm -rf .tower/comms'",
+    "source ~/../../dev/stdin <<< 'rm -rf .tower/comms'",
   ])('vetoes the stdin script operand in %j', (command) => {
     expect(guard(command)).toBe(UNANALYZABLE_VETO);
   });
@@ -468,6 +469,8 @@ describe('wrappers and nested shells', () => {
     expect(guard('. ./env.sh; rm -f x')).toBeUndefined();
     expect(guard('bash scripts/clean.sh; rm -rf node_modules')).toBeUndefined();
     expect(guard('source "$VIRTUAL_ENV/bin/activate" && npm test')).toBeUndefined();
+    expect(guard('source ~/.nvm/nvm.sh && rm -rf node_modules')).toBeUndefined();
+    expect(guard(". '/tmp/a b/env.sh'; rm -f x")).toBeUndefined();
   });
 });
 
@@ -551,6 +554,23 @@ describe('shell startup files', () => {
     expect(guard('bash -c true && rm -rf build')).toBeUndefined();
     expect(guard('MY_ENV=1 bash scripts/build.sh; rm -f x')).toBeUndefined();
     expect(guard('BASH_ENV=/dev/stdin; rm -rf build')).toBeUndefined();
+  });
+
+  it.each([
+    "bash --rcfile /dev/stdin -ic true <<< 'rm -rf .tower/comms'",
+    "bash --rcfile=/dev/stdin -ic true <<< 'rm -rf .tower/comms'",
+    "bash --init-file /proc/self/fd/0 -ic true <<< 'git reset --hard'",
+    "bash --init-file=/dev/fd/0 -ic true <<< 'rm -rf .tower/comms'",
+    "bash --rcfile \"$RC\" -ic true <<< 'rm -rf .tower/comms'",
+    "sudo bash --rcfile /dev/stdin -ic true <<< 'rm -rf .tower/comms'",
+  ])('vetoes a shell whose rcfile reads stdin in %j', (command) => {
+    expect(guard(command)).toBe(UNANALYZABLE_VETO);
+  });
+
+  it('keeps analyzing shells whose rcfile is a regular file', () => {
+    expect(guard("bash --rcfile ~/.bashrc -ic 'rm -rf build'")).toBeUndefined();
+    expect(guard("bash --init-file=./ci.rc -ic 'rm -rf build'")).toBeUndefined();
+    expect(guard("bash --rcfile ./ci.rc -ic 'rm -rf .tower/comms'")).toBe(rmVeto('.tower/comms'));
   });
 });
 
@@ -1004,6 +1024,23 @@ describe('option spellings', () => {
 
   it.each(['git clean -fdx --dry', 'git clean --inter -fdx', 'git reset --help'])('allows "%s"', (command) => {
     expect(guard(command)).toBeUndefined();
+  });
+});
+
+describe('everyday worktree commands', () => {
+  it.each([
+    'rm -rf node_modules',
+    'rm -f dist/*.js',
+    'git reset --hard',
+    'git clean -fdx',
+    'source .venv/bin/activate && rm -rf build',
+    'npm test 2>&1 | grep -v rm',
+    'ls && (cd sub && rm -rf build)',
+    'command -v rm >/dev/null && rm -rf coverage',
+    'env NODE_ENV=test npm test; rm -rf .cache',
+  ])('allows %j inside a worktree', (command) => {
+    expect(guard(command, slot)).toBeUndefined();
+    expect(guard(`cd ${slot} && ${command}`)).toBeUndefined();
   });
 });
 
