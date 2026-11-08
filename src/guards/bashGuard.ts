@@ -255,7 +255,9 @@ function analyzeNestedShell(args: readonly ShellWord[], cwds: readonly Cwd[], ct
   }
   const operand = args[index];
   if (!command) {
-    if (operand === undefined || stdin || readsStdin(operand, cwds, homeOf(ctx))) return vetoed(UNANALYZABLE_VETO);
+    if (operand === undefined || stdin || readsStdin(operand.literal, cwds, homeOf(ctx))) {
+      return vetoed(UNANALYZABLE_VETO);
+    }
     const lateCommandFlag = args.slice(index + 1).some((word) => /^-[a-zA-Z]*c[a-zA-Z]*$/.test(word.value ?? ''));
     return lateCommandFlag ? vetoed(UNANALYZABLE_VETO) : passthrough(cwds);
   }
@@ -266,13 +268,15 @@ function analyzeNestedShell(args: readonly ShellWord[], cwds: readonly Cwd[], ct
 
 function analyzeSourcedScript(args: readonly ShellWord[], cwds: readonly Cwd[], home: Cwd): WalkResult {
   const script = args[0]?.value === '--' ? args[1] : args[0];
-  return script !== undefined && readsStdin(script, cwds, home) ? vetoed(UNANALYZABLE_VETO) : passthrough(cwds);
+  return script !== undefined && readsStdin(script.literal, cwds, home) ? vetoed(UNANALYZABLE_VETO) : passthrough(cwds);
 }
 
-function readsStdin(script: ShellWord, cwds: readonly Cwd[], home: Cwd): boolean {
-  const path = script.literal;
-  if (path === undefined) return false;
-  return cwds.some((cwd) => STDIN_SCRIPT_PATH.test(resolveOperand(cwd, path, home) ?? ''));
+function readsStdin(path: string | undefined, cwds: readonly Cwd[], home: Cwd): boolean {
+  if (path === undefined) return true;
+  return cwds.some((cwd) => {
+    const abs = resolveOperand(cwd, path, home);
+    return abs === undefined || STDIN_SCRIPT_PATH.test(abs);
+  });
 }
 
 function analyzeEval(args: readonly ShellWord[], cwds: readonly Cwd[], ctx: GuardContext): WalkResult {
@@ -747,7 +751,7 @@ const WRAPPER_OPTIONS: ReadonlyMap<string, WrapperOptions> = new Map([
 
 const CURRENT_SHELL_WRAPPERS: ReadonlySet<string> = new Set(['command', 'builtin', 'time', 'noglob', 'nocorrect', '-']);
 
-const STDIN_SCRIPT_PATH = /^\/(?:dev\/(?:stdin|fd\/\d+)|proc\/self\/fd\/\d+)$/;
+const STDIN_SCRIPT_PATH = /^\/(?:dev\/(?:stdin|fd\/\d+)|proc\/.*(?:\/fd\/\d+|\/dev\/stdin))$/;
 
 const NESTED_SHELLS: ReadonlySet<string> = new Set(['sh', 'bash', 'dash', 'zsh', 'ksh', 'ash']);
 

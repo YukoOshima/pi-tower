@@ -446,7 +446,20 @@ describe('wrappers and nested shells', () => {
     ". /dev/fd/0 <<< 'rm -rf .tower/comms'",
     "builtin source -- /dev/stdin <<< 'git reset --hard'",
     "cd /dev && source ./stdin <<< 'rm -rf .tower/comms'",
+    "bash /proc/thread-self/fd/0 <<< 'rm -rf .tower/comms'",
+    "bash /proc/self/root/dev/stdin <<< 'rm -rf .tower/comms'",
+    "sh /proc/1/root/dev/fd/0 <<< 'git reset --hard'",
+    "source /proc/self/root/proc/self/fd/0 <<< 'rm -rf .tower/comms'",
   ])('vetoes the stdin script operand in %j', (command) => {
+    expect(guard(command)).toBe(UNANALYZABLE_VETO);
+  });
+
+  it.each([
+    "p=/dev/stdin; source $p <<< 'rm -rf .tower/comms'",
+    "f=/dev/stdin; . \"$f\" <<< 'git reset --hard'",
+    "bash \"$SCRIPT\" <<< 'rm -rf .tower/comms'",
+    "cd - && . ./stdin <<< 'rm -rf .tower/comms'",
+  ])('vetoes a script operand it cannot resolve in %j', (command) => {
     expect(guard(command)).toBe(UNANALYZABLE_VETO);
   });
 
@@ -454,6 +467,7 @@ describe('wrappers and nested shells', () => {
     expect(guard('source .venv/bin/activate && rm -rf build')).toBeUndefined();
     expect(guard('. ./env.sh; rm -f x')).toBeUndefined();
     expect(guard('bash scripts/clean.sh; rm -rf node_modules')).toBeUndefined();
+    expect(guard('source "$VIRTUAL_ENV/bin/activate" && npm test')).toBeUndefined();
   });
 });
 
