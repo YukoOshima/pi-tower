@@ -171,7 +171,7 @@ These actions clean up different things:
 | --- | --- | --- |
 | `/tower off` | Leaves tower mode in this session and switches back to the model you used before `/tower on`. Background agents keep running and no files are removed. | `.tower/`, mission branches and worktrees |
 | `/tower teardown` | Asks the tower to remove the mission worktrees that are safe to remove and report the result. Worktrees of running agents are always kept. Worktrees with uncommitted changes are kept unless the removal is forced. | Mission branches and the `.tower/comms/` audit records. Tower mode stays on. |
-| Quit pi, or replace the session with `/new`, `/resume`, `/fork` or `/reload` | Stops every worker and reviewer of the tower. They have to be spawned again later. | The `.tower/` state on disk, branches and worktrees |
+| Quit pi, or replace the session with `/new`, `/resume`, `/fork`, `/clone` or `/reload` | Stops every worker and reviewer of the tower. They have to be spawned again later. | The `.tower/` state on disk, branches and worktrees |
 
 Tower mode is saved in the pi session. When you continue that session (`pi -c`, `/resume`, `/reload`), tower mode comes back on, unless another running pi process owns the workspace by then. In that case it turns off with a warning.
 
@@ -257,7 +257,7 @@ For example, this run takes the orchestrator and worker from `tower.json` but ov
 PI_TOWER_WORKER_MODEL=anthropic/claude-haiku-5-5 pi --tower-reviewer-model openai/gpt-5.5:xhigh
 ```
 
-pi-tower reads the configuration when the session starts, on every `/tower on`, and each time you run `/tower models`. After editing `tower.json` by hand, run `/tower models` to reload it. Spawns then use the new settings without a restart.
+pi-tower reads the configuration when the session starts, each time tower mode turns on (`/tower on` while it is off; while tower mode is already on, `/tower on` changes nothing), and each time you run `/tower models`. After editing `tower.json` by hand, run `/tower models` to reload it. Spawns then use the new settings without a restart.
 
 The sources are checked together. One invalid value in any of them, such as a typo in a flag, an environment variable or either file, makes the whole configuration fail to load. Until you fix it:
 

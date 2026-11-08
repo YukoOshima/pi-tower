@@ -89,7 +89,7 @@ pi
 
 1. 输入 `/tower on`。底部状态栏会显示 `tower: on`；如果你配置了 orchestrator 模型，主会话会切换到该模型。
 2. 像平常对话一样输入开发目标，例如："把结算文档更新拆成相互独立的 mission，分别测试，只合并通过独立 review 的 branch。"
-3. 用 `/tower status` 和 `/tower agents` 跟进进展。worker 完成任务或收到消息时，Tower 会自动继续处理，不用你反复查询。
+3. 用 `/tower status` 和 `/tower agents` 跟进进展。worker 完成任务或 Tower 收到消息时，Tower 会自动继续处理，不用你反复查询。
 4. 自己检查合并结果：`git status`、`git log --graph`，以及你的测试。
 5. 输入 `/tower teardown` 清理已完成的 worktree，再输入 `/tower off`。
 
@@ -171,7 +171,7 @@ base 更新后，只要 worker 空闲且 worktree 干净，Tower 就可以在对
 | --- | --- | --- |
 | `/tower off` | 退出当前会话的 Tower 模式，并切换回 `/tower on` 之前使用的模型。后台 Agent 继续运行，不会删除任何文件。 | `.tower/`、mission branch 和 worktree |
 | `/tower teardown` | 让 Tower 移除可以安全移除的 mission worktree 并报告结果。正在运行的 Agent 的 worktree 一律保留；有未提交改动的 worktree 除非强制，否则也会保留。 | mission branch 和 `.tower/comms/` 审计记录；Tower 模式保持开启 |
-| 退出 pi，或用 `/new`、`/resume`、`/fork`、`/reload` 替换当前会话 | 停止 Tower 的所有 worker 和 reviewer，之后需要重新派发 | 磁盘上的 `.tower/` 状态、branch 和 worktree |
+| 退出 pi，或用 `/new`、`/resume`、`/fork`、`/clone`、`/reload` 替换当前会话 | 停止 Tower 的所有 worker 和 reviewer，之后需要重新派发 | 磁盘上的 `.tower/` 状态、branch 和 worktree |
 
 Tower 模式会保存在 pi 会话中。继续该会话时（`pi -c`、`/resume`、`/reload`），Tower 模式会自动恢复；但如果此时另一个正在运行的 pi 进程已经拥有该工作区，Tower 模式会关闭并给出警告。
 
@@ -257,7 +257,7 @@ pi-tower 从 `tower.json` 读取配置。下面是 [`examples/tower.json`](examp
 PI_TOWER_WORKER_MODEL=anthropic/claude-haiku-5-5 pi --tower-reviewer-model openai/gpt-5.5:xhigh
 ```
 
-pi-tower 会在会话启动时、每次 `/tower on` 时以及每次运行 `/tower models` 时读取配置。手动编辑 `tower.json` 之后，运行一次 `/tower models` 即可重新加载，之后的派发无需重启就会使用新配置。
+pi-tower 会在会话启动时、每次开启 Tower 模式（`/tower on`）时以及每次运行 `/tower models` 时读取配置；Tower 模式已经开启时再输入 `/tower on` 不会有任何变化。手动编辑 `tower.json` 之后，运行一次 `/tower models` 即可重新加载，之后的派发无需重启就会使用新配置。
 
 所有来源会一起校验。只要其中任何一处有无效值（例如命令行参数、环境变量或任一配置文件中的拼写错误），整个配置都会加载失败。在修正之前：
 
