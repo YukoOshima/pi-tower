@@ -1,6 +1,6 @@
 import type { ScenarioReport } from './report.ts';
 import { sleep, type PiRpc, type PiToolRun } from './rpc.ts';
-import type { E2eSettings, RoleModel, ScenarioId } from './settings.ts';
+import type { E2eSettings, ScenarioId } from './settings.ts';
 import { agentTranscripts, summarizeTranscript, towerState } from './evidence.ts';
 import { createToyRepo, launchPi, type RunRoot } from './workspace.ts';
 
@@ -69,10 +69,6 @@ export function runsOf(runs: readonly PiToolRun[], toolName: string): PiToolRun[
 
 export function firstLine(text: string, pattern: RegExp): string | undefined {
   return text.split('\n').find((line) => pattern.test(line));
-}
-
-export function modelLabel(role: RoleModel): string {
-  return role.thinking === undefined ? role.model : `${role.model}:${role.thinking}`;
 }
 
 export async function recordUsage(ctx: ScenarioContext, session: TowerSession): Promise<void> {

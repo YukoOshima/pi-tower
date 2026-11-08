@@ -54,10 +54,6 @@ export function reviewFiles(repo: string): { readonly name: string; readonly tex
   return listFiles(dir).map((name) => ({ name, text: readFileSync(join(dir, name), 'utf8') }));
 }
 
-export function inboxFiles(repo: string): string[] {
-  return listFiles(join(repo, '.tower', 'comms', 'inbox'));
-}
-
 export function frontmatter(text: string): Record<string, string> {
   const match = /^---\n([\s\S]*?)\n---/.exec(text);
   const fields: Record<string, string> = {};
