@@ -197,6 +197,10 @@ export class TowerController implements TowerToolHost {
     return this.ctx;
   }
 
+  get boundRoot(): string | undefined {
+    return this.boundRepoRoot;
+  }
+
   observe(ctx: ExtensionContext): void {
     this.ctx = ctx;
     this.boundSessionId = ctx.sessionManager.getSessionId();
@@ -415,6 +419,7 @@ export class TowerController implements TowerToolHost {
     await this.adoptTowerRoster();
     this.activateTowerTools();
     this.active = true;
+    await this.reloadModels();
     const switched = await this.applyOrchestratorModel();
     this.persistMode({
       active: true,
@@ -444,6 +449,9 @@ export class TowerController implements TowerToolHost {
     if (this.models !== undefined) {
       await this.models.load(this.modelsContext(ctx));
       this.refreshSpawnTool();
+      if (this.models.loadError !== undefined) {
+        this.notify(modelConfigLoadWarning(this.models.loadError, ctx.model), 'warning');
+      }
     }
     await this.restoreTowerMode(ctx);
   }
@@ -458,6 +466,11 @@ export class TowerController implements TowerToolHost {
     | undefined
   > {
     const ctx = this.ctx;
+    const loadError = this.models?.loadError;
+    if (ctx !== undefined && loadError !== undefined) {
+      this.notify(modelConfigLoadWarning(loadError, ctx.model), 'warning');
+      return undefined;
+    }
     const binding = this.models?.orchestratorBinding(this.primaryModel());
     if (ctx === undefined || binding === undefined) return undefined;
     const current = ctx.model;
@@ -1019,6 +1032,13 @@ function errorText(error: unknown): string {
 
 function describeSessionModel(model: { readonly provider: string; readonly id: string } | undefined): string {
   return model === undefined ? 'the current model' : `${model.provider}/${model.id}`;
+}
+
+export function modelConfigLoadWarning(
+  error: string,
+  current: { readonly provider: string; readonly id: string } | undefined,
+): string {
+  return `Tower model configuration could not be loaded: ${error} — staying on ${describeSessionModel(current)}; fix it and check /tower models`;
 }
 
 export type { TowerSessionModel };

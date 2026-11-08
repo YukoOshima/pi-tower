@@ -11,6 +11,7 @@ import {
 } from './tower/command.ts';
 import { TOWER_COMMAND } from './tower/constants.ts';
 import { TowerController } from './tower/controller.ts';
+import { createTowerFileLog } from './tower/log.ts';
 import { TowerModels } from './tower/models.ts';
 import { handleTowerModelsCommand } from './tower/modelsCommand.ts';
 
@@ -22,9 +23,11 @@ export default function towerExtension(pi: ExtensionAPI): void {
     env: process.env,
     getFlag: (name) => pi.getFlag(name),
   });
-  const controller = new TowerController({
+  const log = createTowerFileLog({ agentDir, repoRoot: () => controller.boundRoot });
+  const controller: TowerController = new TowerController({
     pi,
     models,
+    log,
     createRuntime: (owner) =>
       createTowerAgentRuntime(owner, { agentDir, maxRunningAgents: () => models.maxRunningAgents }),
   });

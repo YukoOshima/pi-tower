@@ -563,12 +563,15 @@ export class FakeContext {
   hasUI = true;
   mode: 'tui' | 'rpc' | 'print' | 'json' = 'tui';
   trusted = true;
+  confirmAnswer = true;
+  readonly confirms: { readonly title: string; readonly message: string }[] = [];
   model: FakeModel | undefined;
   readonly modelRegistry = new FakeModelRegistry();
   readonly sessionManager: FakeSessionManager;
   readonly ui: FakeUi & {
     notify(message: string, level?: string): void;
     setStatus(key: string, text: string | undefined): void;
+    confirm(title: string, message: string): Promise<boolean>;
   };
 
   constructor(cwd: string, sessionManager: FakeSessionManager) {
@@ -579,6 +582,10 @@ export class FakeContext {
     this.ui = {
       notices,
       statuses,
+      confirm: async (title: string, message: string): Promise<boolean> => {
+        this.confirms.push({ title, message });
+        return this.confirmAnswer;
+      },
       notify(message: string, level?: string): void {
         notices.push(level === undefined ? { message } : { message, level });
       },

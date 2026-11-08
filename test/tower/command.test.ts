@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { TOWER_TEARDOWN_PROMPT } from '../../src/prompts/index.ts';
 import { STATE_FILE, TowerStore, type TowerState } from '../../src/protocol/index.ts';
 import {
+  TOWER_COMMAND_USAGE,
   commandUi,
   handleTowerCommand,
   towerCommandCompletions,
@@ -436,6 +437,92 @@ describe('/tower models', () => {
   });
 });
 
+describe('/tower help and typo safety', () => {
+  it('shows the usage for /tower help', async () => {
+    const h = await harness();
+
+    const shown = await h.run('help');
+
+    expect(shown.notices).toEqual([{ title: 'Tower command', body: TOWER_COMMAND_USAGE }]);
+    expect(h.controller.isActive).toBe(false);
+  });
+
+  it.each([
+    ['model', '/tower models'],
+    ['config', '/tower models'],
+    ['agent', '/tower agents'],
+    ['task', '/tower agents (or /tower stop <agent>)'],
+    ['tasks', '/tower agents (or /tower stop <agent>)'],
+    ['list', '/tower agents'],
+    ['start', '/tower on'],
+  ])('refuses the near-miss "/tower %s" with a hint instead of creating a branch', async (word, suggestion) => {
+    const h = await harness();
+
+    const refused = await h.run(word);
+
+    expect(refused.errors).toEqual([
+      `Unknown /tower subcommand "${word}" — did you mean ${suggestion}? Run /tower help for usage; /tower <base-branch> starts the tower on a branch.`,
+    ]);
+    expect(await git(h.repo, 'branch', '--list', word)).toBe('');
+    expect(h.controller.isActive).toBe(false);
+    expect(h.ctx.confirms).toEqual([]);
+  });
+
+  it('refuses argument-less subcommands with trailing words, multi-word bases and a bare stop', async () => {
+    const h = await harness();
+
+    expect((await h.run('on now')).errors).toEqual(['/tower on takes no arguments — did you mean /tower on? Run /tower help for usage.']);
+    expect((await h.run('off please')).errors).toEqual([
+      '/tower off takes no arguments — did you mean /tower off? Run /tower help for usage.',
+    ]);
+    expect((await h.run('status all')).errors).toEqual([
+      '/tower status takes no arguments — did you mean /tower status? Run /tower help for usage.',
+    ]);
+    expect((await h.run('my feature')).errors).toEqual([
+      '"my feature" is not a branch name — /tower <base-branch> takes a single branch name. Run /tower help for usage.',
+    ]);
+    expect((await h.run('stop')).errors).toEqual([
+      'Usage: /tower stop <agent> — pass the roster name, agent id, or task id of a running agent',
+    ]);
+    expect(h.controller.isActive).toBe(false);
+    expect(await git(h.repo, 'branch', '--list')).toBe('* main');
+  });
+
+  it('asks before creating a new base branch when there is a UI and changes nothing when declined', async () => {
+    const h = await harness();
+    h.ctx.confirmAnswer = false;
+
+    const declined = await h.run('develop');
+
+    expect(h.ctx.confirms).toEqual([
+      { title: 'Create branch "develop"?', message: expect.stringContaining('creates it from the current HEAD') as unknown as string },
+    ]);
+    expect(declined.statuses).toEqual(['Cancelled — branch "develop" was not created and tower mode is unchanged.']);
+    expect(await git(h.repo, 'branch', '--list', 'develop')).toBe('');
+    expect(h.controller.isActive).toBe(false);
+
+    h.ctx.confirmAnswer = true;
+    const accepted = await h.run('develop');
+
+    expect(accepted.notices).toEqual([{ title: 'Tower mode: ON (base: develop)' }]);
+    expect(h.ctx.confirms).toHaveLength(2);
+  });
+
+  it('does not ask for an existing branch, nor when there is no UI', async () => {
+    const h = await harness();
+
+    await h.run('main');
+    expect(h.ctx.confirms).toEqual([]);
+
+    h.ctx.hasUI = false;
+    const headless = await h.run('integration');
+
+    expect(h.ctx.confirms).toEqual([]);
+    expect(headless.notices).toEqual([{ title: 'Tower base: integration' }]);
+    expect((await new TowerStore(h.repo).load()).base).toBe('integration');
+  });
+});
+
 describe('towerCommandCompletions', () => {
   const options = {
     agentNames: () => ['rev-1', 'worker-a'],
@@ -451,6 +538,7 @@ describe('towerCommandCompletions', () => {
       'models',
       'agents',
       'stop',
+      'help',
     ]);
     expect(towerCommandCompletions('st')?.map((item) => item.value)).toEqual(['status', 'stop']);
     expect(towerCommandCompletions('O')?.map((item) => item.value)).toEqual(['on', 'off']);

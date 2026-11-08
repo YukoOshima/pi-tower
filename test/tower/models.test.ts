@@ -545,6 +545,56 @@ describe('/tower models', () => {
   });
 });
 
+describe('an unloadable tower model configuration', () => {
+  const LOAD_WARNING = /^Tower model configuration could not be loaded: Invalid tower config — .+ — staying on prov\/session-model; fix it and check \/tower models$/s;
+
+  it('warns at session start and on /tower on when an env ref is malformed, and still enters tower mode', async () => {
+    const h = await harness({
+      global: { orchestrator: 'prov/orch-model' },
+      env: { PI_TOWER_ORCHESTRATOR_MODEL: 'sonnet-without-provider' },
+    });
+    h.ctx.modelRegistry.add('prov', 'orch-model');
+
+    const atStart = h.ctx.ui.notices.splice(0);
+    expect(atStart).toHaveLength(1);
+    expect(atStart[0]?.level).toBe('warning');
+    expect(atStart[0]?.message).toMatch(LOAD_WARNING);
+    expect(atStart[0]?.message).toContain('env PI_TOWER_ORCHESTRATOR_MODEL');
+
+    expect(await h.controller.enter()).toEqual({ entered: true });
+
+    expect(h.controller.isActive).toBe(true);
+    expect(h.pi.modelChanges).toEqual([]);
+    expect(h.ctx.ui.notices).toHaveLength(1);
+    expect(h.ctx.ui.notices[0]).toMatchObject({ level: 'warning', message: expect.stringMatching(LOAD_WARNING) as unknown as string });
+  });
+
+  it('warns on /tower on when tower.json is invalid JSON', async () => {
+    const h = await harness({ global: '{ "orchestrator": "prov/orch-model", ' });
+    h.ctx.ui.notices.splice(0);
+
+    expect(await h.controller.enter()).toEqual({ entered: true });
+
+    expect(h.ctx.ui.notices).toEqual([
+      { level: 'warning', message: expect.stringMatching(LOAD_WARNING) as unknown as string },
+    ]);
+    expect(h.ctx.ui.notices[0]?.message).toContain(h.globalPath);
+    expect(h.pi.modelChanges).toEqual([]);
+  });
+
+  it('picks up a fixed configuration on the next /tower on', async () => {
+    const h = await harness({ global: '{ broken' });
+    const orchestrator = h.ctx.modelRegistry.add('prov', 'orch-model');
+    h.ctx.ui.notices.splice(0);
+    await writeConfig(h.globalPath, { orchestrator: 'prov/orch-model' });
+
+    await h.controller.enter();
+
+    expect(h.ctx.ui.notices.filter((notice) => notice.level === 'warning')).toEqual([]);
+    expect(h.pi.modelChanges).toEqual([orchestrator]);
+  });
+});
+
 describe('orchestrator model switch', () => {
   it('switches to the configured orchestrator on enter and restores the session model on exit', async () => {
     const h = await harness({ global: { orchestrator: 'prov/orch-model:high' } });

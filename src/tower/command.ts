@@ -2,14 +2,14 @@ import type { ExtensionCommandContext } from '@earendil-works/pi-coding-agent';
 import type { AutocompleteItem } from '@earendil-works/pi-tui';
 
 import { TOWER_TEARDOWN_PROMPT, unknownAgentRefusal } from '../prompts/index.ts';
-import { MAIN_AGENT_ID } from '../protocol/index.ts';
+import { MAIN_AGENT_ID, branchExists } from '../protocol/index.ts';
 import { knownAgentNames, loadRoster, resolveAgentRef } from '../tools/agents.ts';
 import { readTowerStatusSummary } from '../tools/status/statusReader.ts';
 import { renderTowerTasks } from '../tools/tasks/tasksTool.ts';
 import { towerEnterFailureMessage, type TowerController } from './controller.ts';
 
 export const TOWER_COMMAND_DESCRIPTION =
-  'Tower multi-agent mode: /tower on | off | status | teardown | <base-branch> | models [<role|alias> <provider/model[:thinking]>|--clear] [--project] | agents | stop <agent>';
+  'Tower multi-agent mode: /tower on | off | status | teardown | <base-branch> | models [<role|alias> <provider/model[:thinking]>|--clear] [--project] | agents | stop <agent> | help';
 
 export const TOWER_SUBCOMMANDS: readonly { readonly value: string; readonly description: string }[] = [
   { value: 'on', description: 'Turn tower mode on (the main agent becomes the tower)' },
@@ -19,7 +19,54 @@ export const TOWER_SUBCOMMANDS: readonly { readonly value: string; readonly desc
   { value: 'models', description: 'Show or set the orchestrator, worker and reviewer models' },
   { value: 'agents', description: 'List the background workers and reviewers and their status' },
   { value: 'stop', description: 'Stop a running worker or reviewer (a human stop: it is never resumed)' },
+  { value: 'help', description: 'Show the /tower usage' },
 ];
+
+export const TOWER_COMMAND_USAGE = [
+  '/tower on — turn tower mode on (the main agent becomes the tower)',
+  '/tower off — turn tower mode off; agents keep running and .tower/ stays on disk',
+  '/tower or /tower status — show the tower dashboard without a model turn',
+  '/tower teardown — ask the tower to remove the finished mission worktrees',
+  '/tower <base-branch> — turn tower mode on with that local branch as the base (a missing branch is created from HEAD)',
+  '/tower models [<role|alias> <provider/model[:thinking]>|<role|alias> --clear] [--project] — show or set the orchestrator, worker and reviewer models',
+  '/tower agents — list the background workers and reviewers',
+  '/tower stop <agent> — stop a running worker or reviewer (a human stop: it is never resumed)',
+  '/tower help — show this help',
+].join('\n');
+
+const NO_ARGUMENT_SUBCOMMANDS = new Set(['on', 'off', 'status', 'teardown', 'agents', 'help']);
+
+const NEAR_MISSES: Readonly<Record<string, string>> = {
+  model: '/tower models',
+  config: '/tower models',
+  configure: '/tower models',
+  agent: '/tower agents',
+  task: '/tower agents (or /tower stop <agent>)',
+  tasks: '/tower agents (or /tower stop <agent>)',
+  list: '/tower agents',
+  ls: '/tower agents',
+  start: '/tower on',
+  enable: '/tower on',
+  disable: '/tower off',
+  stat: '/tower status',
+  state: '/tower status',
+  kill: '/tower stop <agent>',
+};
+
+export function towerSubcommandTypo(words: readonly string[]): string | undefined {
+  const head = (words[0] ?? '').toLowerCase();
+  if (NO_ARGUMENT_SUBCOMMANDS.has(head) && words.length > 1) {
+    return `/tower ${head} takes no arguments — did you mean /tower ${head}? Run /tower help for usage.`;
+  }
+  const suggestion = Object.hasOwn(NEAR_MISSES, head) ? NEAR_MISSES[head] : undefined;
+  if (suggestion !== undefined) {
+    return `Unknown /tower subcommand "${words[0] ?? ''}" — did you mean ${suggestion}? Run /tower help for usage; /tower <base-branch> starts the tower on a branch.`;
+  }
+  if (words.length > 1) {
+    return `"${words.join(' ')}" is not a branch name — /tower <base-branch> takes a single branch name. Run /tower help for usage.`;
+  }
+  return undefined;
+}
 
 export interface TowerCommandUi {
   notice(title: string, body?: string): void;
@@ -100,7 +147,39 @@ export async function handleTowerCommand(
     await humanStop(controller, ui, words.slice(1).join(' '));
     return;
   }
+  if (sub === 'help' || sub === '--help' || sub === '-h') {
+    ui.notice('Tower command', TOWER_COMMAND_USAGE);
+    return;
+  }
+  const typo = towerSubcommandTypo(words);
+  if (typo !== undefined) {
+    ui.error(typo);
+    return;
+  }
+  if (!(await confirmNewBaseBranch(controller, ctx, input))) {
+    ui.status(`Cancelled — branch "${input}" was not created and tower mode is unchanged.`);
+    return;
+  }
   await startTowerWithBase(controller, ui, input);
+}
+
+async function confirmNewBaseBranch(
+  controller: TowerController,
+  ctx: ExtensionCommandContext,
+  base: string,
+): Promise<boolean> {
+  if (!ctx.hasUI) return true;
+  let exists = false;
+  try {
+    exists = await branchExists(controller.repoRoot, base);
+  } catch {
+    exists = false;
+  }
+  if (exists) return true;
+  return ctx.ui.confirm(
+    `Create branch "${base}"?`,
+    `"${base}" is not a local branch. /tower ${base} creates it from the current HEAD, switches the checkout to it, commits any uncommitted changes onto it as a snapshot, and makes it the tower base.`,
+  );
 }
 
 export function towerCommandCompletions(
