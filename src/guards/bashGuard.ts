@@ -170,6 +170,7 @@ function analyzeInvocation(
   cwds: readonly Cwd[],
   ctx: GuardContext,
 ): WalkResult {
+  if (name === 'command' && commandDescribesOnly(args)) return passthrough(cwds);
   const wrapper = WRAPPER_OPTIONS.get(name);
   if (wrapper !== undefined) {
     const result = analyzeWrapped(dropWrapperOperands(args, wrapper, ctx.state), cwds, ctx);
@@ -199,6 +200,15 @@ function homeOf(ctx: GuardContext): Cwd {
 function noteAssignment(name: string, state: GuardState): void {
   if (GIT_REDIRECT_ENV.test(name)) state.gitRedirected = true;
   if (name === 'HOME') state.homeRedirected = true;
+}
+
+function commandDescribesOnly(args: readonly ShellWord[]): boolean {
+  for (const word of args) {
+    const arg = word.value;
+    if (arg === undefined || arg === '-' || !arg.startsWith('-') || arg.startsWith('--')) return false;
+    if (/[vV]/.test(arg)) return true;
+  }
+  return false;
 }
 
 interface WrappedCommand {

@@ -500,6 +500,25 @@ describe('zsh precommand modifiers', () => {
   });
 });
 
+describe('command -v and -V', () => {
+  it.each([
+    'command -v cd .tower/worktrees/wt-1 && git reset --hard',
+    'command -V cd .tower/worktrees/wt-1; git reset --hard',
+    'command -pv cd .tower/worktrees/wt-1 && git reset --hard',
+    'command -p -v cd .tower/worktrees/wt-1 && git reset --hard',
+    'builtin command -v cd .tower/worktrees/wt-1 && git reset --hard',
+  ])('does not run the looked-up command in %j', (command) => {
+    expect(guard(command)).toBe(GIT_RESET_VETO);
+  });
+
+  it('allows lookups of guarded commands and keeps plain command a wrapper', () => {
+    expect(guard('command -v rm && rm -rf node_modules')).toBeUndefined();
+    expect(guard('command -v rm -rf .tower/comms')).toBeUndefined();
+    expect(guard(`command cd ${slot} && git reset --hard`)).toBeUndefined();
+    expect(guard('command -p rm -rf .tower/comms')).toBe(rmVeto('.tower/comms'));
+  });
+});
+
 describe('quoting and parsing', () => {
   it('allows a command that only mentions the keywords in string literals', () => {
     for (const command of [
