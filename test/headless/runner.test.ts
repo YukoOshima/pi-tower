@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import type { PiEvent } from '../../src/headless/rpc.ts';
 import { formatElapsed, HEADLESS_EXIT, renderPlan, runHeadless } from '../../src/headless/runner.ts';
 import type { HeadlessSnapshot } from '../../src/headless/state.ts';
+import { TOWER_HUMAN_APPROVAL_MARKER } from '../../src/protocol/objective.ts';
 import { feature, milestone, objective, type Json } from './harness.ts';
 import { runOptions, snapshot, stubRun, type StateScript, type StubPi } from './stubs.ts';
 
@@ -595,6 +596,55 @@ describe('runHeadless', () => {
     });
     expect(await runHeadless(runOptions({ autoApprove: true }), run.deps)).toBe(HEADLESS_EXIT.stopped);
     expect(plain(run.errors)).toEqual(['/tower approve --auto failed: Objective O1 is not awaiting approval.']);
+  });
+
+  it('prints the plan and exits 3 when the auto-approval is refused because only a human can approve', async () => {
+    const refusal = `Approval failed — objective O1 changed its contract while it was blocked or paused, so only a human can approve it — auto-approval stays refused until a human approves ${TOWER_HUMAN_APPROVAL_MARKER}`;
+    const run = stubRun((pi, state) => {
+      towerOn(pi, state, snapshot(stage('awaiting-approval', 'active', 'pending', { approvalReason: 'contract-changed' }), FEATURES));
+      pi.reactions['/tower approve --auto'] = { notices: [{ level: 'error', text: refusal }] };
+    });
+
+    expect(await runHeadless(runOptions({ autoApprove: true, timeoutMs: 60_000 }), run.deps)).toBe(HEADLESS_EXIT.approval);
+
+    expect(run.pi().commands).toEqual(['/tower on', '/tower approve --auto']);
+    expect(run.info.some((line) => line.startsWith('Plan for O1 "Ship the widget" (awaiting-approval):'))).toBe(true);
+    expect(run.info.some((line) => line.includes('\n  approval reason: contract-changed\n'))).toBe(true);
+    expect(plain(run.errors)).toEqual([
+      `pi refused /tower approve --auto: ${refusal}`,
+      'objective O1 needs approval — a human must approve: run /tower approve in pi',
+    ]);
+    expect(run.info.some((line) => line.includes('auto-approved'))).toBe(false);
+    expect(run.pi().closed).toBe(true);
+  });
+
+  it('exits 3 when the human-approval refusal arrives as a command error among other errors', async () => {
+    const run = stubRun((pi, state) => {
+      towerOn(pi, state, snapshot(stage('awaiting-approval', 'active', 'pending'), FEATURES));
+      pi.reactions['/tower approve --auto'] = {
+        notices: [{ level: 'error', text: 'something else went wrong' }],
+        effect: (stub) => {
+          stub.emit(commandError(`objective O1 needs a human ${TOWER_HUMAN_APPROVAL_MARKER}`));
+        },
+      };
+    });
+
+    expect(await runHeadless(runOptions({ autoApprove: true }), run.deps)).toBe(HEADLESS_EXIT.approval);
+    expect(plain(run.errors).at(-1)).toBe('objective O1 needs approval — a human must approve: run /tower approve in pi');
+  });
+
+  it('keeps exit 1 for a refusal that only mentions a human without the protocol marker', async () => {
+    const run = stubRun((pi, state) => {
+      towerOn(pi, state, snapshot(stage('awaiting-approval', 'active', 'pending'), FEATURES));
+      pi.reactions['/tower approve --auto'] = {
+        notices: [{ level: 'error', text: 'Approval failed — only a human can approve it, says a stale build' }],
+      };
+    });
+
+    expect(await runHeadless(runOptions({ autoApprove: true }), run.deps)).toBe(HEADLESS_EXIT.stopped);
+    expect(plain(run.errors)).toEqual([
+      '/tower approve --auto failed: Approval failed — only a human can approve it, says a stale build',
+    ]);
   });
 
   it('exits 1 once when the approve handler throws, although pi answers handled', async () => {

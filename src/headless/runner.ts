@@ -1,5 +1,6 @@
 import { fileURLToPath } from 'node:url';
 
+import { TOWER_HUMAN_APPROVAL_MARKER } from '../protocol/objective.ts';
 import type { HeadlessRunOptions } from './args.ts';
 import { isCommandError, noticeOf, PI_DIALOG_METHODS, recordField, stringField, type PiCommandResult, type PiEvent, type PiExit, type PiRpcOptions, type PiUiResponse } from './rpc.ts';
 import type { HeadlessFeature, HeadlessMilestone, HeadlessObjective, HeadlessSnapshot } from './state.ts';
@@ -314,7 +315,12 @@ class HeadlessRun {
     throw this.failure(HEADLESS_EXIT.startup, `pi has no /tower command — ${EXTENSION_HINT}`);
   }
 
-  private async towerCommand(pi: HeadlessPi, text: string, code: number): Promise<PiCommandResult> {
+  private async towerCommand(
+    pi: HeadlessPi,
+    text: string,
+    code: number,
+    refused?: (errors: readonly string[]) => HeadlessExit | undefined,
+  ): Promise<PiCommandResult> {
     if (this.interrupt !== undefined) throw this.interruptExit();
     this.line(`> ${text}`);
     this.commandsInFlight += 1;
@@ -334,8 +340,8 @@ class HeadlessRun {
         `pi did not run ${text} as a pi-tower command (the prompt was ${result.disposition ?? 'not handled'}) — ${EXTENSION_HINT}`,
       );
     }
-    const errors = result.notices.filter((notice) => notice.level === 'error');
-    if (errors.length > 0) throw this.failure(code, `${text} failed: ${errors.map((notice) => notice.text).join(' | ')}`);
+    const errors = result.notices.filter((notice) => notice.level === 'error').map((notice) => notice.text);
+    if (errors.length > 0) throw refused?.(errors) ?? this.failure(code, `${text} failed: ${errors.join(' | ')}`);
     for (const notice of result.notices) {
       if (notice.level === 'info') this.line(`pi: ${notice.text.split('\n')[0] ?? ''}`);
       else this.fail(`pi ${notice.level}: ${notice.text}`);
@@ -436,7 +442,11 @@ class HeadlessRun {
   }
 
   private async approve(pi: HeadlessPi, objective: HeadlessObjective): Promise<void> {
-    await this.towerCommand(pi, AUTO_APPROVE_COMMAND, HEADLESS_EXIT.stopped);
+    await this.towerCommand(pi, AUTO_APPROVE_COMMAND, HEADLESS_EXIT.stopped, (errors) => {
+      if (!errors.some((error) => error.includes(TOWER_HUMAN_APPROVAL_MARKER))) return undefined;
+      this.fail(`pi refused ${AUTO_APPROVE_COMMAND}: ${errors.join(' | ')}`);
+      return new HeadlessExit(HEADLESS_EXIT.approval, `objective ${objective.id} needs approval — a human must approve: run /tower approve in pi`);
+    });
     this.line(`auto-approved the plan of ${objective.id} (--auto-approve)`);
   }
 }

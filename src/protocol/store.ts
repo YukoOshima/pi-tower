@@ -77,6 +77,7 @@ import {
   roundContractRevision,
   sortedMilestones,
   takeOverObjectiveMode,
+  TOWER_HUMAN_APPROVAL_MARKER,
   TOWER_OBJECTIVE_MODES,
   TOWER_VALIDATION_KINDS,
   TowerObjectiveCompletionError,
@@ -1422,7 +1423,7 @@ export class TowerStore {
       }
       if (by === 'auto' && objective.approvalRequiresHuman === true) {
         throw new TowerProtocolError(
-          `objective ${objective.id} changed its contract while it was blocked or paused, so only a human can approve it — auto-approval stays refused until a human approves`,
+          `objective ${objective.id} changed its contract while it was blocked or paused, so only a human can approve it — auto-approval stays refused until a human approves ${TOWER_HUMAN_APPROVAL_MARKER}`,
         );
       }
       this.assertApprovable(state, objective, 'be approved');

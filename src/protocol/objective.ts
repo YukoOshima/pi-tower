@@ -24,6 +24,7 @@ export const TOWER_VALIDATION_KINDS: readonly TowerValidationKind[] = [
   'commands',
 ];
 export const TOWER_OBJECTIVE_MODES: readonly TowerObjectiveMode[] = ['interactive', 'headless'];
+export const TOWER_HUMAN_APPROVAL_MARKER = '[human-approval-required]';
 
 export interface TowerValidationSettings {
   readonly skipScrutiny?: boolean;

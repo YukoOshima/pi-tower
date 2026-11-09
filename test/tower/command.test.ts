@@ -1005,7 +1005,7 @@ describe('/tower approve, pause and resume', () => {
     await store.updateObjective({ definitionOfDone: ['works', 'documented'] });
     const refused = await h.run('approve --auto');
     expect(refused.errors).toEqual([
-      'Approval failed — objective O1 changed its contract while it was blocked or paused, so only a human can approve it — auto-approval stays refused until a human approves',
+      'Approval failed — objective O1 changed its contract while it was blocked or paused, so only a human can approve it — auto-approval stays refused until a human approves [human-approval-required]',
     ]);
     expect((await h.run('approve')).notices[0]?.title).toBe('Objective O1 approved — executing');
     expect((await h.run('approve now')).errors).toEqual([
