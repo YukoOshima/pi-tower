@@ -10,6 +10,7 @@ export const TOWER_CONFIG_KEYS = [
   'orchestrator',
   'worker',
   'reviewer',
+  'validator',
   'models',
   'maxRunningAgents',
   'agentTimeoutMs',
@@ -17,7 +18,13 @@ export const TOWER_CONFIG_KEYS = [
 
 export const TOWER_MODEL_SPEC_KEYS = ['model', 'thinkingLevel', 'description'] as const;
 
-export const RESERVED_MODEL_ALIASES = ['primary', 'orchestrator', 'worker', 'reviewer'] as const;
+export const RESERVED_MODEL_ALIASES = [
+  'primary',
+  'orchestrator',
+  'worker',
+  'reviewer',
+  'validator',
+] as const;
 
 const ALIAS_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const MAX_TIMER_MS = 2_147_483_647;
@@ -83,7 +90,8 @@ function readConfig(raw: unknown, report: Report): TowerConfigFile {
     switch (key) {
       case 'orchestrator':
       case 'worker':
-      case 'reviewer': {
+      case 'reviewer':
+      case 'validator': {
         const spec = readModelSpec(value, key, report);
         if (spec !== undefined) config[key] = spec;
         break;

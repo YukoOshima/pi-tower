@@ -1,6 +1,6 @@
-export type TowerRole = 'orchestrator' | 'worker' | 'reviewer';
+export type TowerRole = 'orchestrator' | 'worker' | 'reviewer' | 'validator';
 
-export type TowerSpawnKind = 'worker' | 'reviewer';
+export type TowerSpawnKind = 'worker' | 'reviewer' | 'validator';
 
 export type TowerThinkingLevel = 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 
@@ -20,6 +20,7 @@ export interface TowerConfigFile {
   readonly orchestrator?: TowerModelSpec;
   readonly worker?: TowerModelSpec;
   readonly reviewer?: TowerModelSpec;
+  readonly validator?: TowerModelSpec;
   readonly models?: Readonly<Record<string, TowerModelSpec>>;
   readonly maxRunningAgents?: number;
   readonly agentTimeoutMs?: number;
@@ -63,7 +64,7 @@ export interface TowerModelBinding {
 export type TowerModelOrigin =
   | TowerConfigSource
   | { readonly kind: 'session' }
-  | { readonly kind: 'inherited'; readonly from: 'orchestrator' };
+  | { readonly kind: 'inherited'; readonly from: 'orchestrator' | 'reviewer' };
 
 export interface TowerResolvedModel {
   readonly binding?: TowerModelBinding;

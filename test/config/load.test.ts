@@ -125,6 +125,31 @@ describe('loadTowerConfig', () => {
     });
   });
 
+  it('reads the validator role from the global file, the project file, env and flag in precedence order', async () => {
+    await writeJson(globalFile, { validator: 'global/validator' });
+    expect((await loadTowerConfig(input())).roles).toStrictEqual({
+      validator: { value: { provider: 'global', modelId: 'validator' }, source: globalSource() },
+    });
+    await writeJson(projectFile, { validator: { model: 'project/validator', thinkingLevel: 'high' } });
+    expect((await loadTowerConfig(input())).roles.validator).toStrictEqual({
+      value: { provider: 'project', modelId: 'validator', thinkingLevel: 'high' },
+      source: projectSource(),
+    });
+    const env = { PI_TOWER_VALIDATOR_MODEL: 'env/validator:low' };
+    expect((await loadTowerConfig(input({ env }))).roles.validator).toStrictEqual({
+      value: { provider: 'env', modelId: 'validator', thinkingLevel: 'low' },
+      source: { kind: 'env', variable: 'PI_TOWER_VALIDATOR_MODEL' },
+    });
+    const flagged = await loadTowerConfig(input({ env, flags: { validator: 'flag/validator:max' } }));
+    expect(flagged.roles.validator).toStrictEqual({
+      value: { provider: 'flag', modelId: 'validator', thinkingLevel: 'max' },
+      source: { kind: 'flag', flag: 'tower-validator-model' },
+    });
+    expect((await loadError({ env: { PI_TOWER_VALIDATOR_MODEL: 'nope' } })).issues[0]?.source).toBe(
+      'env PI_TOWER_VALIDATOR_MODEL',
+    );
+  });
+
   it('merges the model pool per alias with the project file winning', async () => {
     await writeJson(globalFile, {
       models: { fast: 'google/gemini-2.5-flash', deep: 'anthropic/claude-opus-4-5:high' },
@@ -274,6 +299,10 @@ describe('readTowerModelFlags', () => {
       'tower-orchestrator-model',
       'tower-worker-model',
       'tower-reviewer-model',
+      'tower-validator-model',
     ]);
+    expect(readTowerModelFlags((name) => (name === 'tower-validator-model' ? 'a/b:high' : undefined))).toStrictEqual({
+      validator: 'a/b:high',
+    });
   });
 });

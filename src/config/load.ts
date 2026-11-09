@@ -25,12 +25,14 @@ export const TOWER_MODEL_ENV: Readonly<Record<TowerRole, string>> = {
   orchestrator: 'PI_TOWER_ORCHESTRATOR_MODEL',
   worker: 'PI_TOWER_WORKER_MODEL',
   reviewer: 'PI_TOWER_REVIEWER_MODEL',
+  validator: 'PI_TOWER_VALIDATOR_MODEL',
 };
 
 export const TOWER_MODEL_FLAGS: Readonly<Record<TowerRole, string>> = {
   orchestrator: 'tower-orchestrator-model',
   worker: 'tower-worker-model',
   reviewer: 'tower-reviewer-model',
+  validator: 'tower-validator-model',
 };
 
 export type TowerEnv = Readonly<Record<string, string | undefined>>;

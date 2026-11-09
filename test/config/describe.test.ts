@@ -96,6 +96,13 @@ describe('formatModelTable', () => {
           'xhigh (inherited from orchestrator)',
           'inherited from orchestrator',
         ),
+        row(
+          widths,
+          'validator',
+          'anthropic/claude-opus-4-5',
+          'xhigh (inherited from orchestrator)',
+          'inherited from orchestrator',
+        ),
         row(widths, 'models.fast', 'google/gemini-2.5-flash', 'pi default', `${GLOBAL_PATH} (global)`),
         row(widths, 'models.deep', 'anthropic/claude-opus-4-5', 'max (configured)', `${PROJECT_PATH} (project)`),
         '',
@@ -136,6 +143,13 @@ describe('formatModelTable', () => {
           'high (inherited from orchestrator)',
           'inherited from orchestrator',
         ),
+        row(
+          widths,
+          'validator',
+          'anthropic/claude-sonnet-4-5',
+          'high (inherited from orchestrator)',
+          'inherited from orchestrator',
+        ),
         '',
         `global config: ${GLOBAL_PATH} (not found)`,
         `project config: ${PROJECT_PATH} (ignored — project not trusted)`,
@@ -147,7 +161,7 @@ describe('formatModelTable', () => {
     const lines = formatModelTable(
       resolveTowerModels({ roles: {}, models: {}, files: [] }, undefined),
     ).split('\n');
-    expect(lines).toHaveLength(4);
+    expect(lines).toHaveLength(5);
     expect(lines[1]?.split(/\s{2,}/)).toEqual(['orchestrator', '(none)', '-', 'session model']);
     expect(lines[2]?.split(/\s{2,}/)).toEqual(['worker', '(none)', '-', 'inherited from orchestrator']);
     expect(lines.every((line) => line === line.trimEnd())).toBe(true);
@@ -180,5 +194,20 @@ describe('source labels', () => {
     );
     expect(describeThinking(levelless.roles.worker)).toBe('pi default');
     expect(describeThinking({ origin: { kind: 'session' } })).toBe('-');
+  });
+
+  it('labels a validator that inherits the reviewer', () => {
+    const models = resolveTowerModels(
+      { roles: { reviewer: value('openai/gpt-5.1:low', GLOBAL) }, models: {}, files: [] },
+      SESSION,
+    );
+    expect(describeThinking(models.roles.validator)).toBe('low (inherited from reviewer)');
+    expect(formatModelOrigin({ kind: 'inherited', from: 'reviewer' })).toBe('inherited from reviewer');
+    expect(formatModelTable(models).split('\n')[4]?.split(/\s{2,}/)).toEqual([
+      'validator',
+      'openai/gpt-5.1',
+      'low (inherited from reviewer)',
+      'inherited from reviewer',
+    ]);
   });
 });

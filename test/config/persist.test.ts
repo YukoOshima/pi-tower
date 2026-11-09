@@ -220,6 +220,21 @@ describe('updateTowerConfigModel', () => {
     expect(await readJson(file)).toStrictEqual({ orchestrator: 'anthropic/claude-opus-4-5' });
   });
 
+  it('writes and clears the validator role and refuses it as a pool alias', async () => {
+    expect(await updateTowerConfigModel({ path: file, key: 'validator', ref: 'openai/gpt-5.1:high' })).toStrictEqual({
+      path: file,
+      field: 'validator',
+      changed: true,
+      value: { provider: 'openai', modelId: 'gpt-5.1', thinkingLevel: 'high' },
+    });
+    expect(await readJson(file)).toStrictEqual({ validator: 'openai/gpt-5.1:high' });
+    expect((await updateError({ path: file, key: 'models.validator', ref: 'a/b' })).issues[0]?.key).toBe(
+      'models.validator',
+    );
+    await updateTowerConfigModel({ path: file, key: 'validator' });
+    expect(await readJson(file)).toStrictEqual({});
+  });
+
   it('accepts the models.<alias> labels shown by formatModelTable', async () => {
     const result = await updateTowerConfigModel({ path: file, key: 'models.fast', ref: 'google/gemini-2.5-flash' });
     expect(result.field).toBe('models.fast');
@@ -227,7 +242,8 @@ describe('updateTowerConfigModel', () => {
     expect((await updateError({ path: file, key: 'models.worker', ref: 'a/b' })).issues[0]).toEqual({
       source: file,
       key: 'models.worker',
-      message: '"worker" is reserved for the role models (primary, orchestrator, worker, reviewer) — rename the alias',
+      message:
+        '"worker" is reserved for the role models (primary, orchestrator, worker, reviewer, validator) — rename the alias',
     });
   });
 

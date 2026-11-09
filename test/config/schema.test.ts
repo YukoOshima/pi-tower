@@ -58,14 +58,14 @@ describe('parseTowerConfig', () => {
   it('rejects unknown top-level keys naming the file and key', () => {
     const error = configError({ orchestrater: 'anthropic/claude-opus-4-5' });
     expect(error.message).toBe(
-      'Invalid tower config — /home/u/.pi/agent/tower.json (global): orchestrater: unknown key — allowed keys: orchestrator, worker, reviewer, models, maxRunningAgents, agentTimeoutMs',
+      'Invalid tower config — /home/u/.pi/agent/tower.json (global): orchestrater: unknown key — allowed keys: orchestrator, worker, reviewer, validator, models, maxRunningAgents, agentTimeoutMs',
     );
     expect(error.issues).toEqual([
       {
         source: SOURCE,
         key: 'orchestrater',
         message:
-          'unknown key — allowed keys: orchestrator, worker, reviewer, models, maxRunningAgents, agentTimeoutMs',
+          'unknown key — allowed keys: orchestrator, worker, reviewer, validator, models, maxRunningAgents, agentTimeoutMs',
       },
     ]);
   });
@@ -130,11 +130,28 @@ describe('parseTowerConfig', () => {
         {
           source: SOURCE,
           key: `models.${alias}`,
-          message: `"${alias}" is reserved for the role models (primary, orchestrator, worker, reviewer) — rename the alias`,
+          message: `"${alias}" is reserved for the role models (primary, orchestrator, worker, reviewer, validator) — rename the alias`,
         },
       ]);
     },
   );
+
+  it('accepts a validator model spec and reserves the validator alias', () => {
+    expect(
+      parseTowerConfig({ validator: { model: 'openai/gpt-5.1', thinkingLevel: 'high', description: 'QA' } }, SOURCE),
+    ).toStrictEqual({
+      validator: { provider: 'openai', modelId: 'gpt-5.1', thinkingLevel: 'high', description: 'QA' },
+    });
+    expect(configError({ validator: 'nope' }).issues[0]?.key).toBe('validator');
+    expect(configError({ models: { Validator: 'a/b' } }).issues).toEqual([
+      {
+        source: SOURCE,
+        key: 'models.Validator',
+        message:
+          '"Validator" is reserved for the role models (primary, orchestrator, worker, reviewer, validator) — rename the alias',
+      },
+    ]);
+  });
 
   it.each(['', 'my alias', 'kimi/k3', 'a:b', '-fast', 'x'.repeat(65)])(
     'rejects the malformed pool alias %j',
@@ -208,7 +225,7 @@ describe('parseTowerConfig', () => {
     expect(error.message.split('\n')).toEqual([
       'Invalid tower config:',
       `- ${SOURCE}: worker: "nope" has no provider — expected provider/modelId[:thinkingLevel] (e.g. anthropic/claude-sonnet-4-5:high)`,
-      `- ${SOURCE}: models.primary: "primary" is reserved for the role models (primary, orchestrator, worker, reviewer) — rename the alias`,
+      `- ${SOURCE}: models.primary: "primary" is reserved for the role models (primary, orchestrator, worker, reviewer, validator) — rename the alias`,
       `- ${SOURCE}: models.fast.thinkingLevel: "turbo" is not a thinking level — use off, minimal, low, medium, high, xhigh, max`,
       `- ${SOURCE}: maxRunningAgents: expected a positive integer, got 0`,
     ]);

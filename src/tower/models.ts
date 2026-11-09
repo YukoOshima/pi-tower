@@ -240,7 +240,8 @@ export function towerPrimaryModel(
 function relevantTargets(choice: string, resolved: TowerResolvedModels): ReadonlySet<string> {
   if (isTowerRole(choice)) {
     const targets = new Set<string>([choice]);
-    if (resolved.roles[choice].origin.kind === 'inherited') targets.add('orchestrator');
+    const origin = resolved.roles[choice].origin;
+    if (origin.kind === 'inherited') targets.add(origin.from);
     return targets;
   }
   return new Set([`models.${choice}`]);

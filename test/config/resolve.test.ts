@@ -63,6 +63,7 @@ describe('resolveTowerModels', () => {
       orchestrator: { binding, origin: { kind: 'session' } },
       worker: { binding, origin: { kind: 'inherited', from: 'orchestrator' } },
       reviewer: { binding, origin: { kind: 'inherited', from: 'orchestrator' } },
+      validator: { binding, origin: { kind: 'inherited', from: 'orchestrator' } },
     });
   });
 
@@ -126,6 +127,50 @@ describe('resolveTowerModels', () => {
     const models = resolveTowerModels(config({ roles: { reviewer: value('openai/gpt-5.1') } }), undefined);
     expect(models.roles.orchestrator).toStrictEqual({ origin: { kind: 'session' } });
     expect(models.roles.worker).toStrictEqual({ origin: { kind: 'inherited', from: 'orchestrator' } });
+    expect(models.roles.reviewer.binding?.model).toBe('openai/gpt-5.1');
+  });
+
+  it('lets an unset validator inherit the configured reviewer, and the orchestrator when no reviewer is configured', () => {
+    const withReviewer = resolveTowerModels(
+      config({
+        roles: {
+          orchestrator: value('anthropic/claude-opus-4-5'),
+          reviewer: value('openai/gpt-5.1:high', PROJECT, 'Strict reviewer'),
+        },
+      }),
+      SESSION,
+    );
+    expect(withReviewer.roles.validator).toStrictEqual({
+      binding: { model: 'openai/gpt-5.1', provider: 'openai', modelId: 'gpt-5.1', thinkingLevel: 'high' },
+      origin: { kind: 'inherited', from: 'reviewer' },
+    });
+    const withoutReviewer = resolveTowerModels(
+      config({ roles: { orchestrator: value('anthropic/claude-opus-4-5') } }),
+      SESSION,
+    );
+    expect(withoutReviewer.roles.validator).toStrictEqual({
+      binding: { model: 'anthropic/claude-opus-4-5', provider: 'anthropic', modelId: 'claude-opus-4-5' },
+      origin: { kind: 'inherited', from: 'orchestrator' },
+    });
+    expect(resolveTowerModels(config(), SESSION).roles.validator.origin).toStrictEqual({
+      kind: 'inherited',
+      from: 'orchestrator',
+    });
+    expect(resolveTowerModels(config(), undefined).roles.validator).toStrictEqual({
+      origin: { kind: 'inherited', from: 'orchestrator' },
+    });
+  });
+
+  it('keeps a configured validator on its own model whatever the reviewer is', () => {
+    const flag: TowerConfigSource = { kind: 'flag', flag: 'tower-validator-model' };
+    const models = resolveTowerModels(
+      config({ roles: { reviewer: value('openai/gpt-5.1'), validator: value('google/gemini-2.5-pro:low', flag) } }),
+      SESSION,
+    );
+    expect(models.roles.validator).toStrictEqual({
+      binding: { model: 'google/gemini-2.5-pro', provider: 'google', modelId: 'gemini-2.5-pro', thinkingLevel: 'low' },
+      origin: flag,
+    });
     expect(models.roles.reviewer.binding?.model).toBe('openai/gpt-5.1');
   });
 
@@ -247,10 +292,10 @@ describe('resolveSpawnModel', () => {
   it('rejects anything else with every allowed choice listed', () => {
     const error = spawnError(models, 'worker', 'anthropic/claude-opus-4-5');
     expect(error.message).toBe(
-      'Invalid model "anthropic/claude-opus-4-5" — available models: orchestrator, primary, worker, reviewer, fast, deep (primary is an alias of orchestrator). Omit model to use the worker default; other provider/model ids are not accepted — add them to "models" in tower.json first.',
+      'Invalid model "anthropic/claude-opus-4-5" — available models: orchestrator, primary, worker, reviewer, validator, fast, deep (primary is an alias of orchestrator). Omit model to use the worker default; other provider/model ids are not accepted — add them to "models" in tower.json first.',
     );
     expect(error.choice).toBe('anthropic/claude-opus-4-5');
-    expect(error.allowed).toEqual(['orchestrator', 'primary', 'worker', 'reviewer', 'fast', 'deep']);
+    expect(error.allowed).toEqual(['orchestrator', 'primary', 'worker', 'reviewer', 'validator', 'fast', 'deep']);
     expect(spawnError(models, 'reviewer', 'Primary').message).toContain('use the reviewer default');
     expect(spawnError(models, 'worker', 'constructor').choice).toBe('constructor');
     expect(spawnError(models, 'worker', 'toString').name).toBe('TowerSpawnModelError');
@@ -266,12 +311,26 @@ describe('resolveSpawnModel', () => {
     );
   });
 
+  it('defaults a validator spawn to the validator role and explains its fallback chain', () => {
+    expect(resolveSpawnModel(models, 'validator')).toStrictEqual({
+      choice: 'validator',
+      binding: { model: 'google/gemini-2.5-pro', provider: 'google', modelId: 'gemini-2.5-pro' },
+      origin: { kind: 'inherited', from: 'reviewer' },
+    });
+    expect(resolveSpawnModel(models, 'worker', 'validator').choice).toBe('validator');
+    expect(spawnError(models, 'validator', 'gpt-9').message).toContain('use the validator default');
+    expect(spawnError(resolveTowerModels(config(), undefined), 'validator').message).toBe(
+      'No model for "validator" — it falls back to the reviewer and then the orchestrator, but neither is configured and the session has no model; select a session model with /model or set "validator", "reviewer" or "orchestrator" in tower.json, PI_TOWER_VALIDATOR_MODEL or --tower-validator-model',
+    );
+  });
+
   it('lists the spawn choices in a stable order', () => {
     expect(spawnModelChoices(models)).toEqual([
       'orchestrator',
       'primary',
       'worker',
       'reviewer',
+      'validator',
       'fast',
       'deep',
     ]);
