@@ -34,6 +34,7 @@ export type TowerObjectiveBlockCode =
   | 'no-milestones'
   | 'milestone-not-passed'
   | 'open-feature'
+  | 'final-validation-failed'
   | 'final-validation-stale';
 
 export interface TowerObjectiveBlock {
@@ -199,6 +200,31 @@ export function milestonePassesOn(
   );
 }
 
+export function latestFailingKinds(
+  objective: TowerObjective,
+  milestone: TowerMilestone,
+  commit: string,
+  settings: TowerValidationSettings = {},
+): TowerValidationKind[] {
+  return requiredValidationKinds(objective, milestone, settings).filter(
+    (kind) => latestValidationRound(milestone, kind, commit)?.verdict === 'fail',
+  );
+}
+
+export function finalPassBroken(
+  objective: TowerObjective,
+  milestone: TowerMilestone,
+  baseTip: string,
+  settings: TowerValidationSettings = {},
+): 'failed' | 'stale' | undefined {
+  if (milestone.status !== 'passed' || finalMilestone(objective)?.id !== milestone.id) return undefined;
+  if (latestFailingKinds(objective, milestone, baseTip, settings).length > 0) return 'failed';
+  if (milestone.validationCommit !== baseTip || !milestonePassesOn(objective, milestone, baseTip, settings)) {
+    return 'stale';
+  }
+  return undefined;
+}
+
 export function deriveMilestoneStatus(
   objective: TowerObjective,
   milestone: TowerMilestone,
@@ -319,7 +345,13 @@ export function evaluateObjective(
   }
   if (final?.status === 'passed') {
     const commit = final.validationCommit;
-    if (commit !== baseTip) {
+    const failing = latestFailingKinds(objective, final, baseTip, settings);
+    if (failing.length > 0) {
+      blocks.push({
+        code: 'final-validation-failed',
+        detail: `final milestone ${final.id} failed ${failing.join(', ')} on the base tip ${baseTip.slice(0, 7)} — plan a fix into ${final.id}`,
+      });
+    } else if (commit !== baseTip) {
       blocks.push({
         code: 'final-validation-stale',
         detail: `final milestone ${final.id} passed on ${commit === undefined ? 'no recorded commit' : commit.slice(0, 7)} but the base tip is ${baseTip.slice(0, 7)} — re-validate it on the current tip`,
@@ -855,7 +887,11 @@ function describeMilestones(objective: TowerObjective): string {
     : 'none yet — add one with TowerObjective update';
 }
 
-export function planPlacement(state: TowerState, item: TowerPlanPlacementInput): TowerPlanPlacement {
+export function planPlacement(
+  state: TowerState,
+  item: TowerPlanPlacementInput,
+  context: { readonly baseTip?: string; readonly settings?: TowerValidationSettings } = {},
+): TowerPlanPlacement {
   const objective = state.objective;
   if (item.origin !== undefined && item.origin !== 'plan' && item.origin !== 'fix') {
     throw new TowerProtocolError(
@@ -892,14 +928,20 @@ export function planPlacement(state: TowerState, item: TowerPlanPlacementInput):
       `objective ${objective.id} has no milestone "${milestoneId}" (milestones: ${describeMilestones(objective)})`,
     );
   }
-  if (milestone.status === 'passed') {
+  const brokenFinal =
+    context.baseTip !== undefined &&
+    finalPassBroken(objective, milestone, context.baseTip, context.settings) !== undefined;
+  if (milestone.status === 'passed' && !brokenFinal) {
     const current = currentMilestone(objective);
     throw new TowerProtocolError(
       `milestone ${milestone.id} "${milestone.title}" already passed validation — plan "${item.title}" into ${current === undefined ? 'a new milestone' : `the current milestone ${current.id} "${current.title}"`}, or append a milestone with TowerObjective update if the work belongs after it`,
     );
   }
   const reopens =
-    milestone.status === 'failed' || milestone.status === 'validating' || milestone.status === 'blocked';
+    brokenFinal ||
+    milestone.status === 'failed' ||
+    milestone.status === 'validating' ||
+    milestone.status === 'blocked';
   return { milestone, origin: item.origin ?? (reopens ? 'fix' : 'plan'), reopens };
 }
 

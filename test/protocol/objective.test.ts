@@ -306,6 +306,18 @@ describe('evaluateObjective', () => {
     ]);
   });
 
+  it('tells a failed final validation on the tip apart from a stale one', () => {
+    const s = completedState();
+    s.objective!.milestones[1]!.rounds.push(round('scrutiny', 2, 'fail'));
+    expect(evaluateObjective(s, C1).completion.blocks).toEqual([
+      {
+        code: 'final-validation-failed',
+        detail: `final milestone MS2 failed scrutiny on the base tip ${C1.slice(0, 7)} — plan a fix into MS2`,
+      },
+    ]);
+    expect(evaluateObjective(s, C2).completion.blocks.map((block) => block.code)).toEqual(['final-validation-stale']);
+  });
+
   it('flags a final validation stamped on an older commit', () => {
     const result = evaluateObjective(completedState(), C2);
     expect(result.completion.blocks.map((block) => block.code)).toEqual(['final-validation-stale']);

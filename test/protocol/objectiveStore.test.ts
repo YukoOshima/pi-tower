@@ -1416,3 +1416,115 @@ describe('the commands kind is reserved for the tower', () => {
     expect(recorded.milestone.status).toBe('passed');
   });
 });
+
+describe('a passed final milestone whose pass no longer holds', () => {
+  async function finalOnly(validation: {
+    readonly scrutiny?: boolean;
+    readonly userTesting?: boolean;
+    readonly commands?: readonly string[];
+  }): Promise<string> {
+    await store.draftObjective({
+      title: 'Ship',
+      goal: 'g',
+      definitionOfDone: ['d'],
+      milestones: [{ title: 'Core', validation }],
+    });
+    await store.plan([{ title: 'Core work', scope: ['src/core/**'], milestone: 'MS1' }]);
+    await store.requestObjectiveApproval();
+    await store.approveObjective('human');
+    await mutateState((state) => {
+      state.missions[0]!.status = 'merged';
+    });
+    const tip = await git(repo, 'rev-parse', 'main');
+    await store.startMilestoneValidation('MS1', tip);
+    return tip;
+  }
+
+  async function registerScrutiny(name: string, commit: string): Promise<void> {
+    await store.registerAgent({
+      name,
+      agentId: `agent-${name}`,
+      kind: 'validator',
+      milestoneId: 'MS1',
+      validationKind: 'scrutiny',
+      validatedCommit: commit,
+      spawnedAt: '2026-04-04T00:00:00.000Z',
+    });
+  }
+
+  it('turns a failed re-run on the tip into a plannable fix that completes on the next tip (F1)', async () => {
+    const tip = await finalOnly({ scrutiny: false, userTesting: false, commands: ['npm test'] });
+    await store.submitValidation('tower', { milestone: 'MS1', kind: 'commands', verdict: 'pass', validatedCommit: tip });
+    const rerun = await store.submitValidation('tower', {
+      milestone: 'MS1',
+      kind: 'commands',
+      verdict: 'fail',
+      failures: ['npm test exited 1'],
+      validatedCommit: tip,
+    });
+    expect(rerun.milestone.status).toBe('passed');
+    expect(rerun.message?.item.body).toContain(
+      'MS1 is the final milestone and no longer passes on this commit — plan a fix into it',
+    );
+    expect(rerun.message?.item.body).not.toContain('does not decide');
+    const refused = await store.completeObjective().catch((caught: unknown) => caught);
+    expect((refused as TowerObjectiveCompletionError).blocks).toEqual([
+      {
+        code: 'final-validation-failed',
+        detail: `final milestone MS1 failed commands on the base tip ${tip.slice(0, 7)} — plan a fix into MS1`,
+      },
+    ]);
+    await expect(store.startMilestoneValidation('MS1', tip)).rejects.toThrow(/already failed commands r2 on the base tip/);
+    const [fix] = await store.plan([{ title: 'Fix core', scope: ['src/core/**'], milestone: 'MS1' }]);
+    expect(fix).toMatchObject({ milestone: 'MS1', origin: 'fix', deps: [] });
+    const reopened = (await readState()).objective!.milestones[0]!;
+    expect(reopened.status).toBe('active');
+    expect(reopened.passedAt).toBeUndefined();
+    await mutateState((state) => {
+      state.missions[1]!.status = 'merged';
+    });
+    await commitFile(repo, 'src/core/fix.ts', 'export const fixed = true;\n', 'fix merged');
+    const fixed = await git(repo, 'rev-parse', 'main');
+    await store.startMilestoneValidation('MS1', fixed);
+    await store.submitValidation('tower', { milestone: 'MS1', kind: 'commands', verdict: 'pass', validatedCommit: fixed });
+    expect((await store.completeObjective()).status).toBe('completed');
+  });
+
+  it('accepts a fix after a late failing verdict follows a dead-validator restart (R2)', async () => {
+    const tip = await finalOnly({ userTesting: false });
+    await registerScrutiny('v1', tip);
+    await store.startMilestoneValidation('MS1', tip);
+    await registerScrutiny('v2', tip);
+    await store.submitValidation('v2', { milestone: 'MS1', kind: 'scrutiny', verdict: 'pass' });
+    const late = await store.submitValidation('v1', {
+      milestone: 'MS1',
+      kind: 'scrutiny',
+      verdict: 'fail',
+      failures: ['missed a regression'],
+    });
+    expect(late.milestone.status).toBe('passed');
+    expect(late.message?.item.body).toContain('no longer passes on this commit — plan a fix into it');
+    expect((await store.objectiveEvaluation()).completion.blocks.map((block) => block.code)).toEqual([
+      'final-validation-failed',
+    ]);
+    const [fix] = await store.plan([{ title: 'Fix regression', scope: ['src/fix/**'], milestone: 'MS1' }]);
+    expect(fix).toMatchObject({ milestone: 'MS1', origin: 'fix' });
+  });
+
+  it('accepts a fix into a stale final milestone but refuses one whose pass still holds', async () => {
+    const tip = await finalOnly({ scrutiny: false, userTesting: false, commands: ['npm test'] });
+    await store.submitValidation('tower', { milestone: 'MS1', kind: 'commands', verdict: 'pass', validatedCommit: tip });
+    const before = await readFile(store.abs(STATE_FILE), 'utf8');
+    await expect(store.plan([{ title: 'Late work', scope: ['src/late/**'], milestone: 'MS1' }])).rejects.toThrow(
+      /milestone MS1 "Core" already passed validation/,
+    );
+    expect(await readFile(store.abs(STATE_FILE), 'utf8')).toBe(before);
+    await commitFile(repo, 'moved.txt', 'moved\n', 'base moved');
+    expect((await store.objectiveEvaluation()).completion.blocks.map((block) => block.code)).toEqual([
+      'final-validation-stale',
+    ]);
+    const [late] = await store.plan([{ title: 'Late work', scope: ['src/late/**'], milestone: 'MS1' }]);
+    expect(late).toMatchObject({ milestone: 'MS1', origin: 'fix' });
+    expect((await readState()).objective!.milestones[0]!.status).toBe('active');
+  });
+});

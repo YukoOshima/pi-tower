@@ -57,6 +57,7 @@ import {
   estimateObjectiveRuns,
   evaluateObjective,
   finalMilestone,
+  finalPassBroken,
   findMilestone,
   isObjectiveOpen,
   isTerminalObjectiveStatus,
@@ -1670,7 +1671,10 @@ export class TowerStore {
     await this.appendLog(TOWER_NAME, action, details, MISSIONS_INDEX);
   }
 
-  async plan(input: readonly TowerPlanInput[]): Promise<readonly TowerMission[]> {
+  async plan(
+    input: readonly TowerPlanInput[],
+    settings: TowerValidationSettings = {},
+  ): Promise<readonly TowerMission[]> {
     if (input.length === 0) {
       throw new TowerProtocolError('TowerPlan needs at least one mission');
     }
@@ -1685,7 +1689,11 @@ export class TowerStore {
     return this.withStateLock(async () => {
       const state = await this.load();
       const startIndex = state.missions.length;
-      const placements = input.map((item) => planPlacement(state, item));
+      const baseTip =
+        state.objective !== undefined && input.some((item) => item.milestone !== undefined)
+          ? await branchTip(this.repoRoot, state.base)
+          : undefined;
+      const placements = input.map((item) => planPlacement(state, item, { baseTip, settings }));
 
       const missions: TowerMission[] = input.map((item, index) => {
         const n = startIndex + index + 1;
@@ -1765,6 +1773,7 @@ export class TowerStore {
       for (const placement of placements) {
         if (placement.milestone === undefined || !placement.reopens) continue;
         placement.milestone.status = 'active';
+        delete placement.milestone.passedAt;
         reactivated.add(placement.milestone.id);
       }
       const milestones = new Set(missions.flatMap((m) => (m.milestone === undefined ? [] : [m.milestone])));
@@ -3560,6 +3569,7 @@ export class TowerStore {
         throw new TowerProtocolError(`milestone ${milestone.id} is pending — its validation has not started`);
       }
       const validatedCommit = await this.validationCommitFor(state, callerName, input, milestone);
+      const baseTip = await branchTip(this.repoRoot, state.base);
       const round = nextValidationRound(milestone, input.kind);
       const date = new Date().toISOString();
       await mkdir(this.abs(VALIDATIONS_DIR), { recursive: true });
@@ -3620,7 +3630,15 @@ export class TowerStore {
             {
               to: TOWER_NAME,
               subject: validationResultSubject(milestone.id, record),
-              body: validationResultBody(objective, milestone, record, outcome),
+              body: validationResultBody(
+                objective,
+                milestone,
+                record,
+                outcome,
+                record.verdict === 'fail' &&
+                  record.validatedCommit === baseTip &&
+                  finalPassBroken(objective, milestone, baseTip, settings) === 'failed',
+              ),
               scope: milestone.id,
               action: 'validation-result',
             },
@@ -4079,12 +4097,17 @@ function validationResultBody(
   milestone: TowerMilestone,
   round: TowerValidationRound,
   outcome: TowerValidationOutcome,
+  finalBroken: boolean,
 ): string {
   const lines = [
     `Validation ${round.kind} round ${String(round.round)} of milestone ${milestone.id} "${milestone.title}" by ${round.validator}: ${round.verdict} on ${round.validatedCommit.slice(0, 7)}.`,
     `Milestone ${milestone.id} is now ${milestone.status}.`,
   ];
-  if (!outcome.counted) {
+  if (finalBroken) {
+    lines.push(
+      `${milestone.id} is the final milestone and no longer passes on this commit — plan a fix into it (TowerPlan milestone=${milestone.id}).`,
+    );
+  } else if (!outcome.counted) {
     lines.push(
       `This round was recorded but does not decide the milestone: it was ${outcome.previousStatus}${milestone.validationCommit === undefined ? '' : ` and validates ${milestone.validationCommit.slice(0, 7)}`}.`,
     );
