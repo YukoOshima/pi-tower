@@ -73,7 +73,7 @@ export interface PiWidgetUpdate {
   readonly placement: string | undefined;
 }
 
-export const DIALOG_METHODS: readonly string[] = ['select', 'confirm', 'input', 'editor'];
+const DIALOG_METHODS: readonly string[] = ['select', 'confirm', 'input', 'editor'];
 
 export const CANCEL_DIALOG: PiDialogAnswer = { cancelled: true };
 

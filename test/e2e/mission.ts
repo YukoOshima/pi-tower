@@ -6,8 +6,6 @@ import { listFiles, tryGit } from './workspace.ts';
 
 export type MissionRole = 'orchestrator' | 'worker' | 'reviewer' | 'validator';
 
-export const MISSION_ROLES: readonly MissionRole[] = ['orchestrator', 'worker', 'reviewer', 'validator'];
-
 export const MISSION_KEY = 'mission';
 export const MISSION_HEADER_START = 'Mission mode\n';
 export const MISSION_CONTROL_START = 'Mission Control\n## Models\n';
