@@ -1,7 +1,9 @@
+import { TOWER_OBJECTIVE_DEFAULTS } from '../../config/index.ts';
 import { TOWER_MAIN_AGENT_ONLY, TOWER_MERGE_DESCRIPTION } from '../../prompts/index.ts';
-import { isObjectiveOpen } from '../../protocol/index.ts';
+import { isObjectiveOpen, type TowerObjective } from '../../protocol/index.ts';
 import {
   isMainAgent,
+  objectiveSettingsOf,
   runTowerTool,
   type TowerCaller,
   type TowerTool,
@@ -48,15 +50,13 @@ export function createTowerMergeTool(
           after.missions.every(
             (mission) => mission.status === 'merged' || mission.status === 'abandoned',
           );
-        const teardownHint =
-          after.objective !== undefined && isObjectiveOpen(after.objective)
-            ? `Every mission is now merged or abandoned, but objective ${after.objective.id} is still ${after.objective.status} — validation, later milestones, or fix features follow; do not run TowerTeardown until the objective completes.`
-            : 'Every mission is now merged or abandoned — ready for TowerTeardown (branches and .tower/comms/ are kept; dirty worktrees are protected).';
         if (status === 'noop') {
           return {
             output: [
               `${args.branch} is a read-only survey with a zero-diff branch — mission marked merged, no git merge needed.`,
-              allClosed ? teardownHint : 'Continue with the remaining missions in Dependency Flow order.',
+              allClosed
+                ? allClosedHint(after.objective, host)
+                : 'Continue with the remaining missions in Dependency Flow order.',
             ].join('\n'),
           };
         }
@@ -72,7 +72,7 @@ export function createTowerMergeTool(
             'For each affected mission, follow the next structured refusal: TowerRebase while its worker is idle (or ask the worker to rebase mid-turn). Conflict-free rebase preserves review binding; real conflicts must be resolved before another merge.',
           );
         } else if (allClosed) {
-          lines.push(`The mission is now marked merged. ${teardownHint}`);
+          lines.push(`The mission is now marked merged. ${allClosedHint(after.objective, host)}`);
         } else {
           lines.push(
             'The mission is now marked merged. Continue with the remaining missions in Dependency Flow order.',
@@ -82,4 +82,14 @@ export function createTowerMergeTool(
       });
     },
   };
+}
+
+function allClosedHint(objective: TowerObjective | undefined, host: TowerToolHost): string {
+  if (objective === undefined || !isObjectiveOpen(objective)) {
+    return 'Every mission is now merged or abandoned — ready for TowerTeardown (branches and .tower/comms/ are kept; dirty worktrees are protected).';
+  }
+  const open = `Every mission is now merged or abandoned, but objective ${objective.id} is still ${objective.status}`;
+  return (objectiveSettingsOf(host).autoTeardown ?? TOWER_OBJECTIVE_DEFAULTS.autoTeardown)
+    ? `${open} — the autopilot validates the current milestone, and later milestones or fix features may follow. With objective.autoTeardown on, the autopilot also tears the worktrees down when the objective completes, so do not run TowerTeardown.`
+    : `${open} — validation, later milestones, or fix features follow; do not run TowerTeardown until the objective completes.`;
 }

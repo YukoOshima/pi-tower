@@ -250,7 +250,10 @@ describe('awaiting approval', () => {
     const { runner, tower } = setup({ autoApprove: true });
     await settle(runner);
     expect(await objectiveOf()).toMatchObject({ status: 'executing', approvedBy: 'auto' });
-    expect(tower.notices[0]!.text).toContain('was approved automatically');
+    expect(tower.notices[0]).toEqual({
+      text: 'Mission O1 "Ship" was approved automatically (autoApprove) — the autopilot starts executing it.',
+      level: 'info',
+    });
     expect(tower.calls).toContain('spawnWorker M1 ap-w-M1-1');
   });
 
@@ -263,7 +266,8 @@ describe('awaiting approval', () => {
     expect((await objectiveOf()).status).toBe('awaiting-approval');
     expect(tower.notices).toHaveLength(1);
     expect(tower.notices[0]).toMatchObject({ level: 'warning' });
-    expect(tower.notices[0]!.text).toMatch(/^Automatic approval of objective O1 "Ship" was refused: objective O1 cannot be approved — the first milestone MS1/);
+    expect(tower.notices[0]!.text).toMatch(/^Automatic approval of mission O1 "Ship" was refused: objective O1 cannot be approved — the first milestone MS1/);
+    expect(tower.notices[0]!.text).toContain('\nA human approval is needed.\n\nMission O1 "Ship" is ready for your approval.');
   });
 });
 

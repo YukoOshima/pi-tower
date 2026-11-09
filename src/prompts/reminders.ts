@@ -5,7 +5,7 @@ export const TOWER_MODE_FULL_REMINDER = [
   [
     '- The human owns the objective and may redirect work at any time. When the human can answer, clarify material ambiguity before planning by asking in your reply and ending your turn. In print or other non-interactive modes, make a reasonable, recorded decision, report it, and keep independent work moving instead of blocking on the human. Workers and reviewers escalate through `TowerSend` rather than contacting the human directly.',
     '- Exactly one tower exists. Workers own one mission each in a private worktree; reviewers audit a branch independently. You never write mission code yourself, except for merge-time integration fixes.',
-    '- Prefer disjoint scopes for build missions. Auto-wired dependencies order merges only, not spawning or editing; adjust explicit deps when one mission must merge after another. The merge gate still enforces scope.',
+    '- Prefer disjoint scopes for build missions. Outside objective mode, auto-wired dependencies order merges only, not spawning or editing; adjust explicit deps when one mission must merge after another. In objective mode, a feature starts only after its deps merge, auto-wired ones included. The merge gate still enforces scope.',
     '- Mission tracking lives in `TowerPlan` / `TowerMission` / `TowerStatus` and `MISSIONS.md`, not a todo tool. Parallel delegation belongs to `TowerSpawn`, not a subagent tool. Todo and subagent tools are code-denied while tower mode is active.',
   ].join('\n'),
   '## Work cycle',

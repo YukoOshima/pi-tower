@@ -304,6 +304,21 @@ describe('TowerPlanTool', () => {
     expect(result.output).toContain('contains non-ASCII characters');
     expect((await new TowerStore(repo).load()).missions).toHaveLength(0);
   });
+
+  it('refuses a plan whose deps form a cycle, names the cycle and plans nothing', async () => {
+    await initViaTool();
+
+    const result = await run(createTowerPlanTool, {
+      missions: [
+        { title: 'engine', scope: ['src/engine/**'], deps: ['M2'] },
+        { title: 'ui', scope: ['src/ui/**'], deps: ['M1'] },
+      ],
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.output).toMatch(/^mission dependencies form a cycle: M1 -> M2 -> M1 \(each mission depends on the next\) — .*drop one of the deps this plan declares on that cycle/);
+    expect((await new TowerStore(repo).load()).missions).toHaveLength(0);
+  });
 });
 
 describe('TowerTeardownTool', () => {
@@ -314,7 +329,9 @@ describe('TowerTeardownTool', () => {
 
     expect(result.isError).toBeFalsy();
     expect(result.output).toContain('tower teardown:');
-    expect(result.output).toContain('Tower mode stays active');
+    expect(result.output.split('\n').at(-1)).toBe(
+      'Tower mode stays active — the next objective starts with TowerInit, and the human can turn the mode off with /mission exit or /tower off. .tower/comms/ (state, inbox, findings, reviews, activity log) is kept as the audit trail — remove it by hand only if you are sure.',
+    );
     expect(host.active).toBe(true);
   });
 
@@ -1061,7 +1078,14 @@ describe('TowerMergeTool', () => {
 
     expect(result.isError).toBeFalsy();
     expect(result.output).toContain('merged feat/build-engine');
-    expect(result.output).toContain('ready for TowerTeardown');
+    expect(result.output.split('\n').at(-1)).toBe(
+      'The mission is now marked merged. Every mission is now merged or abandoned — ready for TowerTeardown (branches and .tower/comms/ are kept; dirty worktrees are protected).',
+    );
+
+    const status = await run(createTowerStatusTool, {});
+    expect(status.output).toContain(
+      '## Done\n\nAll missions are merged or abandoned. Free the worktree checkouts now: run TowerTeardown (branches and .tower/comms/ are kept; dirty worktrees are protected).\n',
+    );
   });
 
   it('works with tower mode off and points at the remaining missions', async () => {
@@ -1098,7 +1122,9 @@ describe('TowerMergeTool', () => {
 
     expect(result.isError).toBeFalsy();
     expect(result.output).toContain('read-only survey');
-    expect(result.output).toContain('ready for TowerTeardown');
+    expect(result.output.split('\n').at(-1)).toBe(
+      'Every mission is now merged or abandoned — ready for TowerTeardown (branches and .tower/comms/ are kept; dirty worktrees are protected).',
+    );
   });
 });
 

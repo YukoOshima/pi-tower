@@ -49,7 +49,7 @@ export function createTowerTeardownTool(
               : 'tower teardown:',
             ...report.map((line) => `- ${line}`),
             '',
-            'Tower mode stays active — the next objective starts with TowerInit, and the human can turn the mode off with /tower off. .tower/comms/ (state, inbox, findings, reviews, activity log) is kept as the audit trail — remove it by hand only if you are sure.',
+            'Tower mode stays active — the next objective starts with TowerInit, and the human can turn the mode off with /mission exit or /tower off. .tower/comms/ (state, inbox, findings, reviews, activity log) is kept as the audit trail — remove it by hand only if you are sure.',
           ].join('\n'),
         };
       });

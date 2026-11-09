@@ -11,7 +11,7 @@ import { createTowerStatusTool } from '../../src/tools/status/statusTool.ts';
 import { createTowerTaskOutputTool } from '../../src/tools/taskOutput/taskOutputTool.ts';
 import { createTowerTasksTool } from '../../src/tools/tasks/tasksTool.ts';
 import { createTowerTaskStopTool } from '../../src/tools/taskStop/taskStopTool.ts';
-import { createRepo, git, removeDir } from '../tower/fakes.ts';
+import { commitFile, createRepo, git, removeDir } from '../tower/fakes.ts';
 import { ObjectiveTestHost, executingObjective, validatingMilestone } from './objectiveHost.ts';
 
 let repo: string;
@@ -76,8 +76,34 @@ describe('TowerStatus with an objective', () => {
     expect(output).toContain(
       `- val-a (validator) — agent agent-1, validating MS1 scrutiny r1 on ${short} (worktree val-ms1-scrutiny-r1), model fake/default-model`,
     );
-    expect(output).toContain('do not run TowerTeardown until the objective completes');
+    expect(output).toContain(
+      '## Done\n\nAll missions are merged or abandoned, but objective O1 is still executing — the autopilot validates the current milestone, and later milestones or fix features may follow. With objective.autoTeardown on, the autopilot also tears the worktrees down when the objective completes, so do not run TowerTeardown.\n',
+    );
+    expect(output).not.toContain('do not run TowerTeardown until the objective completes');
     expect(output).not.toContain('Free the worktree checkouts now');
+  });
+
+  it('keeps the Done hint for a manual teardown while objective.autoTeardown is off', async () => {
+    await runningValidator();
+    host.settings = { ...host.settings, autoTeardown: false };
+
+    const output = await status();
+
+    expect(output).toContain(
+      '## Done\n\nAll missions are merged or abandoned, but objective O1 is still executing — validation, later milestones, or fix features follow; do not run TowerTeardown until the objective completes.\n',
+    );
+    expect(output).not.toContain('objective.autoTeardown');
+  });
+
+  it('keeps the plain Done hint once the objective is no longer open', async () => {
+    await runningValidator();
+    await store.blockObjective('the human stopped it');
+
+    const output = await status();
+
+    expect(output).toContain(
+      '## Done\n\nAll missions are merged or abandoned. Free the worktree checkouts now: run TowerTeardown (branches and .tower/comms/ are kept; dirty worktrees are protected).\n',
+    );
   });
 
   it('applies the configured skipped kinds to the objective block', async () => {
@@ -189,7 +215,58 @@ describe('TowerMerge with an open objective', () => {
 
     expect(result.isError).toBeFalsy();
     expect(result.output).toContain('read-only survey');
-    expect(result.output).toContain('objective O1 is still planning');
+    expect(result.output.split('\n').at(-1)).toBe(
+      'Every mission is now merged or abandoned, but objective O1 is still planning — the autopilot validates the current milestone, and later milestones or fix features may follow. With objective.autoTeardown on, the autopilot also tears the worktrees down when the objective completes, so do not run TowerTeardown.',
+    );
     expect(result.output).not.toContain('ready for TowerTeardown');
+  });
+
+  it('keeps the manual-teardown hint for a survey while objective.autoTeardown is off', async () => {
+    host.settings = { ...host.settings, autoTeardown: false };
+    await store.draftObjective({ title: 'Ship CSV export', milestones: [{ title: 'Data model' }] });
+    await store.plan([{ title: 'Survey engine', scope: ['src/engine/**'], kind: 'survey' }]);
+    await git(repo, 'branch', 'feat/survey-engine');
+    await store.updateMission('tower', 'M1', { status: 'completed' }, { silent: true });
+
+    const result = await createTowerMergeTool(host, ORCHESTRATOR).run({ branch: 'feat/survey-engine' }, CALL);
+
+    expect(result.isError).toBeFalsy();
+    expect(result.output.split('\n').at(-1)).toBe(
+      'Every mission is now merged or abandoned, but objective O1 is still planning — validation, later milestones, or fix features follow; do not run TowerTeardown until the objective completes.',
+    );
+  });
+
+  async function mergeableBuildUnderObjective(): Promise<void> {
+    await store.plan([{ title: 'Build engine', scope: ['src/engine/**'] }]);
+    await git(repo, 'checkout', '-b', 'feat/build-engine');
+    await commitFile(repo, 'src/engine/engine.ts', 'export const engine = 1;\n', 'engine work');
+    await git(repo, 'checkout', 'main');
+    await store.updateMission('tower', 'M1', { status: 'completed' }, { silent: true });
+    await store.submitReview('tower', { target: 'feat/build-engine', status: 'clean', merge: 'merge', findings: 'none', decision: 'ok' });
+    await store.draftObjective({ title: 'Ship CSV export', milestones: [{ title: 'Data model' }] });
+  }
+
+  it('says the autopilot validates and tears down when a build merge closes the last mission', async () => {
+    await mergeableBuildUnderObjective();
+
+    const result = await createTowerMergeTool(host, ORCHESTRATOR).run({ branch: 'feat/build-engine' }, CALL);
+
+    expect(result.isError).toBeFalsy();
+    expect(result.output).toContain('merged feat/build-engine');
+    expect(result.output.split('\n').at(-1)).toBe(
+      'The mission is now marked merged. Every mission is now merged or abandoned, but objective O1 is still planning — the autopilot validates the current milestone, and later milestones or fix features may follow. With objective.autoTeardown on, the autopilot also tears the worktrees down when the objective completes, so do not run TowerTeardown.',
+    );
+  });
+
+  it('keeps the manual-teardown hint for a build merge while objective.autoTeardown is off', async () => {
+    await mergeableBuildUnderObjective();
+    host.settings = { ...host.settings, autoTeardown: false };
+
+    const result = await createTowerMergeTool(host, ORCHESTRATOR).run({ branch: 'feat/build-engine' }, CALL);
+
+    expect(result.isError).toBeFalsy();
+    expect(result.output.split('\n').at(-1)).toBe(
+      'The mission is now marked merged. Every mission is now merged or abandoned, but objective O1 is still planning — validation, later milestones, or fix features follow; do not run TowerTeardown until the objective completes.',
+    );
   });
 });

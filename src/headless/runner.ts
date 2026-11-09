@@ -2,7 +2,7 @@ import { fileURLToPath } from 'node:url';
 
 import { TOWER_HUMAN_APPROVAL_MARKER } from '../protocol/objective.ts';
 import { piRunArgs, type HeadlessRunOptions } from './args.ts';
-import { TOWER_MODELS_COMMAND, towerModelLines } from './models.ts';
+import { TOWER_MODELS_COMMAND, towerModelLines, towerModelProblems } from './models.ts';
 import { isCommandError, noticeOf, PI_DIALOG_METHODS, recordField, stringField, type PiCommandResult, type PiEvent, type PiExit, type PiRpcOptions, type PiUiResponse } from './rpc.ts';
 import type { HeadlessFeature, HeadlessMilestone, HeadlessObjective, HeadlessSnapshot } from './state.ts';
 
@@ -392,12 +392,16 @@ class HeadlessRun {
       if (notice.level !== 'info') this.fail(`pi ${notice.level}: ${notice.text}`);
     }
     const replies = result.notices.filter((notice) => notice.level === 'info').map((notice) => notice.text);
-    const lines = replies.map((reply) => towerModelLines(reply)).find((described) => described !== undefined);
-    if (lines === undefined) {
+    const described = replies.flatMap((reply) => {
+      const lines = towerModelLines(reply);
+      return lines === undefined ? [] : [{ lines, problems: towerModelProblems(reply) }];
+    })[0];
+    if (described === undefined) {
       this.modelsUnavailable(replies.length === 0 ? `${TOWER_MODELS_COMMAND} gave no reply` : `the ${TOWER_MODELS_COMMAND} reply has no model table: ${replies.join(' ')}`);
       return;
     }
-    for (const line of lines) this.line(line);
+    for (const line of described.lines) this.line(line);
+    for (const problem of described.problems) this.fail(`model warning: ${problem}`);
   }
 
   private modelsUnavailable(reason: string): void {

@@ -4,6 +4,7 @@ import { TOWER_MODELS_COMMAND } from '../../src/headless/models.ts';
 import { commandNoticeOf, type PiCommandResult, type PiEvent, type PiExit, type PiNotice, type PiRpcOptions, type PiUiResponse } from '../../src/headless/rpc.ts';
 import type { HeadlessClock, HeadlessDeps, HeadlessPi, HeadlessSignal } from '../../src/headless/runner.ts';
 import { parseHeadlessSnapshot, type HeadlessSnapshot } from '../../src/headless/state.ts';
+import { TowerModels } from '../../src/tower/models.ts';
 import type { Json } from './harness.ts';
 
 export function snapshot(objective: Json | undefined, missions: readonly Json[] = []): HeadlessSnapshot {
@@ -32,6 +33,32 @@ export const MODEL_LINES: readonly string[] = [
   'worker model: openai/gpt-5.1-codex · thinking: pi default · source: --tower-worker-model',
   'reviewer model: openai/gpt-5.1 · thinking: low (configured) · source: env PI_TOWER_REVIEWER_MODEL',
   'validator model: openai/gpt-5.1 · thinking: low (inherited from reviewer) · source: inherited from reviewer',
+];
+
+export async function modelsReplyWithProblems(): Promise<string> {
+  const flags: Readonly<Record<string, string>> = {
+    'tower-worker-model': 'openai/gpt-5.1-codex',
+    'tower-reviewer-model': 'nowhere/missing-model',
+  };
+  const models = new TowerModels({ agentDir: '/nonexistent/pi-tower-agent', configDirName: '.pi', env: {}, getFlag: (name) => flags[name] });
+  await models.load({ cwd: '/nonexistent/pi-tower-repo', projectTrusted: false });
+  const registry = {
+    find: (provider: string): { readonly provider: string } | undefined => (provider === 'nowhere' ? undefined : { provider }),
+    hasConfiguredAuth: (model: { readonly provider: string }): boolean => model.provider !== 'openai',
+  };
+  return `Tower models\n${models.describe({ provider: 'fake', modelId: 'session-model' }, registry)}`;
+}
+
+export const PROBLEM_MODEL_LINES: readonly string[] = [
+  'orchestrator model: fake/session-model · thinking: pi default · source: session model',
+  'worker model: openai/gpt-5.1-codex · thinking: pi default · source: --tower-worker-model',
+  'reviewer model: nowhere/missing-model · thinking: pi default · source: --tower-reviewer-model',
+  'validator model: nowhere/missing-model · thinking: pi default · source: inherited from reviewer',
+];
+
+export const MODEL_PROBLEMS: readonly string[] = [
+  'worker: model "openai/gpt-5.1-codex" (set by --tower-worker-model) has no configured credentials for provider "openai" — run /login or set the provider\'s API key',
+  'reviewer: model "nowhere/missing-model" (set by --tower-reviewer-model) is not in pi\'s model registry — check the provider/modelId (pi --list-models shows them)',
 ];
 
 export class VirtualClock implements HeadlessClock {

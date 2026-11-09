@@ -5,7 +5,18 @@ import { formatElapsed, HEADLESS_EXIT, renderPlan, runHeadless } from '../../src
 import type { HeadlessSnapshot } from '../../src/headless/state.ts';
 import { TOWER_HUMAN_APPROVAL_MARKER } from '../../src/protocol/objective.ts';
 import { feature, milestone, objective, type Json } from './harness.ts';
-import { MODEL_LINES, runOptions, snapshot, stubRun, type StateScript, type StubPi, type StubReaction } from './stubs.ts';
+import {
+  MODEL_LINES,
+  MODEL_PROBLEMS,
+  PROBLEM_MODEL_LINES,
+  modelsReplyWithProblems,
+  runOptions,
+  snapshot,
+  stubRun,
+  type StateScript,
+  type StubPi,
+  type StubReaction,
+} from './stubs.ts';
 
 const OBJECTIVE_COMMAND = '/tower objective --headless @/work/objective.md';
 const FEATURES = [feature('M1', 'MS1'), feature('M2', 'MS1'), feature('M3', 'MS2')];
@@ -452,6 +463,32 @@ describe('runHeadless', () => {
         `role models unavailable (${reason}) — continuing`,
       ]);
       expect(run.errors).toEqual([]);
+    });
+
+    it('warns on stderr about each problem the /tower models reply lists, right after the role lines, and still hands over the objective', async () => {
+      const reply = await modelsReplyWithProblems();
+      const output: string[] = [];
+      const record = (stream: string) => (line: string): void => {
+        output.push(`${stream} ${plain([line])[0] ?? ''}`);
+      };
+      const run = stubRun(
+        (pi, state) => {
+          towerOn(pi, state);
+          drafts(pi, state);
+          executes(pi, state);
+          pi.reactions['/tower models'] = { notices: [{ level: 'info', text: reply }] };
+        },
+        { output: { info: record('stdout'), error: record('stderr') } },
+      );
+      expect(await runHeadless(runOptions({ autoApprove: true }), run.deps)).toBe(HEADLESS_EXIT.completed);
+      expect(run.pi().commands).toEqual(['/tower on', '/tower models', OBJECTIVE_COMMAND, '/tower approve --auto']);
+      expect(output.slice(output.indexOf('stdout > /tower models'), output.indexOf(`stdout > ${OBJECTIVE_COMMAND}`))).toEqual([
+        'stdout > /tower models',
+        ...PROBLEM_MODEL_LINES.map((line) => `stdout ${line}`),
+        ...MODEL_PROBLEMS.map((problem) => `stderr model warning: ${problem}`),
+      ]);
+      expect(output.filter((line) => line.startsWith('stderr '))).toEqual(MODEL_PROBLEMS.map((problem) => `stderr model warning: ${problem}`));
+      expect(output.at(-1)).toBe('stdout objective O1 "Ship the widget" completed');
     });
 
     it('reports a warning that comes with the models reply and still prints the role models', async () => {

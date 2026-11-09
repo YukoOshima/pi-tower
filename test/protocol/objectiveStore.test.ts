@@ -1259,6 +1259,26 @@ describe('dependencies across milestones', () => {
     expect(await readFile(store.abs(STATE_FILE), 'utf8')).toBe(before);
   });
 
+  it('refuses a dependency cycle between features of one milestone and changes nothing', async () => {
+    await twoMilestones();
+    const before = [
+      await readFile(store.abs(STATE_FILE), 'utf8'),
+      await readFile(store.abs('.tower/comms/MISSIONS.md'), 'utf8'),
+      await activityLog(),
+    ];
+    await expect(
+      store.plan([
+        { title: 'A parser', scope: ['src/a-parser/**'], milestone: 'MS1', deps: ['M4'] },
+        { title: 'A printer', scope: ['src/a-printer/**'], milestone: 'MS1', deps: ['M3'] },
+      ]),
+    ).rejects.toThrow(/^mission dependencies form a cycle: M3 -> M4 -> M3 \(each mission depends on the next\)/);
+    expect([
+      await readFile(store.abs(STATE_FILE), 'utf8'),
+      await readFile(store.abs('.tower/comms/MISSIONS.md'), 'utf8'),
+      await activityLog(),
+    ]).toEqual(before);
+  });
+
   it('keeps dependencies onto earlier milestones and serializes cross-milestone overlaps by milestone order', async () => {
     await twoMilestones();
     const [later] = await store.plan([

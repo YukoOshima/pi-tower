@@ -87,6 +87,13 @@ describe('tower mode reminder texts', () => {
     expect(TOWER_MODE_FULL_REMINDER).not.toMatch(/goal/i);
   });
 
+  it('limits the merge-only reading of auto-wired dependencies to work outside objective mode', () => {
+    expect(TOWER_MODE_FULL_REMINDER).toContain(
+      '- Prefer disjoint scopes for build missions. Outside objective mode, auto-wired dependencies order merges only, not spawning or editing; adjust explicit deps when one mission must merge after another. In objective mode, a feature starts only after its deps merge, auto-wired ones included. The merge gate still enforces scope.',
+    );
+    expect(TOWER_MODE_FULL_REMINDER).not.toMatch(/scopes for build missions\. Auto-wired dependencies order merges only/);
+  });
+
   it('keeps the numbered work cycle intact', () => {
     const steps = [
       '1. **Initialize and plan.**',

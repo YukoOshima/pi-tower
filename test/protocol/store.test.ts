@@ -22,7 +22,10 @@ import { promisify } from 'node:util';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
+  ACTIVITY_LOG,
   MAX_REVIEW_ROUNDS,
+  MISSIONS_DIR,
+  MISSIONS_INDEX,
   STATE_FILE,
   TowerProtocolError,
   TowerStore,
@@ -851,6 +854,129 @@ describe('plan', () => {
     await expect(
       store.plan([{ title: 'a', scope: ['src/a/**'], deps: ['M9'] }]),
     ).rejects.toThrow(/depends on unknown mission "M9"/);
+  });
+
+  describe('dependency cycles', () => {
+    async function commsSnapshot(): Promise<Record<string, string>> {
+      const missionFiles = await readdir(store.abs(MISSIONS_DIR)).catch(() => []);
+      return {
+        state: await readFile(store.abs(STATE_FILE), 'utf8'),
+        index: await readFile(store.abs(MISSIONS_INDEX), 'utf8'),
+        log: await readFile(store.abs(ACTIVITY_LOG), 'utf8'),
+        missionFiles: missionFiles.sort().join('\n'),
+      };
+    }
+
+    function handMission(
+      id: string,
+      title: string,
+      scope: string,
+      deps: string[],
+      status: TowerMission['status'] = 'planned',
+    ): TowerMission {
+      const slug = title.replaceAll(' ', '-');
+      return {
+        id,
+        title,
+        slug,
+        kind: 'build',
+        scope: [scope],
+        branch: `feat/${slug}`,
+        worktree: `wt-${id.slice(1)}`,
+        deps,
+        status,
+        tasks: [],
+        notes: [],
+        blockers: [],
+      };
+    }
+
+    it('refuses a cycle inside one batch, names it with the fix, and writes nothing', async () => {
+      const before = await commsSnapshot();
+      const refusal = store.plan([
+        { title: 'engine', scope: ['src/engine/**'], deps: ['M2'] },
+        { title: 'ui', scope: ['src/ui/**'], deps: ['M1'] },
+      ]);
+      await expect(refusal).rejects.toThrow(TowerProtocolError);
+      await expect(refusal).rejects.toThrow(
+        'mission dependencies form a cycle: M1 -> M2 -> M1 (each mission depends on the next) — every mission on it waits for another one to merge first, so none of them could ever start or merge; drop one of the deps this plan declares on that cycle, keeping a dep only where a mission needs the other\'s merged code (missions that need each other belong in one mission), then plan again',
+      );
+      expect(await commsSnapshot()).toEqual(before);
+      expect((await store.load()).missions).toHaveLength(0);
+    });
+
+    it('names a longer cycle in dependency order, starting at its first mission in the batch', async () => {
+      await expect(
+        store.plan([
+          { title: 'parser', scope: ['src/parser/**'], deps: ['M2'] },
+          { title: 'checker', scope: ['src/checker/**'], deps: ['M3'] },
+          { title: 'printer', scope: ['src/printer/**'], deps: ['M1'] },
+        ]),
+      ).rejects.toThrow(/form a cycle: M1 -> M2 -> M3 -> M1 \(/);
+      await expect(
+        store.plan([
+          { title: 'parser', scope: ['src/parser/**'] },
+          { title: 'checker', scope: ['src/checker/**'], deps: ['M1', 'M3'] },
+          { title: 'printer', scope: ['src/printer/**'], deps: ['M2'] },
+        ]),
+      ).rejects.toThrow(/form a cycle: M2 -> M3 -> M2 \(/);
+      expect((await store.load()).missions).toHaveLength(0);
+    });
+
+    it('refuses a self-dependency, in the first batch and in a later one', async () => {
+      await expect(
+        store.plan([{ title: 'engine', scope: ['src/engine/**'], deps: ['M1'] }]),
+      ).rejects.toThrow(
+        'mission M1 depends on itself (M1 -> M1) — it would wait for its own merge, so it could never start or merge; remove M1 from its deps and plan again',
+      );
+
+      await store.plan([{ title: 'engine', scope: ['src/engine/**'] }]);
+      const before = await commsSnapshot();
+      await expect(
+        store.plan([{ title: 'ui', scope: ['src/ui/**'], deps: ['M1', 'M2'] }]),
+      ).rejects.toThrow(/mission M2 depends on itself \(M2 -> M2\)/);
+      expect(await commsSnapshot()).toEqual(before);
+    });
+
+    it('refuses a cycle that runs through an existing open mission and writes nothing', async () => {
+      await spliceMissionIntoState(handMission('M1', 'legacy waits', 'src/legacy/**', ['M2']));
+      const before = await commsSnapshot();
+
+      await expect(
+        store.plan([{ title: 'new needs legacy', scope: ['src/new/**'], deps: ['M1'] }]),
+      ).rejects.toThrow(/form a cycle: M2 -> M1 -> M2 \(each mission depends on the next\)/);
+      expect(await commsSnapshot()).toEqual(before);
+    });
+
+    it('still accepts plans next to closed missions and cycles the plan does not touch', async () => {
+      await spliceMissionIntoState(handMission('M1', 'dropped', 'src/dropped/**', ['M2'], 'abandoned'));
+      const [settled] = await store.plan([{ title: 'after dropped', scope: ['src/after/**'], deps: ['M1'] }]);
+      expect(settled).toMatchObject({ id: 'M2', deps: ['M1'] });
+
+      await spliceMissionIntoState(handMission('M3', 'legacy a', 'src/la/**', ['M4']));
+      await spliceMissionIntoState(handMission('M4', 'legacy b', 'src/lb/**', ['M3']));
+      const [unrelated] = await store.plan([{ title: 'unrelated', scope: ['src/unrelated/**'], deps: ['M2'] }]);
+      expect(unrelated).toMatchObject({ id: 'M5', deps: ['M2'] });
+    });
+
+    it('never closes a cycle with an auto-added scope dependency', async () => {
+      const missions = await store.plan([
+        { title: 'outer', scope: ['src/a/**'], deps: ['M2'] },
+        { title: 'middle', scope: ['src/m/**'], deps: ['M3'] },
+        { title: 'inner', scope: ['src/a/b/**'] },
+      ]);
+      expect(missions.map((mission) => mission.deps)).toEqual([['M2'], ['M3'], []]);
+      expect(missions[2]!.notes).toEqual([]);
+
+      await spliceMissionIntoState(handMission('M4', 'legacy waits', 'src/legacy/**', ['M5']));
+      const [overlapping] = await store.plan([{ title: 'legacy part', scope: ['src/legacy/part/**'] }]);
+      expect(overlapping).toMatchObject({ id: 'M5', deps: [], notes: [] });
+
+      const [needsOuter] = await store.plan([{ title: 'needs outer', scope: ['src/n/**'], deps: ['M1'] }]);
+      const widened = await store.updateMission('tower', 'M1', { scope: ['src/a/**', 'src/n/**'] });
+      expect(needsOuter!.deps).toEqual(['M1']);
+      expect(widened.deps).toEqual(['M2']);
+    });
   });
 
   it('lets new missions reuse the scope of an already-merged mission', async () => {
