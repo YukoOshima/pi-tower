@@ -164,14 +164,11 @@ export function validationResultWake(input: ValidationResultWakeInput): string {
     return lines.join('\n');
   }
   lines.push(
-    `${capitalize(milestoneLabel(milestone))} has failed on this commit. Plan fix features into ${milestone.id} with TowerPlan — milestone="${milestone.id}" and origin="fix" on every item, one feature per failure or per tightly related group, each failure quoted in its tasks. Planning reopens the milestone; validation re-runs on the new base tip once the fixes merge.`,
+    `${capitalize(milestoneLabel(milestone))} failed on this commit. Fix features are planned from the validation-failed wake (it carries every failing round), not from this message; if fixes for these failures are already planned, do nothing.`,
   );
   if (pending.length > 0) {
-    lines.push(
-      `Still running on this commit: ${pending.join(', ')} — their failures, if any, arrive separately; plan those into ${milestone.id} as well.`,
-    );
+    lines.push(`Still running on this commit: ${pending.join(', ')} — their results arrive separately.`);
   }
-  lines.push('Then end your turn.');
   return lines.join('\n');
 }
 

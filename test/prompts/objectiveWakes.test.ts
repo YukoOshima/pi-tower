@@ -100,16 +100,20 @@ function allTexts(): readonly string[] {
 }
 
 describe('validationResultWake', () => {
-  it('reports a failed round with its failures and the fix step', () => {
+  it('reports a failed round informationally and defers fix planning to the validation-failed wake', () => {
     const text = validationResultWake({ objective: OBJECTIVE, milestone: MILESTONE, result: FAILED, pendingKinds: ['user-testing'] });
     expect(text.split('\n')[0]).toBe(
       'validation-result: milestone MS1 "Exporter core" — scrutiny round 2 by validator-ms1-scrutiny-r2: FAIL with 2 failures on c0ffee1 (objective O1 "CSV export").',
     );
     expect(text).toContain(`Report: ${FAILED.file ?? ''}`);
     expect(text).toContain('1. src/export.ts:42 drops the header row\n2. no test covers quoted fields');
-    expect(text).toContain('milestone="MS1" and origin="fix" on every item');
-    expect(text).toContain('Still running on this commit: user-testing — their failures, if any, arrive separately');
-    expect(text.endsWith('Then end your turn.')).toBe(true);
+    expect(text).toContain(
+      'Milestone MS1 "Exporter core" failed on this commit. Fix features are planned from the validation-failed wake (it carries every failing round), not from this message; if fixes for these failures are already planned, do nothing.',
+    );
+    expect(text.endsWith('Still running on this commit: user-testing — their results arrive separately.')).toBe(true);
+    expect(text).not.toContain('TowerPlan');
+    expect(text).not.toContain('origin="fix"');
+    expect(text).not.toContain('end your turn');
   });
 
   it('asks for nothing on a pass', () => {
