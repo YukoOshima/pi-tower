@@ -4,13 +4,7 @@ import {
   type TowerObjectiveSettings,
 } from '../config/index.ts';
 import type { TowerObjectiveSettingsView } from '../tools/index.ts';
-
-export interface TowerAutopilotSettings extends TowerObjectiveSettingsView {
-  readonly maxRunningAgents: number;
-  readonly watchdogIntervalMs: number;
-  readonly stallTimeoutMs: number;
-  readonly maxStallWakes: number;
-}
+import type { AutopilotRuntimeSettings } from './autopilot/index.ts';
 
 export function objectiveSettingValues(
   settings: TowerObjectiveSettings | undefined,
@@ -48,7 +42,7 @@ export function objectiveSettingsView(values: TowerObjectiveSettingValues): Towe
 export function autopilotSettings(
   values: TowerObjectiveSettingValues,
   maxRunningAgents: number,
-): TowerAutopilotSettings {
+): AutopilotRuntimeSettings {
   return {
     ...objectiveSettingsView(values),
     maxRunningAgents,

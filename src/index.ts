@@ -3,6 +3,8 @@ import { CONFIG_DIR_NAME, getAgentDir, type ExtensionAPI } from '@earendil-works
 import { TOWER_MODEL_ENV, TOWER_MODEL_FLAGS, TOWER_ROLES } from './config/index.ts';
 import { createObjectiveOrchestratorTools, createOrchestratorTools, toToolDefinition } from './tools/index.ts';
 import { createTowerAgentRuntime } from './tower/agentRuntime.ts';
+import { AutopilotRunner } from './tower/autopilot/index.ts';
+import { towerAutopilotEffects, towerAutopilotObservations } from './tower/autopilotHost.ts';
 import {
   TOWER_COMMAND_DESCRIPTION,
   commandUi,
@@ -30,6 +32,12 @@ export default function towerExtension(pi: ExtensionAPI): void {
     log,
     createRuntime: (owner) =>
       createTowerAgentRuntime(owner, { agentDir, maxRunningAgents: () => models.maxRunningAgents }),
+    createAutopilot: (owner) =>
+      new AutopilotRunner({
+        observations: towerAutopilotObservations(owner),
+        effects: towerAutopilotEffects(owner),
+        log,
+      }),
   });
   const observe = { onContext: controller.observe.bind(controller) };
 

@@ -70,12 +70,12 @@ import { BranchLeases } from './leases.ts';
 import { isForeignLiveOwner, isOwnerLive, isProcessAlive } from './liveness.ts';
 import { latestTowerModeRecord, type TowerModeRecord, type TowerSessionModel } from './modeRecord.ts';
 import { towerPrimaryModel, type TowerModels } from './models.ts';
-import {
-  autopilotSettings,
-  objectiveSettingValues,
-  objectiveSettingsView,
-  type TowerAutopilotSettings,
-} from './objectiveSettings.ts';
+import type {
+  AutopilotAgentObservation,
+  AutopilotAgentStatus,
+  AutopilotRuntimeSettings,
+} from './autopilot/index.ts';
+import { autopilotSettings, objectiveSettingValues, objectiveSettingsView } from './objectiveSettings.ts';
 import { selectReminderForContext } from './reminders.ts';
 import type {
   TowerAgentEvent,
@@ -149,20 +149,6 @@ export interface TowerAutopilot {
   stop(): void;
   tick(reason: string): Promise<void>;
   whenIdle(): Promise<void>;
-}
-
-export type TowerAutopilotAgentStatus =
-  | 'running'
-  | 'idle'
-  | 'completed'
-  | 'failed'
-  | 'timeout'
-  | 'stopped'
-  | 'unknown';
-
-export interface TowerAutopilotAgent {
-  readonly status: TowerAutopilotAgentStatus;
-  readonly stopReason?: string;
 }
 
 export interface TowerControllerOptions {
@@ -337,7 +323,7 @@ export class TowerController implements TowerToolHost {
     return objectiveSettingsView(objectiveSettingValues(this.models?.objectiveSettings));
   }
 
-  autopilotSettings(): TowerAutopilotSettings {
+  autopilotSettings(): AutopilotRuntimeSettings {
     return autopilotSettings(
       objectiveSettingValues(this.models?.objectiveSettings),
       this.rateLimitSnapshot().budget,
@@ -424,7 +410,7 @@ export class TowerController implements TowerToolHost {
     return this.runtimeInstance?.get(id) ?? this.retainedOutput(id);
   }
 
-  autopilotAgent(agentId: string): TowerAutopilotAgent | undefined {
+  autopilotAgent(agentId: string): AutopilotAgentObservation | undefined {
     const runtime = this.runtime;
     if (runtime === undefined) return { status: 'unknown' };
     const live = runtime.get(agentId);
@@ -1224,12 +1210,12 @@ function validatorWorktrees(state: TowerState): { readonly agentId: string; read
   );
 }
 
-function observedAgent(info: TowerAgentInfo, disposed: boolean): TowerAutopilotAgent {
+function observedAgent(info: TowerAgentInfo, disposed: boolean): AutopilotAgentObservation {
   const status = observedStatus(info, disposed);
   return info.stopReason === undefined ? { status } : { status, stopReason: info.stopReason };
 }
 
-function observedStatus(info: TowerAgentInfo, disposed: boolean): TowerAutopilotAgentStatus {
+function observedStatus(info: TowerAgentInfo, disposed: boolean): AutopilotAgentStatus {
   if (info.status === 'running' || info.windingDown) return disposed ? 'stopped' : 'running';
   switch (info.status) {
     case 'idle':

@@ -1,50 +1,41 @@
-import type { TowerState } from '../protocol/index.ts';
-import { createOrchestratorOperations, type TowerToolResult, type TowerValidatorKind } from '../tools/index.ts';
+import { createOrchestratorOperations, type TowerToolResult } from '../tools/index.ts';
+import type { AutopilotEffects, AutopilotObservations, EffectResult } from './autopilot/index.ts';
 import type { TowerController } from './controller.ts';
 
 const DETAIL_MAX_CHARS = 300;
 
-export type TowerEffectResult =
-  | { readonly ok: true; readonly detail?: string }
-  | { readonly ok: false; readonly error: string };
-
-export function towerAutopilotObservations(controller: TowerController) {
+export function towerAutopilotObservations(controller: TowerController): AutopilotObservations {
   return {
-    now: (): number => Date.now(),
+    now: () => Date.now(),
     store: () => controller.store(),
     settings: () => controller.autopilotSettings(),
-    agent: (agentId: string) => controller.autopilotAgent(agentId),
-    orchestratorBusy: (): boolean => controller.orchestratorBusy(),
-    headless: (state: TowerState): boolean => state.objectiveMode === 'headless',
-    totalCostUsd: (): number => controller.totalCostUsd(),
+    agent: (agentId) => controller.autopilotAgent(agentId),
+    orchestratorBusy: () => controller.orchestratorBusy(),
+    headless: (state) => state.objectiveMode === 'headless',
+    totalCostUsd: () => controller.totalCostUsd(),
   };
 }
 
-export function towerAutopilotEffects(controller: TowerController) {
+export function towerAutopilotEffects(controller: TowerController): AutopilotEffects {
   const operations = createOrchestratorOperations(controller);
   return {
-    spawnWorker: (missionId: string, name: string): Promise<TowerEffectResult> =>
-      effect(() => operations.spawnWorker(missionId, name)),
-    respawnWorker: (missionId: string, name: string, reason: string): Promise<TowerEffectResult> =>
-      effect(() => operations.spawnWorker(missionId, name, reason)),
-    resumeWorker: (agentName: string, prompt: string): Promise<TowerEffectResult> =>
-      effect(() => operations.resume(agentName, prompt)),
-    spawnReviewer: (missionId: string, name: string): Promise<TowerEffectResult> =>
-      effect(() => operations.spawnReviewer(missionId, name)),
-    rebase: (missionId: string): Promise<TowerEffectResult> => effect(() => operations.rebase(missionId)),
-    merge: (missionId: string): Promise<TowerEffectResult> => effect(() => operations.merge(missionId)),
-    spawnValidator: (milestoneId: string, kind: TowerValidatorKind, name: string): Promise<TowerEffectResult> =>
-      effect(() => operations.spawnValidator(milestoneId, kind, name)),
-    wakeOrchestrator: (text: string): void => {
+    spawnWorker: (missionId, name) => effect(() => operations.spawnWorker(missionId, name)),
+    respawnWorker: (missionId, name, reason) => effect(() => operations.spawnWorker(missionId, name, reason)),
+    resumeWorker: (agentName, prompt) => effect(() => operations.resume(agentName, prompt)),
+    spawnReviewer: (missionId, name) => effect(() => operations.spawnReviewer(missionId, name)),
+    rebase: (missionId) => effect(() => operations.rebase(missionId)),
+    merge: (missionId) => effect(() => operations.merge(missionId)),
+    spawnValidator: (milestoneId, kind, name) => effect(() => operations.spawnValidator(milestoneId, kind, name)),
+    wakeOrchestrator: (text) => {
       controller.wakeOrchestrator(text);
     },
-    notifyHuman: (text: string, level: 'info' | 'warning' | 'error'): void => {
+    notifyHuman: (text, level) => {
       controller.notify(text, level);
     },
   };
 }
 
-async function effect(execute: () => Promise<TowerToolResult>): Promise<TowerEffectResult> {
+async function effect(execute: () => Promise<TowerToolResult>): Promise<EffectResult> {
   try {
     const result = await execute();
     return result.isError === true ? { ok: false, error: result.output } : { ok: true, detail: summary(result.output) };
