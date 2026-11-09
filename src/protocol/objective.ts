@@ -5,6 +5,7 @@ import type {
   TowerMilestoneValidationSpec,
   TowerMission,
   TowerObjective,
+  TowerObjectiveAutopilotState,
   TowerObjectiveLimits,
   TowerObjectiveStatus,
   TowerState,
@@ -767,4 +768,33 @@ export function applyObjectiveUpdate(
     delete next.blockedReason;
   }
   return { objective: next, contractChanged, changes, reopened };
+}
+
+export interface TowerObjectiveAutopilotPatch {
+  readonly progressKey?: string;
+  readonly progressAt?: string;
+  readonly stallWakes?: number;
+  readonly addWakeKeys?: readonly string[];
+}
+
+export function applyAutopilotPatch(
+  objective: TowerObjective,
+  patch: TowerObjectiveAutopilotPatch,
+): TowerObjectiveAutopilotState {
+  if (
+    patch.stallWakes !== undefined &&
+    (!Number.isSafeInteger(patch.stallWakes) || patch.stallWakes < 0)
+  ) {
+    throw new TowerProtocolError(
+      `autopilot stallWakes must be a non-negative integer, got ${String(patch.stallWakes)}`,
+    );
+  }
+  const autopilot = (objective.autopilot ??= { stallWakes: 0, wakeKeys: [] });
+  if (patch.progressKey !== undefined) autopilot.progressKey = patch.progressKey;
+  if (patch.progressAt !== undefined) autopilot.progressAt = patch.progressAt;
+  if (patch.stallWakes !== undefined) autopilot.stallWakes = patch.stallWakes;
+  for (const key of patch.addWakeKeys ?? []) {
+    if (!autopilot.wakeKeys.includes(key)) autopilot.wakeKeys.push(key);
+  }
+  return autopilot;
 }

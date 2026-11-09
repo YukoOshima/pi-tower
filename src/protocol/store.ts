@@ -48,16 +48,22 @@ import {
 import { evaluateMissionGate } from './missionGate.ts';
 import type { TowerMissionGateResult, TowerMissionGitObservations } from './missionGate.ts';
 import {
+  applyAutopilotPatch,
   applyObjectiveUpdate,
   buildObjective,
   currentMilestone,
   estimateObjectiveRuns,
   evaluateObjective,
+  findMilestone,
   isTerminalObjectiveStatus,
+  milestoneMissions,
   objectiveApprovalProblems,
+  requiredValidationKinds,
+  sortedMilestones,
   TowerObjectiveCompletionError,
 } from './objective.ts';
 import type {
+  TowerObjectiveAutopilotPatch,
   TowerObjectiveDraftInput,
   TowerObjectiveEvaluation,
   TowerObjectiveUpdateInput,
@@ -97,9 +103,11 @@ import type {
   TowerMissionKind,
   TowerMissionStatus,
   TowerObjective,
+  TowerObjectiveAutopilotState,
   TowerReviewInfo,
   TowerRosterEntry,
   TowerState,
+  TowerValidationKind,
 } from './types.ts';
 
 export { TowerProtocolError } from './errors.ts';
@@ -1364,6 +1372,122 @@ export class TowerStore {
   async objectiveEvaluation(settings: TowerValidationSettings = {}): Promise<TowerObjectiveEvaluation> {
     const state = await this.load();
     return evaluateObjective(state, await branchTip(this.repoRoot, state.base), settings);
+  }
+
+  async activateNextMilestone(): Promise<TowerMilestone | undefined> {
+    return this.withStateLock(async () => {
+      const state = await this.load();
+      const objective = this.requireExecutingObjective(state, 'activate a milestone');
+      const activated = this.activateCurrentMilestoneLocked(objective, new Date().toISOString());
+      if (activated === undefined) return undefined;
+      await this.saveObjective(state, 'milestone.activate', {
+        objective: objective.id,
+        milestone: activated.id,
+      });
+      return activated;
+    });
+  }
+
+  async startMilestoneValidation(
+    milestoneId: string,
+    commit: string,
+    settings: TowerValidationSettings = {},
+  ): Promise<{
+    readonly milestone: TowerMilestone;
+    readonly commit: string;
+    readonly requiredKinds: readonly TowerValidationKind[];
+  }> {
+    return this.withStateLock(async () => {
+      const state = await this.load();
+      const objective = this.requireExecutingObjective(state, 'start a validation');
+      const milestone = findMilestone(objective, milestoneId);
+      if (milestone === undefined) {
+        throw new TowerProtocolError(`objective ${objective.id} has no milestone "${milestoneId}"`);
+      }
+      if (milestone.status === 'pending' || milestone.status === 'blocked') {
+        throw new TowerProtocolError(
+          `milestone ${milestone.id} is ${milestone.status} — only an active, validating, failed or passed milestone can be validated`,
+        );
+      }
+      const earlier = sortedMilestones(objective).filter(
+        (other) => other.order < milestone.order && other.status !== 'passed',
+      );
+      if (earlier.length > 0) {
+        throw new TowerProtocolError(
+          `milestone ${milestone.id} cannot be validated before ${earlier.map((other) => other.id).join(', ')} passed`,
+        );
+      }
+      const features = milestoneMissions(state, milestone.id);
+      const open = features.filter(isOpenMission);
+      if (features.length === 0 || open.length > 0) {
+        throw new TowerProtocolError(
+          features.length === 0
+            ? `milestone ${milestone.id} has no features — plan them with TowerPlan(milestone=${milestone.id}) before validating it`
+            : `milestone ${milestone.id} still has open features (${open.map((mission) => `${mission.id} ${mission.status}`).join(', ')}) — validation starts once every feature is merged or abandoned`,
+        );
+      }
+      const resolved = await this.resolveCommit(commit);
+      const now = new Date().toISOString();
+      milestone.status = 'validating';
+      milestone.validationCommit = resolved;
+      delete milestone.passedAt;
+      const requiredKinds = requiredValidationKinds(objective, milestone, settings);
+      if (requiredKinds.length === 0) {
+        milestone.status = 'passed';
+        milestone.passedAt = now;
+      }
+      await this.saveObjective(state, 'milestone.validate', {
+        objective: objective.id,
+        milestone: milestone.id,
+        commit: resolved.slice(0, 7),
+        kinds: requiredKinds.length > 0 ? requiredKinds.join(',') : 'none',
+        status: milestone.status,
+      });
+      return { milestone, commit: resolved, requiredKinds };
+    });
+  }
+
+  async recordObjectiveUsage(deltaUsd: number): Promise<TowerObjective | undefined> {
+    if (!Number.isFinite(deltaUsd) || deltaUsd < 0) {
+      throw new TowerProtocolError(`objective usage must be a non-negative cost in USD, got ${String(deltaUsd)}`);
+    }
+    return this.withStateLock(async () => {
+      const state = await this.load();
+      const objective = state.objective;
+      if (objective === undefined || deltaUsd === 0) return objective;
+      objective.usage = { costUsd: (objective.usage?.costUsd ?? 0) + deltaUsd };
+      await this.save(state);
+      return objective;
+    });
+  }
+
+  async updateObjectiveAutopilot(
+    patch: TowerObjectiveAutopilotPatch,
+  ): Promise<TowerObjectiveAutopilotState> {
+    return this.withStateLock(async () => {
+      const state = await this.load();
+      const autopilot = applyAutopilotPatch(this.requireObjective(state), patch);
+      await this.save(state);
+      return autopilot;
+    });
+  }
+
+  private async resolveCommit(commit: string): Promise<string> {
+    try {
+      return await git(this.repoRoot, ['rev-parse', '--verify', '--quiet', `${commit.trim()}^{commit}`]);
+    } catch {
+      throw new TowerProtocolError(`"${commit}" does not name a commit in this repository`);
+    }
+  }
+
+  private requireExecutingObjective(state: TowerState, action: string): TowerObjective {
+    const objective = this.requireObjective(state);
+    if (objective.status !== 'executing') {
+      throw new TowerProtocolError(
+        `objective ${objective.id} is ${objective.status} — cannot ${action} unless it is executing`,
+      );
+    }
+    return objective;
   }
 
   private requireObjective(state: TowerState): TowerObjective {

@@ -270,3 +270,101 @@ describe('objective lifecycle', () => {
     await expect(store.blockObjective('late')).rejects.toThrow(/already completed/);
   });
 });
+
+describe('milestone progression and bookkeeping', () => {
+  it('activates the current milestone only when it is pending and the objective executes', async () => {
+    await draftWithFeature();
+    await expect(store.activateNextMilestone()).rejects.toThrow(/O1 is planning — cannot activate a milestone/);
+    await store.requestObjectiveApproval();
+    await store.approveObjective('human');
+    const before = await readFile(store.abs(STATE_FILE), 'utf8');
+    expect(await store.activateNextMilestone()).toBeUndefined();
+    expect(await readFile(store.abs(STATE_FILE), 'utf8')).toBe(before);
+    await mutateState((state) => {
+      state.objective!.milestones[0]!.status = 'passed';
+    });
+    const activated = await store.activateNextMilestone();
+    expect(activated).toMatchObject({ id: 'MS2', status: 'active', startedAt: expect.any(String) });
+    expect((await readState()).objective!.milestones[1]!.status).toBe('active');
+    expect(await activityLog()).toContain('milestone.activate objective=O1 milestone=MS2');
+  });
+
+  it('starts a validation on a resolved commit once every feature of the milestone is closed', async () => {
+    await approvedObjective();
+    const tip = await git(repo, 'rev-parse', 'main');
+    await expect(store.startMilestoneValidation('MS1', tip)).rejects.toThrow(/still has open features \(M1 planned\)/);
+    await mutateState((state) => {
+      state.missions[0]!.status = 'merged';
+    });
+    await expect(store.startMilestoneValidation('MS9', tip)).rejects.toThrow(/no milestone "MS9"/);
+    await expect(store.startMilestoneValidation('MS2', tip)).rejects.toThrow(/MS2 is pending/);
+    await expect(store.startMilestoneValidation('MS1', 'no-such-ref')).rejects.toThrow(/does not name a commit/);
+    const started = await store.startMilestoneValidation('MS1', tip.slice(0, 8));
+    expect(started.commit).toBe(tip);
+    expect(started.requiredKinds).toEqual(['scrutiny', 'user-testing']);
+    expect(started.milestone).toMatchObject({ status: 'validating', validationCommit: tip });
+    expect((await readState()).objective!.milestones[0]).toMatchObject({ status: 'validating', validationCommit: tip });
+    expect(await activityLog()).toContain(
+      `milestone.validate objective=O1 milestone=MS1 commit=${tip.slice(0, 7)} kinds=scrutiny,user-testing status=validating`,
+    );
+  });
+
+  it('passes a milestone immediately when no validation kind is required', async () => {
+    await approvedObjective();
+    const tip = await git(repo, 'rev-parse', 'main');
+    await mutateState((state) => {
+      state.missions[0]!.status = 'merged';
+    });
+    const started = await store.startMilestoneValidation('MS1', tip, { skipScrutiny: true, skipUserTesting: true });
+    expect(started.requiredKinds).toEqual([]);
+    expect(started.milestone).toMatchObject({ status: 'passed', validationCommit: tip, passedAt: expect.any(String) });
+    expect(await activityLog()).toContain('kinds=none status=passed');
+  });
+
+  it('refuses to validate a later milestone before the earlier ones passed, or one without features', async () => {
+    await approvedObjective();
+    const tip = await git(repo, 'rev-parse', 'main');
+    await mutateState((state) => {
+      state.missions[0]!.status = 'merged';
+      state.missions[0]!.milestone = 'MS2';
+      state.objective!.milestones[1]!.status = 'active';
+    });
+    await expect(store.startMilestoneValidation('MS2', tip)).rejects.toThrow(/before MS1 passed/);
+    await expect(store.startMilestoneValidation('MS1', tip)).rejects.toThrow(/MS1 has no features/);
+  });
+
+  it('records usage only while an objective exists', async () => {
+    const before = await readFile(store.abs(STATE_FILE), 'utf8');
+    expect(await store.recordObjectiveUsage(1.5)).toBeUndefined();
+    expect(await readFile(store.abs(STATE_FILE), 'utf8')).toBe(before);
+    await draftWithFeature();
+    await expect(store.recordObjectiveUsage(-1)).rejects.toThrow(/non-negative cost/);
+    await expect(store.recordObjectiveUsage(Number.NaN)).rejects.toThrow(/non-negative cost/);
+    await store.recordObjectiveUsage(0.25);
+    await store.recordObjectiveUsage(0.5);
+    expect((await readState()).objective?.usage).toEqual({ costUsd: 0.75 });
+  });
+
+  it('patches the autopilot memory and deduplicates wake keys', async () => {
+    await expect(store.updateObjectiveAutopilot({ stallWakes: 1 })).rejects.toThrow(/no objective/);
+    await draftWithFeature();
+    expect(await store.updateObjectiveAutopilot({ addWakeKeys: ['plan-milestone:MS1:0'] })).toEqual({
+      stallWakes: 0,
+      wakeKeys: ['plan-milestone:MS1:0'],
+    });
+    const patched = await store.updateObjectiveAutopilot({
+      progressKey: 'abc',
+      progressAt: '2026-03-03T00:00:00.000Z',
+      stallWakes: 2,
+      addWakeKeys: ['plan-milestone:MS1:0', 'stalled:O1:1'],
+    });
+    expect(patched).toEqual({
+      stallWakes: 2,
+      wakeKeys: ['plan-milestone:MS1:0', 'stalled:O1:1'],
+      progressKey: 'abc',
+      progressAt: '2026-03-03T00:00:00.000Z',
+    });
+    expect((await readState()).objective?.autopilot).toEqual(patched);
+    await expect(store.updateObjectiveAutopilot({ stallWakes: -1 })).rejects.toThrow(/non-negative integer/);
+  });
+});
