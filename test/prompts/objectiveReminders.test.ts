@@ -48,23 +48,39 @@ const reminderEntry = (kind: 'full' | 'sparse' | 'exit') => ({
 const assistant = { type: 'message', message: { role: 'assistant' } };
 
 describe('reminderObjectiveVariant', () => {
-  it('is set only while an objective mode is set and the objective is absent or non-terminal', () => {
-    expect(reminderObjectiveVariant(undefined)).toBeUndefined();
-    expect(reminderObjectiveVariant({})).toBeUndefined();
-    for (const status of STATUSES) {
-      expect(reminderObjectiveVariant({ objective: objective(status) }), status).toBeUndefined();
-    }
+  it('is the recorded mode while the objective is absent or non-terminal', () => {
     expect(reminderObjectiveVariant({ objectiveMode: 'headless' })).toBe('headless');
     expect(reminderObjectiveVariant({ objectiveMode: 'interactive' })).toBe('interactive');
     expect(
       STATUSES.map((status) => reminderObjectiveVariant({ objectiveMode: 'headless', objective: objective(status) })),
     ).toEqual(['headless', 'headless', 'headless', 'headless', undefined, undefined]);
   });
+
+  it('is interactive for a non-terminal objective without a recorded mode', () => {
+    expect(STATUSES.map((status) => reminderObjectiveVariant({ objective: objective(status) }))).toEqual([
+      'interactive',
+      'interactive',
+      'interactive',
+      'interactive',
+      undefined,
+      undefined,
+    ]);
+  });
+
+  it('is unset with neither an objective nor a recorded mode', () => {
+    expect(reminderObjectiveVariant(undefined)).toBeUndefined();
+    expect(reminderObjectiveVariant({})).toBeUndefined();
+  });
 });
 
 describe('selectReminderForContext with an objective', () => {
-  it('stays exactly the v0.1 reminder without an objective mode', () => {
-    for (const state of [undefined, {}, { objective: objective('executing') }] as TowerReminderObjectiveState[]) {
+  it('stays exactly the v0.1 reminder without an objective mode or an open objective', () => {
+    for (const state of [
+      undefined,
+      {},
+      { objective: objective('completed') },
+      { objective: objective('blocked') },
+    ] as TowerReminderObjectiveState[]) {
       expect(selectReminderForContext(true, [], 'user', state)).toEqual({ kind: 'full', text: TOWER_MODE_FULL_REMINDER });
       expect(selectReminderForContext(true, [reminderEntry('full'), assistant, assistant], 'custom', state)).toEqual({
         kind: 'sparse',
@@ -94,6 +110,21 @@ describe('selectReminderForContext with an objective', () => {
     expect(
       selectReminderForContext(true, [reminderEntry('full'), assistant], 'custom', { objectiveMode: 'headless' }),
     ).toBeUndefined();
+  });
+
+  it('adds the interactive playbook for an open objective drafted without a recorded mode', () => {
+    expect(selectReminderForContext(true, [], 'user', { objective: objective('planning') })).toEqual({
+      kind: 'full',
+      text: `${TOWER_MODE_FULL_REMINDER}\n\n${TOWER_OBJECTIVE_PLAYBOOK}`,
+    });
+    expect(
+      selectReminderForContext(true, [reminderEntry('full'), assistant, assistant], 'custom', {
+        objective: objective('executing'),
+      }),
+    ).toEqual({ kind: 'sparse', text: `${TOWER_MODE_SPARSE_REMINDER} ${TOWER_OBJECTIVE_SPARSE_REMINDER}` });
+    expect(
+      selectReminderForContext(false, [reminderEntry('full')], 'user', { objective: objective('paused') }),
+    ).toEqual({ kind: 'exit', text: TOWER_MODE_EXIT_REMINDER });
   });
 
   it('drops the playbook once the objective is terminal and never adds it to the exit reminder', () => {

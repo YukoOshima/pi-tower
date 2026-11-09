@@ -57,11 +57,10 @@ export function projectReminderHistory(
 export function reminderObjectiveVariant(
   state: TowerReminderObjectiveState | undefined,
 ): TowerObjectivePlaybookVariant | undefined {
-  const mode = state?.objectiveMode;
-  if (mode === undefined) return undefined;
   const objective = state?.objective;
   if (objective !== undefined && isTerminalObjectiveStatus(objective.status)) return undefined;
-  return mode;
+  if (objective === undefined && state?.objectiveMode === undefined) return undefined;
+  return state?.objectiveMode ?? 'interactive';
 }
 
 export function selectReminderForContext(
