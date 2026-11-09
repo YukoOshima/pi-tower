@@ -60,6 +60,37 @@ export interface PromptObjectiveContract {
   readonly acceptanceCommands: readonly string[];
 }
 
+export interface PromptObjectiveLimits {
+  readonly maxValidationRounds: number;
+  readonly maxFeatureAttempts?: number;
+  readonly maxWallTimeMs?: number;
+  readonly maxCostUsd?: number;
+}
+
+export interface PromptObjective extends PromptObjectiveContract {
+  readonly status: PromptObjectiveStatus;
+  readonly milestones: readonly PromptMilestone[];
+  readonly limits?: PromptObjectiveLimits;
+  readonly approvedBy?: 'human' | 'auto';
+  readonly approvalReason?: string;
+  readonly createdAt?: string;
+  readonly startedAt?: string;
+  readonly completedAt?: string;
+  readonly blockedReason?: string;
+  readonly pausedReason?: string;
+  readonly usage?: { readonly costUsd: number };
+}
+
+export interface PromptLiveAgent {
+  readonly name: string;
+  readonly kind: PromptAgentKind;
+  readonly missionId?: string;
+  readonly reviewTarget?: string;
+  readonly milestoneId?: string;
+  readonly validationKind?: PromptValidationKind;
+  readonly validationRound?: number;
+}
+
 export interface PromptMissionTask {
   readonly text: string;
   readonly done: boolean;
