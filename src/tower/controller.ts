@@ -75,6 +75,7 @@ import type {
   AutopilotAgentStatus,
   AutopilotRuntimeSettings,
 } from './autopilot/index.ts';
+import { autopilotDrivesObjective, isObjectiveAgent } from './autopilotEvents.ts';
 import { autopilotSettings, objectiveSettingValues, objectiveSettingsView } from './objectiveSettings.ts';
 import { selectReminderForContext } from './reminders.ts';
 import type {
@@ -191,6 +192,7 @@ export class TowerController implements TowerToolHost {
   private wakeFlushing = false;
   private wakeWaitingForIdle = false;
   private orchestratorCostUsd = 0;
+  private objectiveExecuting = false;
 
   constructor(options: TowerControllerOptions) {
     this.pi = options.pi;
@@ -460,6 +462,7 @@ export class TowerController implements TowerToolHost {
     } catch (error) {
       this.log.warn('tower: autopilot tick failed', { reason, error: errorText(error) });
     }
+    await this.loadedState();
   }
 
   wakeOrchestrator(text: string): void {
@@ -513,7 +516,9 @@ export class TowerController implements TowerToolHost {
 
   private async loadedState(): Promise<TowerState | undefined> {
     try {
-      return await this.store().load();
+      const state = await this.store().load();
+      this.objectiveExecuting = state.objective?.status === 'executing';
+      return state;
     } catch {
       return undefined;
     }
@@ -1118,19 +1123,40 @@ export class TowerController implements TowerToolHost {
       ...(event.summary === undefined ? {} : { result: event.summary }),
       undeliveredSteers: event.undeliveredSteers ?? [],
     });
-    try {
-      this.pi.sendMessage(
-        {
-          customType: TOWER_AGENT_NOTIFICATION_MESSAGE,
-          content: text,
-          display: true,
-          details: { agentId: event.agentId, taskId: event.taskId, status },
-        },
-        { triggerTurn: true, deliverAs: 'followUp' },
-      );
-    } catch (error) {
-      this.log.warn('tower: failed to deliver the agent notification', { error: errorText(error) });
+    const send = (triggerTurn: boolean): void => {
+      try {
+        this.pi.sendMessage(
+          {
+            customType: TOWER_AGENT_NOTIFICATION_MESSAGE,
+            content: text,
+            display: true,
+            details: { agentId: event.agentId, taskId: event.taskId, status },
+          },
+          { triggerTurn, deliverAs: 'followUp' },
+        );
+      } catch (error) {
+        this.log.warn('tower: failed to deliver the agent notification', { error: errorText(error) });
+      }
+    };
+    if (!this.autopilotRunning || !this.objectiveExecuting || !this.objectiveSettings().autopilot) {
+      send(true);
+      return;
     }
+    this.track(
+      this.agentEndTriggersTurn(event.agentId).then((trigger) => {
+        if (!this.shuttingDown) send(trigger);
+      }),
+    );
+  }
+
+  private async agentEndTriggersTurn(agentId: string): Promise<boolean> {
+    const state = await this.loadedState();
+    if (!this.autopilotHandles(state)) return true;
+    return !isObjectiveAgent(state, this.store().resolveAgent(state, agentId));
+  }
+
+  private autopilotHandles(state: TowerState | undefined): state is TowerState {
+    return this.autopilotRunning && autopilotDrivesObjective(state, this.objectiveSettings().autopilot);
   }
 
   private retireFinishedAgent(event: TowerAgentFinishedEvent): void {

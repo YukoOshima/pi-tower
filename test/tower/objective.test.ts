@@ -29,6 +29,7 @@ import {
   STATE_FILE,
   TowerStore,
   WORKTREES_DIR,
+  type TowerRosterEntry,
   type TowerState,
   type TowerValidationWorktree,
 } from '../../src/protocol/index.ts';
@@ -1075,5 +1076,126 @@ describe('the autopilot runner wired to the controller', () => {
     const m1 = (await h.store.load()).missions.find((mission) => mission.id === 'M1');
     expect(m1).toMatchObject({ owner: 'ap-w-M1-2' });
     expect(h.runtime.specs[0]?.cwd).toBe(h.store.abs(join(WORKTREES_DIR, m1?.worktree ?? '')));
+  });
+});
+
+async function objectiveWithChore(store: TowerStore): Promise<void> {
+  await initialized(store);
+  await store.plan([{ title: 'Write the docs', scope: ['docs/**'] }]);
+  await store.draftObjective({
+    title: 'Ship',
+    goal: 'ship it',
+    definitionOfDone: ['works'],
+    milestones: [{ title: 'Core' }],
+  });
+  await store.plan([{ title: 'Core feature', scope: ['src/core/**'], milestone: 'MS1' }]);
+  await store.requestObjectiveApproval();
+  await store.approveObjective('human');
+}
+
+async function launchRegistered(
+  h: Harness,
+  entry: Omit<TowerRosterEntry, 'agentId' | 'sessionId' | 'spawnedAt'>,
+): Promise<string> {
+  const launched = await h.controller.launchAgent({
+    name: entry.name,
+    kind: entry.kind,
+    description: entry.name,
+    cwd: h.repo,
+    prompt: 'go',
+  });
+  if (!launched.ok) throw new Error(launched.reason);
+  await h.store.registerAgent({ ...entry, agentId: launched.agentId, sessionId: SESSION_ID, spawnedAt: new Date().toISOString() });
+  return launched.agentId;
+}
+
+describe('agent-end notifications while the autopilot drives an objective', () => {
+  function notifications(h: Harness) {
+    return h.pi.sentOfType(TOWER_AGENT_NOTIFICATION_MESSAGE);
+  }
+
+  async function executing(config?: unknown): Promise<Harness> {
+    const h = await harness({ prepare: objectiveWithChore, ...(config === undefined ? {} : { config }) });
+    await h.controller.enter();
+    await vi.waitFor(() => expect(h.autopilots[0]?.calls).toContain('tick restart'), WAIT);
+    await settle();
+    return h;
+  }
+
+  it('lets the workers and reviewers of objective features end without waking the orchestrator', async () => {
+    const h = await executing();
+    const worker = await launchRegistered(h, { name: 'ap-w-M2-1', kind: 'worker', missionId: 'M2' });
+    const reviewer = await launchRegistered(h, { name: 'ap-r-M2-1', kind: 'reviewer', reviewMissionId: 'M2' });
+
+    h.runtime.finish(worker, 'idle', { summary: 'Implemented the core feature.' });
+    h.runtime.finish(reviewer, 'idle', { summary: 'Review submitted: clean.' });
+
+    await vi.waitFor(() => expect(notifications(h)).toHaveLength(2), WAIT);
+    expect(notifications(h).map((note) => note.options)).toEqual([
+      { triggerTurn: false, deliverAs: 'followUp' },
+      { triggerTurn: false, deliverAs: 'followUp' },
+    ]);
+    expect(sentText(notifications(h)[0])).toContain('Implemented the core feature.');
+  });
+
+  it('still wakes the orchestrator for agents outside the objective', async () => {
+    const h = await executing();
+    const chore = await launchRegistered(h, { name: 'agent-docs', kind: 'worker', missionId: 'M1' });
+    const unregistered = await h.controller.launchAgent({
+      name: 'agent-adhoc',
+      kind: 'worker',
+      description: 'adhoc',
+      cwd: h.repo,
+      prompt: 'go',
+    });
+    if (!unregistered.ok) throw new Error(unregistered.reason);
+
+    h.runtime.finish(chore, 'idle');
+    h.runtime.finish(unregistered.agentId, 'failed', { stopReason: 'provider error' });
+
+    await vi.waitFor(() => expect(notifications(h)).toHaveLength(2), WAIT);
+    expect(notifications(h).map((note) => note.options?.triggerTurn)).toEqual([true, true]);
+  });
+
+  it('keeps the v0.1 delivery with the autopilot off, before tower mode and once the objective stops executing', async () => {
+    const off = await executing({ objective: { autopilot: false } });
+    const offWorker = await launchRegistered(off, { name: 'ap-w-M2-1', kind: 'worker', missionId: 'M2' });
+    off.runtime.finish(offWorker, 'idle');
+    expect(notifications(off).map((note) => note.options)).toEqual([{ triggerTurn: true, deliverAs: 'followUp' }]);
+
+    const paused = await executing();
+    const pausedWorker = await launchRegistered(paused, { name: 'ap-w-M2-1', kind: 'worker', missionId: 'M2' });
+    await paused.store.pauseObjective('the human is reviewing the plan');
+    paused.runtime.finish(pausedWorker, 'idle');
+    await vi.waitFor(() => expect(notifications(paused)).toHaveLength(1), WAIT);
+    expect(notifications(paused)[0]?.options).toEqual({ triggerTurn: true, deliverAs: 'followUp' });
+
+    const exited = await executing();
+    const exitedWorker = await launchRegistered(exited, { name: 'ap-w-M2-1', kind: 'worker', missionId: 'M2' });
+    await exited.controller.exit();
+    exited.runtime.finish(exitedWorker, 'idle');
+    expect(notifications(exited).map((note) => note.options?.triggerTurn)).toEqual([true]);
+  });
+
+  it('lets a validator of the objective end quietly', async () => {
+    const h = await harness({ prepare: validatingObjective });
+    await h.controller.enter();
+    await settle();
+    const state = await h.store.load();
+    const milestone = state.objective?.milestones.find((candidate) => candidate.id === 'MS1');
+    const validator = await launchRegistered(h, {
+      name: 'ap-v-MS1-scrutiny-1',
+      kind: 'validator',
+      milestoneId: 'MS1',
+      validationKind: 'scrutiny',
+      validationRound: 1,
+      validatedCommit: milestone?.validationCommit ?? '',
+      ...(state.objective?.contractRevision === undefined ? {} : { contractRevision: state.objective.contractRevision }),
+    });
+
+    h.runtime.finish(validator, 'idle', { summary: 'Submitted pass.' });
+
+    await vi.waitFor(() => expect(notifications(h)).toHaveLength(1), WAIT);
+    expect(notifications(h)[0]?.options).toEqual({ triggerTurn: false, deliverAs: 'followUp' });
   });
 });
