@@ -587,7 +587,10 @@ describe('executing', () => {
     expect(refused()).toHaveLength(1);
     expect(refused()[0]).toContain('`start-validation` for milestone MS1 on 3 consecutive ticks');
     expect(refused()[0]).toContain(`> ${error}`);
-    expect(refused()[0]).toContain('git worktree prune');
+    expect(refused()[0]).toContain(
+      'the tower already removes a stale registration by itself and retries on every tick; only a failure that persists, such as a locked worktree, needs `git worktree remove --force <path>`',
+    );
+    expect(refused()[0]).not.toContain('git worktree prune');
     tower.clock += 10_000;
     await settle(runner);
     await settle(runner);

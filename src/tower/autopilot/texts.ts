@@ -232,7 +232,7 @@ export function refusedActionRemedy(type: string): string {
     case 'merge':
       return 'read the gate in TowerStatus and fix what blocks it (scope, base checkout, dependencies); TowerMerge retries it once the gate is ready.';
     case 'start-validation':
-      return 'check the milestone with TowerObjective(action="status") — a validation needs every feature merged or abandoned and starts only on the current base tip. When the error names a validation worktree (.tower/worktrees/val-…), that worktree is stale or broken: run `git worktree prune` (or remove it with `git worktree remove --force <path>`) in the main checkout. Otherwise fix what the error names.';
+      return 'check the milestone with TowerObjective(action="status") — a validation needs every feature merged or abandoned and starts only on the current base tip. When the error names a validation worktree (.tower/worktrees/val-…), the tower already removes a stale registration by itself and retries on every tick; only a failure that persists, such as a locked worktree, needs `git worktree remove --force <path>` in the main checkout (unlock a locked one with `git worktree unlock <path>` first). Otherwise fix what the error names.';
     default:
       return 'check the objective with TowerObjective(action="status") and fix what the error names; if it cannot be fixed, block the objective with the reason.';
   }
