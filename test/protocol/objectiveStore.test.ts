@@ -349,6 +349,14 @@ describe('milestone progression and bookkeeping', () => {
     await store.recordObjectiveUsage(0.25);
     await store.recordObjectiveUsage(0.5);
     expect((await readState()).objective?.usage).toEqual({ costUsd: 0.75 });
+    for (const status of ['blocked', 'completed'] as const) {
+      await mutateState((state) => {
+        state.objective!.status = status;
+      });
+      const terminal = await readFile(store.abs(STATE_FILE), 'utf8');
+      expect((await store.recordObjectiveUsage(2))?.usage).toEqual({ costUsd: 0.75 });
+      expect(await readFile(store.abs(STATE_FILE), 'utf8')).toBe(terminal);
+    }
   });
 
   it('patches the autopilot memory and deduplicates wake keys', async () => {

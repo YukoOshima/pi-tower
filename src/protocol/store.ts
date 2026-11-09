@@ -1582,7 +1582,9 @@ export class TowerStore {
     return this.withStateLock(async () => {
       const state = await this.load();
       const objective = state.objective;
-      if (objective === undefined || deltaUsd === 0) return objective;
+      if (objective === undefined || deltaUsd === 0 || isTerminalObjectiveStatus(objective.status)) {
+        return objective;
+      }
       objective.usage = { costUsd: (objective.usage?.costUsd ?? 0) + deltaUsd };
       await this.save(state);
       return objective;
