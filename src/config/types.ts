@@ -24,7 +24,29 @@ export interface TowerConfigFile {
   readonly models?: Readonly<Record<string, TowerModelSpec>>;
   readonly maxRunningAgents?: number;
   readonly agentTimeoutMs?: number;
+  readonly objective?: TowerObjectiveConfigFile;
 }
+
+export interface TowerObjectiveSettingValues {
+  readonly autopilot: boolean;
+  readonly autoApprove: boolean;
+  readonly maxValidationRounds: number;
+  readonly maxFeatureAttempts: number;
+  readonly watchdogIntervalMs: number;
+  readonly stallTimeoutMs: number;
+  readonly maxStallWakes: number;
+  readonly maxWallTimeMs: number | undefined;
+  readonly maxCostUsd: number | undefined;
+  readonly skipScrutiny: boolean;
+  readonly skipUserTesting: boolean;
+  readonly autoTeardown: boolean;
+}
+
+export type TowerObjectiveSettingKey = keyof TowerObjectiveSettingValues;
+
+export type TowerObjectiveConfigFile = {
+  readonly [K in TowerObjectiveSettingKey]?: NonNullable<TowerObjectiveSettingValues[K]>;
+};
 
 export type TowerConfigSource =
   | { readonly kind: 'flag'; readonly flag: string }
@@ -49,8 +71,20 @@ export interface TowerConfig {
   readonly models: Readonly<Record<string, TowerConfigValue<TowerModelSpec>>>;
   readonly maxRunningAgents?: TowerConfigValue<number>;
   readonly agentTimeoutMs?: TowerConfigValue<number>;
+  readonly objective?: readonly TowerConfigValue<TowerObjectiveConfigFile>[];
   readonly files: readonly TowerConfigFileState[];
 }
+
+export type TowerObjectiveSettingSource = TowerConfigSource | { readonly kind: 'default' };
+
+export interface TowerObjectiveSetting<T> {
+  readonly value: T;
+  readonly source: TowerObjectiveSettingSource;
+}
+
+export type TowerObjectiveSettings = {
+  readonly [K in TowerObjectiveSettingKey]: TowerObjectiveSetting<TowerObjectiveSettingValues[K]>;
+};
 
 export type TowerPrimaryModel = TowerModelRef;
 

@@ -4,7 +4,13 @@ import {
   parseModelRef,
   TOWER_THINKING_LEVELS,
 } from './modelRef.ts';
-import type { TowerConfigFile, TowerModelRef, TowerModelSpec } from './types.ts';
+import { TOWER_OBJECTIVE_KEYS } from './objective.ts';
+import type {
+  TowerConfigFile,
+  TowerModelRef,
+  TowerModelSpec,
+  TowerObjectiveConfigFile,
+} from './types.ts';
 
 export const TOWER_CONFIG_KEYS = [
   'orchestrator',
@@ -14,6 +20,7 @@ export const TOWER_CONFIG_KEYS = [
   'models',
   'maxRunningAgents',
   'agentTimeoutMs',
+  'objective',
 ] as const;
 
 export const TOWER_MODEL_SPEC_KEYS = ['model', 'thinkingLevel', 'description'] as const;
@@ -111,11 +118,60 @@ function readConfig(raw: unknown, report: Report): TowerConfigFile {
         if (number !== undefined) config[key] = number;
         break;
       }
+      case 'objective': {
+        const objective = readObjective(value, report);
+        if (objective !== undefined) config.objective = objective;
+        break;
+      }
       default:
         report(key, `unknown key — allowed keys: ${TOWER_CONFIG_KEYS.join(', ')}`);
     }
   }
   return config;
+}
+
+function readObjective(value: unknown, report: Report): TowerObjectiveConfigFile | undefined {
+  if (!isPlainObject(value)) {
+    report('objective', `expected an object of objective settings, got ${describeValue(value)}`);
+    return undefined;
+  }
+  const objective: Writable<TowerObjectiveConfigFile> = {};
+  for (const [field, entry] of Object.entries(value)) {
+    const key = `objective.${field}`;
+    switch (field) {
+      case 'autopilot':
+      case 'autoApprove':
+      case 'skipScrutiny':
+      case 'skipUserTesting':
+      case 'autoTeardown': {
+        const flag = readBoolean(entry, key, report);
+        if (flag !== undefined) objective[field] = flag;
+        break;
+      }
+      case 'maxValidationRounds':
+      case 'maxFeatureAttempts':
+      case 'maxStallWakes': {
+        const count = readPositiveInteger(entry, key, report);
+        if (count !== undefined) objective[field] = count;
+        break;
+      }
+      case 'watchdogIntervalMs':
+      case 'stallTimeoutMs':
+      case 'maxWallTimeMs': {
+        const milliseconds = readPositiveInteger(entry, key, report, MAX_TIMER_MS);
+        if (milliseconds !== undefined) objective[field] = milliseconds;
+        break;
+      }
+      case 'maxCostUsd': {
+        const usd = readPositiveNumber(entry, key, report);
+        if (usd !== undefined) objective[field] = usd;
+        break;
+      }
+      default:
+        report(key, `unknown key — allowed keys: ${TOWER_OBJECTIVE_KEYS.join(', ')}`);
+    }
+  }
+  return objective;
 }
 
 function readModelPool(
@@ -218,6 +274,18 @@ function readPositiveInteger(
       ? `expected at most ${String(max)} (Node's timer limit, about 24.8 days), got ${String(value)}`
       : `expected a positive integer, got ${describeValue(value)}`,
   );
+  return undefined;
+}
+
+function readPositiveNumber(value: unknown, key: string, report: Report): number | undefined {
+  if (typeof value === 'number' && Number.isFinite(value) && value > 0) return value;
+  report(key, `expected a positive number, got ${describeValue(value)}`);
+  return undefined;
+}
+
+function readBoolean(value: unknown, key: string, report: Report): boolean | undefined {
+  if (typeof value === 'boolean') return value;
+  report(key, `expected true or false, got ${describeValue(value)}`);
   return undefined;
 }
 

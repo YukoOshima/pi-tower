@@ -235,6 +235,18 @@ describe('updateTowerConfigModel', () => {
     expect(await readJson(file)).toStrictEqual({});
   });
 
+  it('keeps an objective section when writing a model and refuses to write next to an invalid one', async () => {
+    await writeRaw(file, JSON.stringify({ objective: { autopilot: false, maxCostUsd: 5 } }));
+    await updateTowerConfigModel({ path: file, key: 'validator', ref: 'openai/gpt-5.1' });
+    expect(await readJson(file)).toStrictEqual({
+      objective: { autopilot: false, maxCostUsd: 5 },
+      validator: 'openai/gpt-5.1',
+    });
+    await writeRaw(file, JSON.stringify({ objective: { autopilot: 'no' } }));
+    expect((await updateError({ path: file, key: 'worker', ref: 'a/b' })).issues[0]?.key).toBe('objective.autopilot');
+    expect(await readFile(file, 'utf8')).toBe('{"objective":{"autopilot":"no"}}');
+  });
+
   it('accepts the models.<alias> labels shown by formatModelTable', async () => {
     const result = await updateTowerConfigModel({ path: file, key: 'models.fast', ref: 'google/gemini-2.5-flash' });
     expect(result.field).toBe('models.fast');

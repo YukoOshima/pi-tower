@@ -14,6 +14,7 @@ import type {
   TowerConfigSource,
   TowerConfigValue,
   TowerModelSpec,
+  TowerObjectiveConfigFile,
   TowerRole,
 } from './types.ts';
 
@@ -127,11 +128,16 @@ export async function loadTowerConfig(input: TowerConfigLoadInput): Promise<Towe
   const agentTimeoutMs =
     layerValue(project, project.config?.agentTimeoutMs) ??
     layerValue(global, global.config?.agentTimeoutMs);
+  const objective = [project, global].flatMap((layer) => {
+    const section = layerValue<TowerObjectiveConfigFile>(layer, layer.config?.objective);
+    return section === undefined || Object.keys(section.value).length === 0 ? [] : [section];
+  });
   return {
     roles,
     models,
     ...(maxRunningAgents === undefined ? {} : { maxRunningAgents }),
     ...(agentTimeoutMs === undefined ? {} : { agentTimeoutMs }),
+    ...(objective.length === 0 ? {} : { objective }),
     files: [global.state, project.state],
   };
 }

@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   loadTowerConfig,
   readTowerModelFlags,
+  resolveObjectiveSettings,
   TowerConfigError,
   towerConfigPaths,
 } from '../../src/config/index.ts';
@@ -173,6 +174,36 @@ describe('loadTowerConfig', () => {
     });
     expect(config.maxRunningAgents).toStrictEqual({ value: 2, source: projectSource() });
     expect(config.agentTimeoutMs).toStrictEqual({ value: 60_000, source: globalSource() });
+  });
+
+  it('keeps the objective sections in precedence order so the project overrides the global file per key', async () => {
+    await writeJson(globalFile, { objective: { maxValidationRounds: 5, autopilot: false, maxCostUsd: 20 } });
+    await writeJson(projectFile, { objective: { maxValidationRounds: 2, skipScrutiny: true } });
+    const config = await loadTowerConfig(input());
+    expect(config.objective).toStrictEqual([
+      { value: { maxValidationRounds: 2, skipScrutiny: true }, source: projectSource() },
+      { value: { maxValidationRounds: 5, autopilot: false, maxCostUsd: 20 }, source: globalSource() },
+    ]);
+    const settings = resolveObjectiveSettings(config);
+    expect(settings.maxValidationRounds).toStrictEqual({ value: 2, source: projectSource() });
+    expect(settings.autopilot).toStrictEqual({ value: false, source: globalSource() });
+    expect(settings.maxCostUsd).toStrictEqual({ value: 20, source: globalSource() });
+    expect(settings.skipScrutiny).toStrictEqual({ value: true, source: projectSource() });
+    expect(settings.maxFeatureAttempts).toStrictEqual({ value: 3, source: { kind: 'default' } });
+
+    const untrusted = await loadTowerConfig(input({ projectTrusted: false }));
+    expect(resolveObjectiveSettings(untrusted).maxValidationRounds).toStrictEqual({ value: 5, source: globalSource() });
+
+    await writeJson(projectFile, { objective: {} });
+    await writeJson(globalFile, {});
+    expect((await loadTowerConfig(input())).objective).toBeUndefined();
+  });
+
+  it('names the file and key of an invalid objective setting', async () => {
+    await writeJson(projectFile, { objective: { maxFeatureAttempts: 0 } });
+    expect((await loadError()).issues).toEqual([
+      { source: `${projectFile} (project)`, key: 'objective.maxFeatureAttempts', message: 'expected a positive integer, got 0' },
+    ]);
   });
 
   it('ignores the project file when the project is not trusted', async () => {
