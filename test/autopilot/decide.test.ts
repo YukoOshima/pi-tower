@@ -355,6 +355,16 @@ table('respawn-worker', [
   },
 ]);
 
+const EVERY_MECHANIC = [
+  mergeable('M1'),
+  { ...STALE, id: 'M2', tip: 'tip-M2' },
+  awaitingReview('M3'),
+  { ...FINDINGS, id: 'M4', tip: 'tip-M4' },
+  working('M5', { worker: worker({ state: 'dead', name: 'w-M5' }) }),
+  feature('M6'),
+  { ...CONFLICT, id: 'M7', tip: 'tip-M7' },
+];
+
 table('slot priority and output order', [
   {
     name: 'reviewers, then resumes, then respawns, then spawns',
@@ -366,18 +376,7 @@ table('slot priority and output order', [
   },
   {
     name: 'every mechanic of one tick in the documented order',
-    snap: snapshot({
-      settings: { maxRunningAgents: 8 },
-      missions: [
-        mergeable('M1'),
-        { ...STALE, id: 'M2', tip: 'tip-M2' },
-        awaitingReview('M3'),
-        { ...FINDINGS, id: 'M4', tip: 'tip-M4' },
-        working('M5', { worker: worker({ state: 'dead', name: 'w-M5' }) }),
-        feature('M6'),
-        { ...CONFLICT, id: 'M7', tip: 'tip-M7' },
-      ],
-    }),
+    snap: snapshot({ settings: { maxRunningAgents: 8 }, missions: EVERY_MECHANIC }),
     actions: [
       merge('M1'),
       rebase('M2'),
@@ -797,5 +796,120 @@ describe('computeProgressKey', () => {
     ['gate observations', { missions: [working('M1', { gate: { ready: false, blocks: ['stale-base'] } }), merged('M2')] }],
   ] as Array<[string, Partial<AutopilotSnapshot>]>)('ignores %s', (_label, patch) => {
     expect(computeProgressKey({ ...base, ...patch })).toBe(key);
+  });
+});
+
+const SCOPE_BLOCKED = mergeable('M1', { gate: { ready: false, blocks: ['out-of-scope'] } });
+
+table('wake dedupe keys', [
+  { name: 'a wake whose key was already sent is suppressed', snap: snapshot({ memory: { wakeKeys: [`plan-milestone:MS1:${BASE}`] } }), actions: [] },
+  {
+    name: 'a moved base re-arms the plan-milestone wake',
+    snap: snapshot({ baseTip: 'base-1', memory: { wakeKeys: [`plan-milestone:MS1:${BASE}`] } }),
+    actions: [wakeOf('plan-milestone', 'MS1', 'base-1')],
+  },
+  {
+    name: 'the same blocker is not re-sent',
+    snap: snapshot({ missions: [working('M1', { status: 'blocked', worker: IDLE, blockers: ['need API key'] })], memory: { wakeKeys: [`blocker:M1:${digest('need API key')}`] } }),
+    actions: [],
+  },
+  {
+    name: 'a new blocker re-wakes',
+    snap: snapshot({
+      missions: [working('M1', { status: 'blocked', worker: IDLE, blockers: ['need API key', 'and a database'] })],
+      memory: { wakeKeys: [`blocker:M1:${digest('need API key')}`] },
+    }),
+    actions: [wakeOf('blocker', 'M1', digest('need API key\nand a database'))],
+  },
+  {
+    name: 'a new failed validation round re-wakes',
+    snap: snapshot({
+      objective: { milestones: [milestone('MS1', 1, { status: 'failed', rounds: [round('scrutiny', 1, 'a', 'fail'), round('scrutiny', 2, BASE, 'fail')] })] },
+      missions: DONE_MS1,
+      memory: { wakeKeys: ['validation-failed:MS1:scrutiny-r1'] },
+    }),
+    actions: [wakeOf('validation-failed', 'MS1', 'scrutiny-r2')],
+  },
+  {
+    name: 'a moved tip re-arms the merge-blocked wake',
+    snap: snapshot({ missions: [{ ...SCOPE_BLOCKED, tip: 'tip-M1b' }], memory: { wakeKeys: ['merge-blocked:M1:tip-M1:out-of-scope'] } }),
+    actions: [wakeOf('merge-blocked', 'M1', 'tip-M1b:out-of-scope')],
+  },
+  {
+    name: 'exhausted attempts wake once',
+    snap: snapshot({ missions: [working('M1', { attempts: 3, worker: DEAD })], memory: { wakeKeys: ['feature-attempts-exhausted:M1:3'] } }),
+    actions: [],
+  },
+]);
+
+const MANUAL = { autopilot: false };
+
+table('manual mode (autopilot=false)', [
+  {
+    name: 'every due mechanic is left to the orchestrator',
+    snap: snapshot({ settings: { ...MANUAL, maxRunningAgents: 8 }, missions: EVERY_MECHANIC }),
+    actions: [wakeOf('rebase-conflict', 'M7', `tip-M7@${BASE}`)],
+  },
+  {
+    name: 'a pending empty milestone only asks for a plan',
+    snap: snapshot({ settings: MANUAL, objective: { milestones: [PASSED_MS1, milestone('MS2', 2)] }, missions: [merged('M1')] }),
+    actions: [wakeOf('plan-milestone', 'MS2', BASE)],
+  },
+  { name: 'validation is not started', snap: snapshot({ settings: MANUAL, missions: DONE_MS1 }), actions: [] },
+  { name: 'the objective is not completed', snap: snapshot({ settings: MANUAL, objective: { milestones: [PASSED_MS1, FINAL_PASSED] }, missions: ALL_MERGED }), actions: [] },
+  {
+    name: 'validation failures still wake',
+    snap: snapshot({ settings: MANUAL, objective: { milestones: [milestone('MS1', 1, { status: 'failed', rounds: FAIL_ROUNDS })] }, missions: DONE_MS1 }),
+    actions: [wakeOf('validation-failed', 'MS1', 'scrutiny-r1')],
+  },
+  { name: 'a rebase conflict wakes instead of resuming', snap: snapshot({ settings: MANUAL, missions: [CONFLICT] }), actions: [wakeOf('rebase-conflict', 'M1', `tip-M1@${BASE}`)] },
+  {
+    name: 'a dead worker on a conflict wakes instead of respawning',
+    snap: snapshot({ settings: MANUAL, missions: [{ ...CONFLICT, worker: DEAD }] }),
+    actions: [wakeOf('rebase-conflict', 'M1', `tip-M1@${BASE}`)],
+  },
+  { name: 'exhausted attempts still wake', snap: snapshot({ settings: MANUAL, missions: [working('M1', { attempts: 3, worker: DEAD })] }), actions: [wakeOf('feature-attempts-exhausted', 'M1', '3')] },
+  { name: 'merge blocks still wake', snap: snapshot({ settings: MANUAL, missions: [SCOPE_BLOCKED] }), actions: [wakeOf('merge-blocked', 'M1', 'tip-M1:out-of-scope')] },
+  {
+    name: 'exhausted validation rounds still block',
+    snap: snapshot({
+      settings: MANUAL,
+      objective: { milestones: [milestone('MS1', 1, { status: 'failed', rounds: [round('user-testing', 1, 'a', 'fail'), round('user-testing', 2, 'b', 'fail'), round('user-testing', 3, BASE, 'fail')] })] },
+      missions: DONE_MS1,
+    }),
+    actions: [blockOf('validation-rounds-exhausted')],
+  },
+]);
+
+const MANUAL_TYPES = new Set(['wake-orchestrator', 'block-objective', 'pause-objective']);
+
+function deepFreeze<T>(value: T): T {
+  if (typeof value === 'object' && value !== null && !Object.isFrozen(value)) {
+    Object.freeze(value);
+    for (const child of Object.values(value)) deepFreeze(child);
+  }
+  return value;
+}
+
+describe('idempotency and purity', () => {
+  it.each(ALL_ROWS)('$name: the same snapshot gives the same decision', ({ snap }) => {
+    expect(decideAutopilot(snap)).toEqual(decideAutopilot(snap));
+  });
+
+  it.each(ALL_ROWS)('$name: the post-action snapshot repeats no action', ({ snap }) => {
+    const first = decideAutopilot(snap);
+    const second = decideAutopilot(applyDecision(snap, first));
+    const before = new Set(first.actions.map(actionIdentity));
+    expect(second.actions.map(actionIdentity).filter((id) => before.has(id))).toEqual([]);
+  });
+
+  it.each(ALL_ROWS)('$name: a frozen snapshot decides the same', ({ snap }) => {
+    const copy = structuredClone(snap);
+    expect(decideAutopilot(deepFreeze(copy))).toEqual(decideAutopilot(snap));
+  });
+
+  it.each(ALL_ROWS)('$name: manual mode yields only wake, block and pause actions', ({ snap }) => {
+    const manual = { ...snap, settings: { ...snap.settings, autopilot: false } };
+    for (const action of decideAutopilot(manual).actions) expect(MANUAL_TYPES.has(action.type)).toBe(true);
   });
 });
