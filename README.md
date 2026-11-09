@@ -211,8 +211,8 @@ Mission O1 "CSV and JSON export for shop report" — plan ready (2 milestones ·
 ```
 
 - The dialog opens on **Not yet — keep planning**, so pressing Enter alone never approves. To approve, press ↓ and then Enter. You can also close the dialog and run `/mission approve`.
-- Typing or pasting while the dialog is open closes it, and the text goes to the editor, so a stray keystroke cannot approve the plan.
-- The dialog waits until the orchestrator has finished its turn, the editor is empty, and the keyboard has been quiet for 2 seconds.
+- Typing or pasting while the dialog is open closes it, and the text goes to the editor, so a stray keystroke cannot approve the plan. For half a second after it opens, the dialog also ignores ↑, ↓ and Enter, so a keypress meant for something else cannot approve it either.
+- The dialog waits until the orchestrator has finished its turn, the editor is empty, no other extension's dialog is open, and the keyboard has been quiet for 2 seconds.
 - To change the plan, say what to change in a normal message. The orchestrator updates the plan and asks again, with a new dialog. When the contract changed after an approval, the dialog says **plan revised** and its second option reads **Approve the revised plan**.
 - Only you can approve. The orchestrator has no tool for it.
 
@@ -241,6 +241,13 @@ next: 2 features of MS2 in flight — validation starts once all are merged
 ```
 
 From the top: the mission with its status, elapsed time and cost (and the budget, when you set one), the milestones, the features of the current milestone with their state and agent, the running agents, the models, and the next step. The footer mirrors it in one line: `mission O1 executing · MS2 1/3 merged · 2 agents`.
+
+The panel never takes more than 10 lines. When a milestone has more features than fit, the last feature line says how many more there are, and `/mission` lists them all. A model is shown without its provider unless two roles use the same model id from different providers. When the models do not fit on one line, in a narrow terminal or with long model ids, they take two roles per row, or one role per row:
+
+```text
+models: orchestrator claude-opus-5-5 · worker claude-sonnet-5-5
+        reviewer gpt-5.5 · validator gpt-5.5
+```
 
 `/mission` prints the full view, without starting a model turn:
 
@@ -322,7 +329,7 @@ Check the result on your branch (`git log --graph`, your tests), then leave with
 
 The automatic teardown removes the worktrees of the merged and abandoned features and any leftover validation worktrees. It never forces anything:
 
-- It keeps a worktree with uncommitted changes, a worktree where an agent still runs, and the worktree of a feature that is still open. The notice lists each one it kept.
+- It keeps a worktree with uncommitted changes, a worktree where an agent still runs, and the worktree of a feature that is still open. The notice lists each one it kept. A validator that is still finishing keeps its validation worktree until it ends, and the tower removes that worktree then, or when pi shuts down first, as at the end of a headless run.
 - A worktree that `git status` reports as clean is removed with everything in it, **including git-ignored files** such as `node_modules`, build output or a local `.env`. Everything committed stays on the feature's branch.
 - Branches and the `.tower/comms/` records always stay.
 
@@ -1072,7 +1079,7 @@ Worktrees isolate writes, but they are not a security sandbox.
 
 pi-tower adds three guards:
 
-- **Bash guard.** It is active while the workspace has an owner, and it checks the bash calls of the orchestrator and of every worker, reviewer and validator. It blocks:
+- **Bash guard.** It is active while the workspace has an owner, and it checks the bash calls of the orchestrator and of every worker, reviewer and validator. An agent's calls are checked against the workspace the tower is bound to, which the agent cannot change. It blocks:
   - `rm` on `.tower/comms`;
   - recursive `rm` on `.tower` or on a directory that contains it;
   - `git clean` with force and `-x`/`-X` when it covers the main checkout;
@@ -1099,9 +1106,11 @@ Start with a small mission, or a few independent missions in a free-form run, an
 
 - **Automatic teardown deletes git-ignored files.** A completed mission removes every clean feature worktree with everything in it, including git-ignored files such as `node_modules`, build output or a local `.env`. Committed work is safe on its branch. Set `"objective": { "autoTeardown": false }` to keep the worktrees.
 - **Do not run Kimi Code's Tower and pi-tower on one repository at the same time.** Both use the same `.tower/` workspace format, but Kimi Code does not record the process id of the session that owns the workspace, and pi-tower treats an owner without a running process as gone. So `/mission` or `/tower on` in pi-tower adopts a workspace that a Kimi Code session is still using and retires that session's whole roster: its agents are no longer tower participants, and their tower tools refuse. Close one tower before you start the other on the same repository.
+- **pi started inside a worktree works on the outer workspace.** A directory inside a feature's worktree that is not a git repository of its own counts as part of that worktree, so pi started there uses the outer workspace, as the feature's worker does. Only a separate git repository nested in a worktree gets a workspace of its own. Start pi for other work outside `.tower/worktrees/`.
+- **A worktree that lost its `.git` link escapes the bash guard for `git reset --hard`.** The guard lets git commands run inside a feature's worktree, because there they touch only that worktree. If the worktree's `.git` link file is deleted, git run there finds the main checkout's repository instead, and a plain `git reset --hard` resets the main checkout and discards its uncommitted changes. The guard does not block this. Agents have no reason to delete `.git`, but keep uncommitted work out of the main checkout while a mission runs.
 - **Auto-approval and blocked missions.** With `"objective": { "autoApprove": true }`, the orchestrator could draft a fresh mission after one blocked, and that mission would be approved automatically. This restarts the wall-time and cost budgets without you. Keep `autoApprove` off for interactive use. The headless runner exits with code 1 on a blocked mission before this can happen.
 - **The approval dialog needs mission mode.** It opens only in an interactive session where `/mission` is on, and not again for a plan that already awaited approval when mission mode started, for example after a restart. Approve such a plan with `/mission approve`.
-- **The approval dialog can take over one of pi's own selectors.** pi 1.5.0 tells extensions nothing about its built-in selectors, such as `/model`. If you have been idle in one of them for 2 seconds or more when the plan becomes ready, the approval dialog replaces it. A ↓ then Enter meant for that selector then approves the plan. While a plan may be due, read the title before you confirm a selection.
+- **The approval dialog can still take over one of pi's built-in selectors.** It waits while another extension's dialog is open, and for half a second after it opens it ignores ↑, ↓ and Enter, so a keypress already on its way cannot approve. pi 1.5.0 reports nothing about its built-in selectors, such as `/model`, though. If you have been idle in one of them for 2 seconds or more when the plan becomes ready, the approval dialog replaces it, and a ↓ then Enter pressed half a second or more later approves the plan. While a plan may be due, read the title before you confirm a selection.
 - **Validation commands bring their own setup.** They run in a fresh, detached checkout without installed dependencies or build output, so every command must include its setup, for example `npm ci && npm test`.
 - **Failed validation rounds are never reset.** They count toward `maxValidationRounds` across commits, contract changes and `/mission resume`. Before you resume a mission that blocked on failed validations, raise `maxValidationRounds` in `tower.json`; otherwise the next failure of that kind blocks it again.
 - **No browser for user-testing.** User-testing validators have no browser or GUI tooling. Their behavioural QA relies on what bash can drive: CLIs, HTTP calls and scripts.

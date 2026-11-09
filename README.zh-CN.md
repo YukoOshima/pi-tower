@@ -211,8 +211,8 @@ Mission O1 "CSV and JSON export for shop report" — plan ready (2 milestones ·
 ```
 
 - 对话框打开时选中的是 **Not yet — keep planning**，因此只按 Enter 永远不会批准。要批准，请先按 ↓ 再按 Enter。也可以关闭对话框，然后运行 `/mission approve`。
-- 对话框打开时如果你开始输入或粘贴，对话框会关闭，内容会进入编辑器，因此误触按键不会批准计划。
-- 对话框会等到 orchestrator 完成当前轮次、编辑器为空，并且键盘已经安静 2 秒之后才打开。
+- 对话框打开时如果你开始输入或粘贴，对话框会关闭，内容会进入编辑器，因此误触按键不会批准计划。对话框打开后的半秒内，它还会忽略 ↑、↓ 和 Enter，因此原本要按给别处的按键也无法批准计划。
+- 对话框会等到 orchestrator 完成当前轮次、编辑器为空、没有其他扩展的对话框处于打开状态，并且键盘已经安静 2 秒之后才打开。
 - 想修改计划，就用普通消息说明要改什么。orchestrator 会更新计划并再次请你批准，届时会弹出新的对话框。如果是在批准之后修改了契约，对话框会显示 **plan revised**，第二个选项变为 **Approve the revised plan**。
 - 只有你可以批准，orchestrator 没有用来批准的工具。
 
@@ -241,6 +241,13 @@ next: 2 features of MS2 in flight — validation starts once all are merged
 ```
 
 从上到下依次是：mission 及其状态、耗时和花费（设置了预算时还会显示预算）、各个里程碑、当前里程碑的 feature 及其状态和负责的 Agent、正在运行的 Agent、各角色的模型，以及下一步。底部状态栏用一行概括同样的信息：`mission O1 executing · MS2 1/3 merged · 2 agents`。
+
+面板最多占 10 行。如果一个里程碑的 feature 多到放不下，最后一行 feature 会说明还有多少个，`/mission` 会列出全部。模型显示时不带 provider，除非有两个角色使用了来自不同 provider 的同一个模型 id。如果各角色的模型在一行中放不下（例如终端较窄或模型 id 较长），就每行显示两个角色，或者每行一个：
+
+```text
+models: orchestrator claude-opus-5-5 · worker claude-sonnet-5-5
+        reviewer gpt-5.5 · validator gpt-5.5
+```
 
 `/mission` 会输出完整视图，不触发模型轮次：
 
@@ -322,7 +329,7 @@ Automatic teardown: removed 6 worktree(s), kept 0.
 
 自动清理会移除已合并和已放弃的 feature 的 worktree，以及遗留的验证 worktree。它从不强制执行：
 
-- 有未提交改动的 worktree、仍有 Agent 在其中运行的 worktree，以及仍未关闭的 feature 的 worktree 都会保留，通知中会逐一列出保留的 worktree。
+- 有未提交改动的 worktree、仍有 Agent 在其中运行的 worktree，以及仍未关闭的 feature 的 worktree 都会保留，通知中会逐一列出保留的 worktree。仍在收尾的 validator 会保留它的验证 worktree，直到它结束，之后 Tower 会移除这个 worktree；如果 pi 先退出（例如无人值守运行结束时），则在退出时移除。
 - `git status` 显示为干净的 worktree 会连同其中的所有内容一起被移除，**包括被 git 忽略的文件**，例如 `node_modules`、构建产物或本地的 `.env`。所有已提交的内容都保留在 feature 的 branch 上。
 - branch 和 `.tower/comms/` 中的记录始终保留。
 
@@ -1072,7 +1079,7 @@ worktree 只能隔离写入，不能当作安全沙箱。
 
 pi-tower 提供三道防护：
 
-- **Bash 防护。** 只要工作区有拥有者就会生效，检查 orchestrator 以及每个 worker、reviewer 和 validator 的 bash 调用。它会拦截：
+- **Bash 防护。** 只要工作区有拥有者就会生效，检查 orchestrator 以及每个 worker、reviewer 和 validator 的 bash 调用。Agent 的调用会以 Tower 所绑定的工作区为准进行检查，Agent 无法更改这个工作区。它会拦截：
   - 对 `.tower/comms` 执行的 `rm`；
   - 对 `.tower` 或包含它的目录执行的递归 `rm`；
   - 作用范围覆盖主 checkout、且带有 force 和 `-x`/`-X` 的 `git clean`；
@@ -1099,9 +1106,11 @@ pi-tower 提供三道防护：
 
 - **自动清理会删除被 git 忽略的文件。** mission 完成后，每个干净的 feature worktree 都会连同其中的所有内容一起被移除，包括被 git 忽略的文件，例如 `node_modules`、构建产物或本地的 `.env`。已提交的工作仍安全地保留在各自的 branch 上。设置 `"objective": { "autoTeardown": false }` 可以保留这些 worktree。
 - **不要在同一个仓库上同时运行 Kimi Code 的 Tower 和 pi-tower。** 两者使用相同的 `.tower/` 工作区格式，但 Kimi Code 不会记录拥有该工作区的会话的进程号，而 pi-tower 会把没有运行中进程的拥有者视为已结束。因此，在 pi-tower 中执行 `/mission` 或 `/tower on` 会接管一个仍在被 Kimi Code 会话使用的工作区，并注销该会话的整个 roster：其中的 Agent 不再是 Tower 的参与者，它们的 Tower 工具会拒绝执行。在同一个仓库上启动其中一个 Tower 之前，请先关闭另一个。
+- **在 worktree 内启动的 pi 使用外层工作区。** feature 的 worktree 中，不是独立 git 仓库的目录都算作该 worktree 的一部分，因此在那里启动的 pi 会使用外层工作区，与该 feature 的 worker 相同。只有嵌套在 worktree 中的独立 git 仓库才有自己的工作区。进行其他工作时，请在 `.tower/worktrees/` 之外启动 pi。
+- **丢失 `.git` 链接的 worktree 可以绕过 bash 防护执行 `git reset --hard`。** 防护允许 git 命令在 feature 的 worktree 中运行，因为在那里它们只会影响这个 worktree。如果 worktree 的 `.git` 链接文件被删除，在其中运行的 git 会找到主 checkout 的仓库，一条普通的 `git reset --hard` 就会重置主 checkout，丢弃其中未提交的改动。防护不会拦截这种情况。Agent 没有理由删除 `.git`，但在 mission 运行期间，请不要在主 checkout 中保留未提交的工作。
 - **自动批准与被阻塞的 mission。** 设置 `"objective": { "autoApprove": true }` 后，一个 mission 被阻塞之后，orchestrator 可能会起草一个新的 mission，而它会被自动批准。这会在没有你参与的情况下重新开始计算时长和花费预算。交互使用时请保持 `autoApprove` 关闭。无人值守运行器在 mission 被阻塞时会以退出码 1 退出，不会走到这一步。
 - **批准对话框需要 mission 模式。** 它只在开启了 `/mission` 的交互会话中弹出；如果进入 mission 模式时计划已经在等待批准（例如重启之后），对话框也不会再弹出。这样的计划请用 `/mission approve` 批准。
-- **批准对话框可能顶替 pi 自带的选择器。** pi 1.5.0 不会把自带选择器（例如 `/model`）的任何状态通知给扩展。计划准备好时，如果你正停留在这样的选择器中，并且已经有 2 秒或更久没有操作，批准对话框会替换掉它。此时，原本要在该选择器中按下的 ↓ 和 Enter 就会批准计划。在计划可能已经准备好时，确认选择之前请先看清标题。
+- **批准对话框仍可能顶替 pi 自带的选择器。** 其他扩展的对话框打开时，它会等待；它打开后的半秒内会忽略 ↑、↓ 和 Enter，因此已经按下、正在途中的按键无法批准计划。不过，pi 1.5.0 不会把自带选择器（例如 `/model`）的任何状态通知给扩展。计划准备好时，如果你正停留在这样的选择器中，并且已经有 2 秒或更久没有操作，批准对话框会替换掉它；此后半秒或更久才按下的 ↓ 和 Enter 就会批准计划。在计划可能已经准备好时，确认选择之前请先看清标题。
 - **验证命令需要自带准备步骤。** 它们在一个全新的 detached checkout 中运行，没有安装好的依赖，也没有构建产物，因此每条命令都必须包含准备步骤，例如 `npm ci && npm test`。
 - **验证失败轮数不会清零。** 无论换了几个 commit、契约是否修改过、是否执行过 `/mission resume`，失败轮次都会计入 `maxValidationRounds`。恢复一个因验证失败而被阻塞的 mission 之前，请先在 `tower.json` 中调高 `maxValidationRounds`，否则同类验证再失败一次，它就会再次被阻塞。
 - **user-testing 没有浏览器。** user-testing validator 没有浏览器或 GUI 工具，行为测试只能依靠 bash 能驱动的东西：CLI、HTTP 请求和脚本。
