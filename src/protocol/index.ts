@@ -3,6 +3,7 @@ export * from './concurrency.ts';
 export * from './frontmatter.ts';
 export * from './git.ts';
 export * from './missionGate.ts';
+export * from './objective.ts';
 export * from './paths.ts';
 export * from './repoRoot.ts';
 export * from './store.ts';

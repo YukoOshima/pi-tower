@@ -21,6 +21,7 @@ import {
   TOWER_FILE_IO_CONCURRENCY,
   TOWER_GIT_CONCURRENCY,
 } from './concurrency.ts';
+import { TowerProtocolError } from './errors.ts';
 import { parseFrontmatter, readFrontmatterPrefix, renderFrontmatter } from './frontmatter.ts';
 import {
   branchExists,
@@ -82,12 +83,7 @@ import type {
   TowerState,
 } from './types.ts';
 
-export class TowerProtocolError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = 'TowerProtocolError';
-  }
-}
+export { TowerProtocolError } from './errors.ts';
 
 export const MAX_REVIEW_ROUNDS = 5;
 

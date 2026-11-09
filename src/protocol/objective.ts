@@ -1,0 +1,758 @@
+import { TowerProtocolError } from './errors.ts';
+import type {
+  TowerMilestone,
+  TowerMilestoneStatus,
+  TowerMilestoneValidationSpec,
+  TowerMission,
+  TowerObjective,
+  TowerObjectiveLimits,
+  TowerObjectiveStatus,
+  TowerState,
+  TowerValidationKind,
+  TowerValidationRound,
+} from './types.ts';
+
+export const DEFAULT_MAX_VALIDATION_ROUNDS = 3;
+export const DEFAULT_MAX_FEATURE_ATTEMPTS = 3;
+export const TOWER_VALIDATION_KINDS: readonly TowerValidationKind[] = [
+  'scrutiny',
+  'user-testing',
+  'commands',
+];
+
+export interface TowerValidationSettings {
+  readonly skipScrutiny?: boolean;
+  readonly skipUserTesting?: boolean;
+}
+
+export type TowerObjectiveBlockCode =
+  | 'no-objective'
+  | 'not-executing'
+  | 'no-milestones'
+  | 'milestone-not-passed'
+  | 'open-feature'
+  | 'final-validation-stale';
+
+export interface TowerObjectiveBlock {
+  readonly code: TowerObjectiveBlockCode;
+  readonly detail: string;
+}
+
+export interface TowerObjectiveCompletion {
+  readonly ready: boolean;
+  readonly blocks: readonly TowerObjectiveBlock[];
+}
+
+export interface TowerValidationKindProgress {
+  readonly kind: TowerValidationKind;
+  readonly required: boolean;
+  readonly rounds: number;
+  readonly failedRounds: number;
+  readonly latest?: TowerValidationRound;
+}
+
+export interface TowerMilestoneProgress {
+  readonly id: string;
+  readonly title: string;
+  readonly order: number;
+  readonly status: TowerMilestoneStatus;
+  readonly current: boolean;
+  readonly final: boolean;
+  readonly features: readonly string[];
+  readonly openFeatures: readonly string[];
+  readonly mergedFeatures: readonly string[];
+  readonly requiredKinds: readonly TowerValidationKind[];
+  readonly commands: readonly string[];
+  readonly kinds: readonly TowerValidationKindProgress[];
+  readonly validationCommit?: string;
+  readonly validationStale: boolean;
+  readonly readyForValidation: boolean;
+}
+
+export interface TowerObjectiveEvaluation {
+  readonly objectiveId?: string;
+  readonly status?: TowerObjectiveStatus;
+  readonly baseTip: string;
+  readonly currentMilestone?: string;
+  readonly milestones: readonly TowerMilestoneProgress[];
+  readonly completion: TowerObjectiveCompletion;
+}
+
+export function isTerminalObjectiveStatus(status: TowerObjectiveStatus): boolean {
+  return status === 'completed' || status === 'blocked';
+}
+
+export function isObjectiveOpen(objective: TowerObjective | undefined): objective is TowerObjective {
+  return objective !== undefined && !isTerminalObjectiveStatus(objective.status);
+}
+
+function isOpenFeature(mission: Pick<TowerMission, 'status'>): boolean {
+  return mission.status !== 'merged' && mission.status !== 'abandoned';
+}
+
+function idNumber(id: string, prefix: string): number {
+  if (!id.startsWith(prefix)) return 0;
+  const n = Number.parseInt(id.slice(prefix.length), 10);
+  return Number.isNaN(n) ? 0 : n;
+}
+
+export function sortedMilestones(objective: TowerObjective): TowerMilestone[] {
+  return objective.milestones.toSorted(
+    (a, b) => a.order - b.order || idNumber(a.id, 'MS') - idNumber(b.id, 'MS'),
+  );
+}
+
+export function findMilestone(
+  objective: TowerObjective | undefined,
+  milestoneId: string,
+): TowerMilestone | undefined {
+  return objective?.milestones.find((milestone) => milestone.id === milestoneId);
+}
+
+export function currentMilestone(objective: TowerObjective): TowerMilestone | undefined {
+  return sortedMilestones(objective).find((milestone) => milestone.status !== 'passed');
+}
+
+export function finalMilestone(objective: TowerObjective): TowerMilestone | undefined {
+  return sortedMilestones(objective).at(-1);
+}
+
+export function milestoneMissions(state: TowerState, milestoneId: string): TowerMission[] {
+  return state.missions.filter((mission) => mission.milestone === milestoneId);
+}
+
+export function objectiveMissions(state: TowerState): TowerMission[] {
+  const objective = state.objective;
+  if (objective === undefined) return [];
+  const ids = new Set(objective.milestones.map((milestone) => milestone.id));
+  return state.missions.filter(
+    (mission) => mission.milestone !== undefined && ids.has(mission.milestone),
+  );
+}
+
+export function validationCommands(objective: TowerObjective, milestone: TowerMilestone): string[] {
+  const commands = [...milestone.validation.commands];
+  if (finalMilestone(objective)?.id === milestone.id) commands.push(...objective.acceptanceCommands);
+  return [...new Set(commands)];
+}
+
+export function requiredValidationKinds(
+  objective: TowerObjective,
+  milestone: TowerMilestone,
+  settings: TowerValidationSettings = {},
+): TowerValidationKind[] {
+  const kinds: TowerValidationKind[] = [];
+  if (milestone.validation.scrutiny !== false && settings.skipScrutiny !== true) kinds.push('scrutiny');
+  if (milestone.validation.userTesting !== false && settings.skipUserTesting !== true) {
+    kinds.push('user-testing');
+  }
+  if (validationCommands(objective, milestone).length > 0) kinds.push('commands');
+  return kinds;
+}
+
+export function latestValidationRound(
+  milestone: TowerMilestone,
+  kind: TowerValidationKind,
+  commit?: string,
+): TowerValidationRound | undefined {
+  let latest: TowerValidationRound | undefined;
+  for (const round of milestone.rounds) {
+    if (round.kind !== kind) continue;
+    if (commit !== undefined && round.validatedCommit !== commit) continue;
+    if (latest === undefined || round.round >= latest.round) latest = round;
+  }
+  return latest;
+}
+
+export function failedValidationRounds(milestone: TowerMilestone, kind: TowerValidationKind): number {
+  return milestone.rounds.filter((round) => round.kind === kind && round.verdict === 'fail').length;
+}
+
+export function nextValidationRound(milestone: TowerMilestone, kind: TowerValidationKind): number {
+  const rounds = milestone.rounds.filter((round) => round.kind === kind).map((round) => round.round);
+  return Math.max(0, ...rounds) + 1;
+}
+
+export function milestonePassesOn(
+  objective: TowerObjective,
+  milestone: TowerMilestone,
+  commit: string,
+  settings: TowerValidationSettings = {},
+): boolean {
+  return requiredValidationKinds(objective, milestone, settings).every(
+    (kind) => latestValidationRound(milestone, kind, commit)?.verdict === 'pass',
+  );
+}
+
+export function deriveMilestoneStatus(
+  objective: TowerObjective,
+  milestone: TowerMilestone,
+  settings: TowerValidationSettings = {},
+): TowerMilestoneStatus {
+  if (milestone.status !== 'validating' && milestone.status !== 'failed') return milestone.status;
+  const commit = milestone.validationCommit;
+  if (commit === undefined) return milestone.status;
+  const required = requiredValidationKinds(objective, milestone, settings);
+  const failing = required.filter(
+    (kind) => latestValidationRound(milestone, kind, commit)?.verdict === 'fail',
+  );
+  if (failing.length > 0) {
+    return failing.some(
+      (kind) => failedValidationRounds(milestone, kind) >= objective.limits.maxValidationRounds,
+    )
+      ? 'blocked'
+      : 'failed';
+  }
+  if (milestone.status === 'failed') return 'failed';
+  return milestonePassesOn(objective, milestone, commit, settings) ? 'passed' : 'validating';
+}
+
+function milestoneProgress(
+  state: TowerState,
+  objective: TowerObjective,
+  milestone: TowerMilestone,
+  baseTip: string,
+  settings: TowerValidationSettings,
+  currentId: string | undefined,
+  finalId: string | undefined,
+): TowerMilestoneProgress {
+  const features = milestoneMissions(state, milestone.id);
+  const openFeatures = features.filter(isOpenFeature).map((mission) => mission.id);
+  const required = requiredValidationKinds(objective, milestone, settings);
+  const kinds = TOWER_VALIDATION_KINDS.filter(
+    (kind) => required.includes(kind) || milestone.rounds.some((round) => round.kind === kind),
+  ).map(
+    (kind): TowerValidationKindProgress => ({
+      kind,
+      required: required.includes(kind),
+      rounds: milestone.rounds.filter((round) => round.kind === kind).length,
+      failedRounds: failedValidationRounds(milestone, kind),
+      latest:
+        milestone.validationCommit === undefined
+          ? undefined
+          : latestValidationRound(milestone, kind, milestone.validationCommit),
+    }),
+  );
+  return {
+    id: milestone.id,
+    title: milestone.title,
+    order: milestone.order,
+    status: milestone.status,
+    current: milestone.id === currentId,
+    final: milestone.id === finalId,
+    features: features.map((mission) => mission.id),
+    openFeatures,
+    mergedFeatures: features.filter((mission) => mission.status === 'merged').map((mission) => mission.id),
+    requiredKinds: required,
+    commands: validationCommands(objective, milestone),
+    kinds,
+    validationCommit: milestone.validationCommit,
+    validationStale:
+      (milestone.status === 'validating' || milestone.status === 'passed') &&
+      milestone.validationCommit !== undefined &&
+      milestone.validationCommit !== baseTip,
+    readyForValidation:
+      milestone.status === 'active' && features.length > 0 && openFeatures.length === 0,
+  };
+}
+
+export function evaluateObjective(
+  state: TowerState,
+  baseTip: string,
+  settings: TowerValidationSettings = {},
+): TowerObjectiveEvaluation {
+  const objective = state.objective;
+  if (objective === undefined) {
+    return {
+      baseTip,
+      milestones: [],
+      completion: {
+        ready: false,
+        blocks: [{ code: 'no-objective', detail: 'no objective exists — draft one first' }],
+      },
+    };
+  }
+  const ordered = sortedMilestones(objective);
+  const current = currentMilestone(objective);
+  const final = ordered.at(-1);
+  const milestones = ordered.map((milestone) =>
+    milestoneProgress(state, objective, milestone, baseTip, settings, current?.id, final?.id),
+  );
+  const blocks: TowerObjectiveBlock[] = [];
+  if (objective.status !== 'executing') {
+    blocks.push({
+      code: 'not-executing',
+      detail: `objective ${objective.id} is ${objective.status}, not executing`,
+    });
+  }
+  if (ordered.length === 0) {
+    blocks.push({ code: 'no-milestones', detail: `objective ${objective.id} has no milestones` });
+  }
+  for (const milestone of ordered) {
+    if (milestone.status === 'passed') continue;
+    blocks.push({
+      code: 'milestone-not-passed',
+      detail: `milestone ${milestone.id} "${milestone.title}" is ${milestone.status}`,
+    });
+  }
+  for (const mission of objectiveMissions(state)) {
+    if (!isOpenFeature(mission)) continue;
+    blocks.push({
+      code: 'open-feature',
+      detail: `feature ${mission.id} (milestone ${mission.milestone ?? '?'}) is ${mission.status}`,
+    });
+  }
+  if (final?.status === 'passed') {
+    const commit = final.validationCommit;
+    if (commit !== baseTip) {
+      blocks.push({
+        code: 'final-validation-stale',
+        detail: `final milestone ${final.id} passed on ${commit === undefined ? 'no recorded commit' : commit.slice(0, 7)} but the base tip is ${baseTip.slice(0, 7)} — re-validate it on the current tip`,
+      });
+    } else if (!milestonePassesOn(objective, final, commit, settings)) {
+      blocks.push({
+        code: 'final-validation-stale',
+        detail: `final milestone ${final.id} has no passing round on ${commit.slice(0, 7)} for every required kind (${requiredValidationKinds(objective, final, settings).join(', ')}) — re-validate it`,
+      });
+    }
+  }
+  return {
+    objectiveId: objective.id,
+    status: objective.status,
+    baseTip,
+    currentMilestone: current?.id,
+    milestones,
+    completion: { ready: blocks.length === 0, blocks },
+  };
+}
+
+export function estimateObjectiveRuns(state: TowerState): number {
+  const objective = state.objective;
+  if (objective === undefined) return 0;
+  const features = objectiveMissions(state).filter((mission) => mission.status !== 'abandoned');
+  return features.length + 2 * objective.milestones.length;
+}
+
+export function objectiveApprovalProblems(state: TowerState, objective: TowerObjective): string[] {
+  const problems: string[] = [];
+  if (objective.goal.trim().length === 0) problems.push('the goal is empty');
+  if (objective.definitionOfDone.length === 0) {
+    problems.push('the definition of done has no items');
+  }
+  const first = sortedMilestones(objective)[0];
+  if (first === undefined) {
+    problems.push('there are no milestones');
+  } else if (
+    !milestoneMissions(state, first.id).some(
+      (mission) => mission.kind === 'build' && mission.status !== 'abandoned',
+    )
+  ) {
+    problems.push(
+      `the first milestone ${first.id} "${first.title}" has no build feature — plan at least one with TowerPlan(milestone=${first.id})`,
+    );
+  }
+  return problems;
+}
+
+export interface TowerMilestoneValidationInput {
+  readonly scrutiny?: boolean;
+  readonly userTesting?: boolean;
+  readonly commands?: readonly string[];
+  readonly qaInstructions?: string;
+}
+
+export interface TowerMilestoneInput {
+  readonly id?: string;
+  readonly title?: string;
+  readonly description?: string;
+  readonly validation?: TowerMilestoneValidationInput;
+}
+
+export interface TowerObjectiveLimitsInput {
+  readonly maxValidationRounds?: number;
+  readonly maxFeatureAttempts?: number;
+  readonly maxWallTimeMs?: number;
+  readonly maxCostUsd?: number;
+}
+
+export interface TowerObjectiveDraftInput {
+  readonly title: string;
+  readonly goal?: string;
+  readonly definitionOfDone?: readonly string[];
+  readonly acceptanceCommands?: readonly string[];
+  readonly milestones?: readonly TowerMilestoneInput[];
+  readonly notes?: readonly string[];
+  readonly limits?: TowerObjectiveLimitsInput;
+}
+
+export interface TowerObjectiveUpdateInput {
+  readonly title?: string;
+  readonly goal?: string;
+  readonly definitionOfDone?: readonly string[];
+  readonly acceptanceCommands?: readonly string[];
+  readonly milestones?: readonly TowerMilestoneInput[];
+  readonly removeMilestones?: readonly string[];
+  readonly milestoneOrder?: readonly string[];
+  readonly notes?: readonly string[];
+  readonly limits?: TowerObjectiveLimitsInput;
+}
+
+export interface TowerObjectiveUpdateResult {
+  readonly objective: TowerObjective;
+  readonly contractChanged: boolean;
+  readonly changes: readonly string[];
+  readonly reopened: readonly string[];
+}
+
+function cleanList(items: readonly string[] | undefined): string[] {
+  return (items ?? []).map((item) => item.trim()).filter((item) => item.length > 0);
+}
+
+function sameList(a: readonly string[], b: readonly string[]): boolean {
+  return a.length === b.length && a.every((item, index) => item === b[index]);
+}
+
+function sameSpec(a: TowerMilestoneValidationSpec, b: TowerMilestoneValidationSpec): boolean {
+  return (
+    a.scrutiny === b.scrutiny &&
+    a.userTesting === b.userTesting &&
+    a.qaInstructions === b.qaInstructions &&
+    sameList(a.commands, b.commands)
+  );
+}
+
+function positiveInteger(value: number | undefined, name: string): number | undefined {
+  if (value === undefined) return undefined;
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new TowerProtocolError(`objective limit ${name} must be a positive integer, got ${String(value)}`);
+  }
+  return value;
+}
+
+function positiveNumber(value: number | undefined, name: string): number | undefined {
+  if (value === undefined) return undefined;
+  if (!Number.isFinite(value) || value <= 0) {
+    throw new TowerProtocolError(`objective limit ${name} must be a positive number, got ${String(value)}`);
+  }
+  return value;
+}
+
+function buildLimits(
+  input: TowerObjectiveLimitsInput | undefined,
+  base?: TowerObjectiveLimits,
+): TowerObjectiveLimits {
+  const limits: TowerObjectiveLimits = {
+    maxValidationRounds:
+      positiveInteger(input?.maxValidationRounds, 'maxValidationRounds') ??
+      base?.maxValidationRounds ??
+      DEFAULT_MAX_VALIDATION_ROUNDS,
+    maxFeatureAttempts:
+      positiveInteger(input?.maxFeatureAttempts, 'maxFeatureAttempts') ??
+      base?.maxFeatureAttempts ??
+      DEFAULT_MAX_FEATURE_ATTEMPTS,
+  };
+  const wallTime = positiveInteger(input?.maxWallTimeMs, 'maxWallTimeMs') ?? base?.maxWallTimeMs;
+  if (wallTime !== undefined) limits.maxWallTimeMs = wallTime;
+  const cost = positiveNumber(input?.maxCostUsd, 'maxCostUsd') ?? base?.maxCostUsd;
+  if (cost !== undefined) limits.maxCostUsd = cost;
+  return limits;
+}
+
+export function buildValidationSpec(
+  input: TowerMilestoneValidationInput | undefined,
+  base?: TowerMilestoneValidationSpec,
+): TowerMilestoneValidationSpec {
+  const spec: TowerMilestoneValidationSpec = {
+    scrutiny: input?.scrutiny ?? base?.scrutiny ?? true,
+    userTesting: input?.userTesting ?? base?.userTesting ?? true,
+    commands: input?.commands !== undefined ? cleanList(input.commands) : [...(base?.commands ?? [])],
+  };
+  const qaInstructions =
+    input?.qaInstructions !== undefined ? input.qaInstructions.trim() : base?.qaInstructions;
+  if (qaInstructions !== undefined && qaInstructions.length > 0) spec.qaInstructions = qaInstructions;
+  return spec;
+}
+
+function nextObjectiveNumber(state: TowerState): number {
+  const ids = [
+    ...(state.objective === undefined ? [] : [state.objective.id]),
+    ...(state.objectiveHistory ?? []).map((objective) => objective.id),
+  ];
+  return Math.max(0, ...ids.map((id) => idNumber(id, 'O'))) + 1;
+}
+
+function nextMilestoneNumber(state: TowerState): number {
+  const ids = [
+    ...(state.objective?.milestones ?? []).map((milestone) => milestone.id),
+    ...(state.objectiveHistory ?? []).flatMap((objective) =>
+      objective.milestones.map((milestone) => milestone.id),
+    ),
+    ...state.missions.flatMap((mission) => (mission.milestone === undefined ? [] : [mission.milestone])),
+  ];
+  return Math.max(0, ...ids.map((id) => idNumber(id, 'MS'))) + 1;
+}
+
+function milestoneTitle(input: TowerMilestoneInput): string {
+  const title = input.title?.trim() ?? '';
+  if (title.length === 0) {
+    throw new TowerProtocolError('every new milestone needs a non-blank title');
+  }
+  return title;
+}
+
+function newMilestone(id: string, order: number, input: TowerMilestoneInput): TowerMilestone {
+  const description = input.description?.trim();
+  return {
+    id,
+    title: milestoneTitle(input),
+    ...(description !== undefined && description.length > 0 ? { description } : {}),
+    order,
+    validation: buildValidationSpec(input.validation),
+    status: 'pending',
+    rounds: [],
+  };
+}
+
+export function buildObjective(
+  state: TowerState,
+  input: TowerObjectiveDraftInput,
+  now: string,
+): TowerObjective {
+  const title = input.title.trim();
+  if (title.length === 0) {
+    throw new TowerProtocolError('an objective needs a non-blank title');
+  }
+  let next = nextMilestoneNumber(state);
+  const milestones = (input.milestones ?? []).map((item, index) => {
+    if (item.id !== undefined) {
+      throw new TowerProtocolError(
+        `drafted milestone "${item.title ?? item.id}" must not carry an id — the tower assigns milestone ids`,
+      );
+    }
+    const id = `MS${String(next)}`;
+    next += 1;
+    return newMilestone(id, index + 1, item);
+  });
+  return {
+    id: `O${String(nextObjectiveNumber(state))}`,
+    title,
+    goal: input.goal?.trim() ?? '',
+    definitionOfDone: cleanList(input.definitionOfDone),
+    acceptanceCommands: cleanList(input.acceptanceCommands),
+    status: 'planning',
+    milestones,
+    limits: buildLimits(input.limits),
+    createdAt: now,
+    notes: cleanList(input.notes),
+  };
+}
+
+interface EffectiveContract {
+  readonly scrutiny: boolean;
+  readonly userTesting: boolean;
+  readonly qaInstructions?: string;
+  readonly commands: readonly string[];
+}
+
+function effectiveContract(objective: TowerObjective, milestone: TowerMilestone): EffectiveContract {
+  return {
+    scrutiny: milestone.validation.scrutiny,
+    userTesting: milestone.validation.userTesting,
+    qaInstructions: milestone.validation.qaInstructions,
+    commands: validationCommands(objective, milestone),
+  };
+}
+
+function contractGrew(before: EffectiveContract, after: EffectiveContract): boolean {
+  return (
+    (after.scrutiny && !before.scrutiny) ||
+    (after.userTesting && (!before.userTesting || after.qaInstructions !== before.qaInstructions)) ||
+    after.commands.some((command) => !before.commands.includes(command))
+  );
+}
+
+function contractDiffers(before: EffectiveContract, after: EffectiveContract): boolean {
+  return (
+    before.scrutiny !== after.scrutiny ||
+    before.userTesting !== after.userTesting ||
+    before.qaInstructions !== after.qaInstructions ||
+    !sameList(before.commands, after.commands)
+  );
+}
+
+function reopenChangedMilestones(before: TowerObjective, after: TowerObjective): string[] {
+  const reopened: string[] = [];
+  for (const milestone of after.milestones) {
+    const previous = findMilestone(before, milestone.id);
+    if (previous === undefined) continue;
+    const was = effectiveContract(before, previous);
+    const now = effectiveContract(after, milestone);
+    const reopen =
+      milestone.status === 'passed'
+        ? contractGrew(was, now)
+        : milestone.status !== 'pending' && milestone.status !== 'active' && contractDiffers(was, now);
+    if (!reopen) continue;
+    milestone.status = 'active';
+    delete milestone.passedAt;
+    reopened.push(milestone.id);
+  }
+  return reopened;
+}
+
+export function applyObjectiveUpdate(
+  state: TowerState,
+  input: TowerObjectiveUpdateInput,
+): TowerObjectiveUpdateResult {
+  const before = state.objective;
+  if (before === undefined) {
+    throw new TowerProtocolError('there is no objective to update — draft one first');
+  }
+  if (before.status === 'completed') {
+    throw new TowerProtocolError(
+      `objective ${before.id} is completed and can no longer change — draft a new objective instead`,
+    );
+  }
+  const next = structuredClone(before);
+  const changes: string[] = [];
+  let contractChanged = false;
+
+  if (input.title !== undefined) {
+    const title = input.title.trim();
+    if (title.length === 0) throw new TowerProtocolError('an objective needs a non-blank title');
+    if (title !== next.title) {
+      next.title = title;
+      changes.push('title');
+    }
+  }
+  if (input.goal !== undefined && input.goal.trim() !== next.goal) {
+    next.goal = input.goal.trim();
+    changes.push('goal');
+    contractChanged = true;
+  }
+  if (input.definitionOfDone !== undefined) {
+    const definitionOfDone = cleanList(input.definitionOfDone);
+    if (!sameList(definitionOfDone, next.definitionOfDone)) {
+      next.definitionOfDone = definitionOfDone;
+      changes.push('definitionOfDone');
+      contractChanged = true;
+    }
+  }
+  if (input.acceptanceCommands !== undefined) {
+    const acceptanceCommands = cleanList(input.acceptanceCommands);
+    if (!sameList(acceptanceCommands, next.acceptanceCommands)) {
+      next.acceptanceCommands = acceptanceCommands;
+      changes.push('acceptanceCommands');
+      contractChanged = true;
+    }
+  }
+  if (input.limits !== undefined) {
+    const limits = buildLimits(input.limits, next.limits);
+    if (JSON.stringify(limits) !== JSON.stringify(next.limits)) {
+      next.limits = limits;
+      changes.push('limits');
+    }
+  }
+
+  const removed = [...new Set(cleanList(input.removeMilestones))];
+  for (const id of removed) {
+    if (findMilestone(next, id) === undefined) {
+      throw new TowerProtocolError(`objective ${next.id} has no milestone "${id}" to remove`);
+    }
+    const attached = milestoneMissions(state, id).filter((mission) => mission.status !== 'abandoned');
+    if (attached.length > 0) {
+      throw new TowerProtocolError(
+        `milestone ${id} cannot be removed — features ${attached.map((mission) => mission.id).join(', ')} are attached to it; abandon them first (TowerMission status=abandoned) or keep the milestone`,
+      );
+    }
+  }
+  if (removed.length > 0) {
+    next.milestones = next.milestones.filter((milestone) => !removed.includes(milestone.id));
+    changes.push(`removed ${removed.join(',')}`);
+    contractChanged = true;
+  }
+
+  const appended: TowerMilestoneInput[] = [];
+  for (const item of input.milestones ?? []) {
+    if (item.id === undefined) {
+      appended.push(item);
+      continue;
+    }
+    const milestone = findMilestone(next, item.id);
+    if (milestone === undefined) {
+      throw new TowerProtocolError(
+        `objective ${next.id} has no milestone "${item.id}" — omit the id to append a new milestone`,
+      );
+    }
+    if (item.title !== undefined) {
+      const title = milestoneTitle(item);
+      if (title !== milestone.title) {
+        milestone.title = title;
+        changes.push(`${milestone.id} title`);
+      }
+    }
+    if (item.description !== undefined) {
+      const description = item.description.trim();
+      if (description !== (milestone.description ?? '')) {
+        if (description.length > 0) milestone.description = description;
+        else delete milestone.description;
+        changes.push(`${milestone.id} description`);
+      }
+    }
+    if (item.validation !== undefined) {
+      const validation = buildValidationSpec(item.validation, milestone.validation);
+      if (!sameSpec(validation, milestone.validation)) {
+        milestone.validation = validation;
+        changes.push(`${milestone.id} validation`);
+        contractChanged = true;
+      }
+    }
+  }
+
+  let sequence = sortedMilestones(next);
+  if (input.milestoneOrder !== undefined) {
+    const order = cleanList(input.milestoneOrder);
+    const known = sequence.map((milestone) => milestone.id);
+    if (
+      order.length !== known.length ||
+      new Set(order).size !== order.length ||
+      order.some((id) => !known.includes(id))
+    ) {
+      throw new TowerProtocolError(
+        `milestoneOrder must list every existing milestone exactly once (${known.join(', ')}), got ${order.join(', ') || '(none)'}`,
+      );
+    }
+    if (!sameList(order, known)) {
+      sequence = order.map((id) => findMilestone(next, id)!);
+      changes.push(`reordered ${order.join(',')}`);
+      contractChanged = true;
+    }
+  }
+  let number = nextMilestoneNumber(state);
+  for (const item of appended) {
+    const milestone = newMilestone(`MS${String(number)}`, 0, item);
+    number += 1;
+    sequence.push(milestone);
+    changes.push(`appended ${milestone.id}`);
+  }
+  sequence.forEach((milestone, index) => {
+    milestone.order = index + 1;
+  });
+  next.milestones = sequence;
+
+  const notes = cleanList(input.notes);
+  if (notes.length > 0) {
+    next.notes.push(...notes);
+    changes.push('notes');
+  }
+
+  const reopened = reopenChangedMilestones(before, next);
+  if (contractChanged && next.approvedAt !== undefined) {
+    next.status = 'awaiting-approval';
+    next.approvalReason = 'contract-changed';
+    delete next.approvedBy;
+    delete next.approvedAt;
+    delete next.pausedReason;
+    delete next.blockedReason;
+  }
+  return { objective: next, contractChanged, changes, reopened };
+}
