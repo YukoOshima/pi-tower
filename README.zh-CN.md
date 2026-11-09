@@ -261,6 +261,7 @@ autopilot 会：
 - `blocker`：某个 worker 报告了 blocker 或提出了问题；
 - `feature-attempts-exhausted`：某个 feature 用完了 worker 尝试次数；
 - `worker-idle`：worker 被提醒之后，再次没有完成就空闲下来；
+- `worker-stopped`：你停止了某个 feature 的 worker，orchestrator 会询问你如何继续；
 - `merge-blocked`：合并检查因需要判断的原因而受阻，例如改动了 feature 范围之外的文件；
 - `rebase-conflict`：没有 worker 能接手的冲突；
 - `review-stuck` 和 `validation-stuck`：reviewer 或 validator 一再没有给出结果就结束，或者你停止了其中一个；
@@ -476,7 +477,7 @@ Tower 只能合并到本地 branch，不能合并到 remote-tracking ref 或 tag
 - **查看状态面板。** `/tower` 或 `/tower status` 会直接读取当前状态，不会触发模型轮次。可以看到 base、mission、roster（含每个 Agent 的模型）、review 检查、inbox 数量、并发预算和近期活动。存在 objective 时，还会多出一行 objective 摘要。
 - **跟进 objective。** `/tower objective status` 显示 objective 状态面板，同样不触发模型轮次：状态、耗时和花费、每个里程碑及其 feature 和验证轮次、正在运行的 Agent，以及预期的下一步。
 - **调整任务方向。** Tower 开启期间，直接发送普通消息即可补充约束、调整优先级或要求总结。Tower 把消息转给正在运行的 worker 后，worker 会在下一步看到它，正在执行的工具调用不会被打断。
-- **检查或停止 Agent。** `/tower agents` 列出本会话的 worker、reviewer 和 validator，以及它们的状态、模型、思考等级和分工。`/tower stop <agent>` 停止一个正在运行的 Agent。你主动停止的 worker、reviewer 或 validator 视为有意终止：除非你另有指示，Tower 不会恢复、改派或替换它。执行中 objective 的 autopilot 同样遵守这一点：对于被停止的 reviewer 或 validator，它会改为唤醒 orchestrator（`review-stuck` 或 `validation-stuck`），由 orchestrator 或你决定是否启动新的。失败或超时的 Agent 仍会被替换，最多 `maxFeatureAttempts` 次。
+- **检查或停止 Agent。** `/tower agents` 列出本会话的 worker、reviewer 和 validator，以及它们的状态、模型、思考等级和分工。`/tower stop <agent>` 停止一个正在运行的 Agent。你主动停止的 worker、reviewer 或 validator 视为有意终止：除非你另有指示，Tower 不会恢复、改派或替换它。执行中 objective 的 autopilot 同样遵守这一点：它绝不替换你停止的 Agent，而是改为唤醒 orchestrator（`worker-stopped`、`review-stuck` 或 `validation-stuck`），由 orchestrator 询问你如何继续。失败或超时的 Agent 仍会被替换，最多 `maxFeatureAttempts` 个（包括第一个）。
 - **切换 base。** 再次输入 `/tower <base-branch>`。Tower 会按新 base 重新检查现有 mission，只有落后的 branch 需要 rebase。合并之前，主 checkout 必须位于记录的 base 上。
 - **查看诊断日志。** pi-tower 会把自己的诊断信息（例如通知发送失败、Agent 会话中扩展报出的错误）写入 `.tower/pi-tower.log`；在 `.tower/` 创建之前，则写入 pi agent 目录下的 `pi-tower.log`。
 
