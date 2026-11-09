@@ -161,6 +161,10 @@ async function update(
     lines.push(
       `The validation contract changed after approval, so objective ${objective.id} is awaiting approval again: no new work starts until the human approves the revised plan with /tower approve. Tell the human what changed and why.`,
     );
+  } else if (result.contractChanged && objective.status === 'awaiting-approval') {
+    lines.push(
+      `Objective ${objective.id} is awaiting approval and the human approves the plan as it is now: tell the human what changed — TowerObjective(action="request-approval") returns the revised approval request.`,
+    );
   }
   if (result.reopened.length > 0) {
     lines.push(

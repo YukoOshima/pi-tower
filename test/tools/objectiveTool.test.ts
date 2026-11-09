@@ -237,6 +237,19 @@ describe('TowerObjective tool', () => {
     expect((await store.load()).objective?.approvalReason).toBe('contract-changed');
   });
 
+  it('asks to tell the human about a contract change while the first approval is pending', async () => {
+    expect((await objective(DRAFT)).isError).toBeUndefined();
+    await store.plan([{ title: 'Build csv model', scope: ['src/model/**'], milestone: 'MS1' }]);
+    await store.requestObjectiveApproval();
+
+    const result = await objective({ action: 'update', definition_of_done: ['export works', 'import works'] });
+
+    expect(result.isError).toBeUndefined();
+    expect(result.output).toContain('status awaiting-approval');
+    expect(result.output).toContain('the human approves the plan as it is now');
+    expect(result.output).not.toContain('awaiting approval again');
+  });
+
   it('reports an update that changes nothing', async () => {
     expect((await objective(DRAFT)).isError).toBeUndefined();
 
