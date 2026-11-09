@@ -53,6 +53,13 @@ describe('TOWER_OBJECTIVE_DESCRIPTION', () => {
       expect(TOWER_OBJECTIVE_DESCRIPTION).toContain(sentence);
     }
   });
+
+  it('wakes the orchestrator for idle workers and never replaces an agent the human stopped', () => {
+    expect(TOWER_OBJECTIVE_DESCRIPTION).toContain(
+      "and advances milestones. It never resumes, reassigns, or replaces an agent the human stopped: it wakes you instead, and you replace one only on the human's direction.",
+    );
+    expect(TOWER_OBJECTIVE_DESCRIPTION).toContain('answering blockers and idle workers');
+  });
 });
 
 describe('TOWER_VALIDATE_DESCRIPTION', () => {
@@ -107,6 +114,12 @@ describe('objective mode in existing tool descriptions', () => {
     );
     expect(TOWER_PLAN_DESCRIPTION).toContain('(with the autopilot off, you spawn them yourself)');
     expect(towerSpawnDescription()).toBe(TOWER_SPAWN_DESCRIPTION);
+  });
+
+  it('never has TowerSpawn replace a validator the human stopped on its own', () => {
+    expect(TOWER_SPAWN_DESCRIPTION).toContain(
+      "every validation round gets a fresh validator under a new name. A validator the human stopped is never replaced automatically; spawn a replacement only on the human's direction.",
+    );
   });
 
   it('keeps every new description free of triple newlines', () => {

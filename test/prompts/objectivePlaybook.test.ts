@@ -216,6 +216,19 @@ describe('objective playbook judgment wakes', () => {
     );
   });
 
+  it.each(PLAYBOOKS)(
+    'the %s playbook says the autopilot never replaces an agent the human stopped but wakes the orchestrator',
+    (_variant, playbook) => {
+      const mechanics = playbook.slice(
+        playbook.indexOf('5. **Let the autopilot run the mechanics.**'),
+        playbook.indexOf('6. **Own the judgment work.**'),
+      );
+      expect(mechanics).toContain(
+        'and advances milestones. It never resumes, reassigns, or replaces an agent the human stopped: that wakes you instead (worker-stopped, review-stuck, validation-stuck). Do not duplicate these steps',
+      );
+    },
+  );
+
   it('blocks a headless objective whose reviewer or validator the human stopped', () => {
     expect(stuckEntry(TOWER_OBJECTIVE_HEADLESS_PLAYBOOK)).toContain(
       'never replace it — nobody can answer in a headless run, so block the objective with a reason that names the stopped agent.',
@@ -271,6 +284,13 @@ describe('selectTowerModeReminder with an objective', () => {
       'Validation start, milestone advancement, and completion are always automatic; the feature mechanics are too unless the autopilot is off.',
     );
     expect(TOWER_OBJECTIVE_SPARSE_REMINDER.length).toBeLessThan(TOWER_OBJECTIVE_PLAYBOOK.length / 5);
+  });
+
+  it('keeps idle workers and the human-stop rule in the short objective line', () => {
+    expect(TOWER_OBJECTIVE_SPARSE_REMINDER).toContain(
+      'answer blockers and idle workers, route conflicts, merge blocks, and stuck reviews or validations, escalate.',
+    );
+    expect(TOWER_OBJECTIVE_SPARSE_REMINDER).toContain('Never replace an agent the human stopped unless the human says so.');
   });
 
   it('leaves the exit reminder untouched', () => {
