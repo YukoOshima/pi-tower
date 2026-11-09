@@ -25,9 +25,13 @@
     "url": "git+https://github.com/YukoOshima/pi-tower.git"
   },
   "engines": {
-    "node": ">=22"
+    "node": ">=22.19.0"
+  },
+  "bin": {
+    "pi-tower": "bin/pi-tower.js"
   },
   "files": [
+    "bin",
     "src",
     "examples",
     "README.md",
