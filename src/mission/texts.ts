@@ -119,9 +119,13 @@ export function missionPreviousLine(objective: TowerObjective): string {
   return `Previous mission ${objective.id} "${objective.title}" is ${objective.status} — your goal starts a new one.`;
 }
 
-export function missionPlanningLine(goal: string | undefined): string {
+export const MISSION_PLANNING_STALE_HINT =
+  'If the orchestrator is not asking you anything, run /mission <goal> to hand the goal over again.';
+
+export function missionPlanningLine(goal: string | undefined, stale: boolean): string {
   const subject = goal === undefined ? 'the goal you handed over' : `your goal: "${preview(goal, 160)}"`;
-  return `The orchestrator is planning ${subject}. Answer its questions in plain messages; it drafts the mission and proposes a plan for your approval. /mission <goal> starts over with another goal.`;
+  const next = stale ? MISSION_PLANNING_STALE_HINT : '/mission <goal> starts over with another goal.';
+  return `The orchestrator is planning ${subject}. Answer its questions in plain messages; it drafts the mission and proposes a plan for your approval. ${next}`;
 }
 
 export const MISSION_HANDED_TITLE = 'Mission goal handed to the orchestrator';

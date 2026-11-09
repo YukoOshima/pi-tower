@@ -7,7 +7,12 @@ import {
   type TowerModelSpec,
   type TowerPrimaryModel,
 } from '../../src/config/index.ts';
-import { MISSION_GOAL_QUESTION, MISSION_MODELS_HINT, missionCommandsFor } from '../../src/mission/texts.ts';
+import {
+  MISSION_GOAL_QUESTION,
+  MISSION_MODELS_HINT,
+  MISSION_PLANNING_STALE_HINT,
+  missionCommandsFor,
+} from '../../src/mission/texts.ts';
 import {
   missionModelLines,
   renderMissionControl,
@@ -146,11 +151,17 @@ describe('mission header', () => {
   it('renders the planning view and Mission Control with the commands of the state', () => {
     const resolved = resolveTowerModels(config({}), SESSION);
 
-    expect(renderMissionPlanning({ resolved }, 'Add   a CSV export')).toContain(
-      'The orchestrator is planning your goal: "Add a CSV export".',
-    );
-    expect(renderMissionPlanning({ resolved }, undefined)).toContain(
+    const busy = renderMissionPlanning({ resolved }, 'Add   a CSV export', false);
+    expect(busy).toContain('The orchestrator is planning your goal: "Add a CSV export".');
+    expect(busy.endsWith('/mission <goal> starts over with another goal.')).toBe(true);
+    expect(busy).not.toContain(MISSION_PLANNING_STALE_HINT);
+    const unknown = renderMissionPlanning({ resolved }, undefined, true);
+    expect(unknown).toContain(
       'The orchestrator is planning the goal you handed over. Answer its questions in plain messages;',
+    );
+    expect(unknown.endsWith(MISSION_PLANNING_STALE_HINT)).toBe(true);
+    expect(MISSION_PLANNING_STALE_HINT).toBe(
+      'If the orchestrator is not asking you anything, run /mission <goal> to hand the goal over again.',
     );
     const control = renderMissionControl({
       models: { resolved },

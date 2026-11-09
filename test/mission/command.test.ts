@@ -14,6 +14,7 @@ import {
   MISSION_HANDED_TITLE,
   MISSION_MODELS_TEXTS,
   MISSION_NO_COMMITS,
+  MISSION_PLANNING_STALE_HINT,
   MISSION_STOP_USAGE,
   MISSION_SUBCOMMANDS,
   missionHandedBody,
@@ -224,7 +225,8 @@ describe('/mission entry', () => {
     const shown = await h.run('');
 
     expect(shown.notices[0]?.title).toBe('Mission mode');
-    expect(shown.notices[0]?.body).toContain(missionPlanningLine(undefined));
+    expect(shown.notices[0]?.body).toContain(missionPlanningLine(undefined, true));
+    expect(shown.notices[0]?.body).toContain(MISSION_PLANNING_STALE_HINT);
     expect(h.mission.intakeArmed).toBe(false);
     expect(await h.input('CSV only, no JSON')).toEqual({ action: 'continue' });
     expect(h.pi.userMessages).toHaveLength(1);
@@ -245,8 +247,24 @@ describe('/mission entry', () => {
 
     const shown = await h.run('');
 
-    expect(shown.notices[0]?.body).toContain(missionPlanningLine(undefined));
+    expect(shown.notices[0]?.body).toContain(missionPlanningLine(undefined, true));
     expect(h.mission.intakeArmed).toBe(false);
+  });
+
+  it('adds the hand-over-again hint to the planning view unless the orchestrator is visibly working on a goal from this session', async () => {
+    const h = await missionHarness(cleanups);
+    await h.run('');
+    await h.input('Add a --format csv|json option to shop report');
+
+    h.ctx.idle = false;
+    const working = await h.run('');
+    expect(working.notices[0]?.body).toContain('/mission <goal> starts over with another goal.');
+    expect(working.notices[0]?.body).not.toContain(MISSION_PLANNING_STALE_HINT);
+
+    h.ctx.idle = true;
+    const quiet = await h.run('');
+    expect(quiet.notices[0]?.body).toContain('your goal: "Add a --format csv|json option to shop report"');
+    expect(quiet.notices[0]?.body).toContain(MISSION_PLANNING_STALE_HINT);
   });
 });
 

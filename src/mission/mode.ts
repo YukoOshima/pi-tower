@@ -6,6 +6,7 @@ import type {
   ExtensionContext,
   InputEvent,
   InputEventResult,
+  TerminalInputHandler,
 } from '@earendil-works/pi-coding-agent';
 
 import {
@@ -43,12 +44,14 @@ import {
 } from '../tower/command.ts';
 import type { TowerChange, TowerController, TowerExtensionApi } from '../tower/controller.ts';
 import {
+  MISSION_APPROVAL_QUIET_MS,
   MISSION_MODE_ENTRY,
   MISSION_REFRESH_THROTTLE_MS,
   MISSION_REFRESH_TICK_MS,
   MISSION_STATUS_KEY,
   MISSION_WIDGET_KEY,
 } from './constants.ts';
+import { typedInput, type TypedInput } from './keys.ts';
 import {
   missionPanelComponent,
   renderMissionPanel,
@@ -129,6 +132,7 @@ interface ObservedObjective {
 interface ApprovalDialog {
   readonly objectiveId: string;
   readonly abort: AbortController;
+  unguard: (() => void) | undefined;
 }
 
 interface SessionEntryLike {
@@ -156,6 +160,8 @@ export class MissionMode {
   private approvalRequested = false;
   private offerFor: string | undefined;
   private dialog: ApprovalDialog | undefined;
+  private unwatchKeys: (() => void) | undefined;
+  private lastInputAt: number | undefined;
   private shownLines: string | undefined;
   private shownStatus: string | undefined;
 
@@ -209,7 +215,8 @@ export class MissionMode {
     const visible = this.visibleObjective(state);
     try {
       if (visible === undefined && (this.phase === 'planning' || handoverPending(state))) {
-        ui.notice(MISSION_MODE_TITLE, renderMissionPlanning(this.modelsView(), this.goal));
+        const stale = this.goal === undefined || idle(ctx);
+        ui.notice(MISSION_MODE_TITLE, renderMissionPlanning(this.modelsView(), this.goal, stale));
       } else if (visible !== undefined && visible.status !== 'completed') {
         this.setPhase('idle');
         ui.notice(MISSION_CONTROL_TITLE, this.controlView(state, visible));
@@ -478,7 +485,9 @@ export class MissionMode {
       this.observed = undefined;
       if (persist) this.persist(true);
     }
-    if (ctx.hasUI) this.refresher.start();
+    if (!ctx.hasUI) return;
+    this.refresher.start();
+    this.watchKeys(ctx);
   }
 
   private deactivate(): void {
@@ -498,6 +507,21 @@ export class MissionMode {
     this.offerFor = undefined;
     this.closeDialog();
     this.refresher.stop();
+    this.unwatchKeys?.();
+    this.unwatchKeys = undefined;
+    this.lastInputAt = undefined;
+  }
+
+  private watchKeys(ctx: ExtensionContext): void {
+    if (this.unwatchKeys !== undefined || ctx.mode !== 'tui') return;
+    this.unwatchKeys = listenToTerminal(ctx, () => {
+      this.lastInputAt = this.timers.now();
+      return undefined;
+    });
+  }
+
+  private typedRecently(): boolean {
+    return this.lastInputAt !== undefined && this.timers.now() - this.lastInputAt < MISSION_APPROVAL_QUIET_MS;
   }
 
   private setPhase(phase: MissionPhase): void {
@@ -578,7 +602,7 @@ export class MissionMode {
       previous !== undefined &&
       (previous === null || previous.id !== objective.id || previous.status !== 'awaiting-approval');
     if ((entered || requested) && this.canOffer(ctx, state, objective)) this.offerFor = objective.id;
-    if (this.offerFor !== objective.id || !idle(ctx) || editorHoldsText(ctx)) return;
+    if (this.offerFor !== objective.id || !idle(ctx) || editorHoldsText(ctx) || this.typedRecently()) return;
     this.offerFor = undefined;
     this.closeDialog();
     this.offer(ctx, state, objective);
@@ -597,11 +621,40 @@ export class MissionMode {
   }
 
   private offer(ctx: ExtensionContext, state: TowerState, objective: TowerObjective): void {
-    const dialog: ApprovalDialog = { objectiveId: objective.id, abort: new AbortController() };
+    const dialog: ApprovalDialog = { objectiveId: objective.id, abort: new AbortController(), unguard: undefined };
     this.dialog = dialog;
+    if (ctx.mode === 'tui') {
+      dialog.unguard = listenToTerminal(ctx, (data) => this.guardDialog(ctx, dialog, data));
+    }
     const features = objectiveMissions(state).filter((mission) => mission.status !== 'abandoned').length;
     const question = missionApprovalDialog(objective, objective.milestones.length, features);
     void this.awaitApproval(ctx, dialog, question, objective);
+  }
+
+  private guardDialog(
+    ctx: ExtensionContext,
+    dialog: ApprovalDialog,
+    data: string,
+  ): ReturnType<TerminalInputHandler> {
+    if (this.dialog !== dialog) return undefined;
+    const typed = typedInput(data);
+    if (typed === undefined) return undefined;
+    this.offerFor = dialog.objectiveId;
+    this.closeDialog();
+    this.appendToEditor(ctx, typed);
+    return { consume: true };
+  }
+
+  private appendToEditor(ctx: ExtensionContext, typed: TypedInput): void {
+    try {
+      if (typed.kind === 'paste') {
+        ctx.ui.pasteToEditor(typed.text);
+        return;
+      }
+      ctx.ui.setEditorText(`${ctx.ui.getEditorText()}${typed.text}`);
+    } catch (error) {
+      this.controller.diagnostic(`typed input could not be moved to the editor: ${errorText(error)}`);
+    }
   }
 
   private async awaitApproval(
@@ -615,11 +668,11 @@ export class MissionMode {
     try {
       choice = await ctx.ui.select(question.title, [...question.options], { signal: dialog.abort.signal });
     } catch (error) {
-      if (this.dialog === dialog) this.dialog = undefined;
+      this.release(dialog);
       this.controller.diagnostic(`mission approval dialog failed: ${errorText(error)}`);
       return;
     }
-    if (this.dialog === dialog) this.dialog = undefined;
+    this.release(dialog);
     if (dialog.abort.signal.aborted) return;
     const ui = commandUi(ctx);
     try {
@@ -636,8 +689,15 @@ export class MissionMode {
   private closeDialog(): void {
     const dialog = this.dialog;
     if (dialog === undefined) return;
-    this.dialog = undefined;
+    this.release(dialog);
     dialog.abort.abort();
+  }
+
+  private release(dialog: ApprovalDialog): void {
+    if (this.dialog === dialog) this.dialog = undefined;
+    const unguard = dialog.unguard;
+    dialog.unguard = undefined;
+    unguard?.();
   }
 
   private panelInput(state: TowerState, objective: TowerObjective): MissionPanelInput {
@@ -751,6 +811,14 @@ function idle(ctx: ExtensionContext): boolean {
     return ctx.isIdle();
   } catch {
     return true;
+  }
+}
+
+function listenToTerminal(ctx: ExtensionContext, handler: TerminalInputHandler): (() => void) | undefined {
+  try {
+    return ctx.ui.onTerminalInput(handler);
+  } catch {
+    return undefined;
   }
 }
 

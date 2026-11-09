@@ -1,5 +1,6 @@
 export * from './command.ts';
 export * from './constants.ts';
+export * from './keys.ts';
 export * from './mode.ts';
 export * from './panel.ts';
 export * from './refresher.ts';

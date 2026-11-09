@@ -2,7 +2,12 @@ import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 
-import type { InputEvent, InputEventResult, SessionStartEvent } from '@earendil-works/pi-coding-agent';
+import type {
+  InputEvent,
+  InputEventResult,
+  SessionStartEvent,
+  TerminalInputHandler,
+} from '@earendil-works/pi-coding-agent';
 
 import { handleMissionCommand } from '../../src/mission/command.ts';
 import { MISSION_STATUS_KEY, MISSION_WIDGET_KEY } from '../../src/mission/constants.ts';
@@ -148,14 +153,28 @@ export interface WidgetCall {
 
 type WidgetContent = string[] | ((tui: unknown, theme: unknown) => { render(width: number): string[] }) | undefined;
 
+export interface DialogComponent {
+  handleInput(data: string): void;
+}
+
+export type SelectorFactory = (
+  title: string,
+  options: readonly string[],
+  done: (value: string | undefined) => void,
+) => DialogComponent;
+
 export const WIDE = 1_000;
 
 export class MissionContext extends FakeContext {
   readonly selects: SelectCall[] = [];
   readonly widgetCalls: WidgetCall[] = [];
   readonly statusCalls: { readonly key: string; readonly text: string | undefined }[] = [];
+  readonly terminalListeners = new Set<TerminalInputHandler>();
+  readonly submitted: string[] = [];
   selectFailure: Error | undefined;
+  selectorFactory: SelectorFactory | undefined;
   editorText = '';
+  private focusedDialog: DialogComponent | undefined;
 
   constructor(cwd: string, session: FakeSessionManager) {
     super(cwd, session);
@@ -168,15 +187,35 @@ export class MissionContext extends FakeContext {
             resolve(undefined);
             return;
           }
-          opts?.signal?.addEventListener(
-            'abort',
-            () => {
-              resolve(undefined);
-            },
-            { once: true },
-          );
-          this.selects.push({ title, options: [...options], signal: opts?.signal, answer: resolve });
+          let component: DialogComponent | undefined;
+          let settled = false;
+          const finish = (value: string | undefined): void => {
+            if (settled) return;
+            settled = true;
+            opts?.signal?.removeEventListener('abort', onAbort);
+            if (this.focusedDialog === component) this.focusedDialog = undefined;
+            resolve(value);
+          };
+          const onAbort = (): void => {
+            finish(undefined);
+          };
+          opts?.signal?.addEventListener('abort', onAbort, { once: true });
+          component = this.selectorFactory?.(title, options, finish);
+          if (component !== undefined) this.focusedDialog = component;
+          this.selects.push({ title, options: [...options], signal: opts?.signal, answer: finish });
         });
+      },
+      onTerminalInput: (handler: TerminalInputHandler): (() => void) => {
+        this.terminalListeners.add(handler);
+        return () => {
+          this.terminalListeners.delete(handler);
+        };
+      },
+      setEditorText: (text: string): void => {
+        this.editorText = text;
+      },
+      pasteToEditor: (text: string): void => {
+        this.editorText += text;
       },
       setWidget: (key: string, content: WidgetContent, options?: { readonly placement?: string }): void => {
         if (typeof content === 'function') {
@@ -193,6 +232,35 @@ export class MissionContext extends FakeContext {
       },
       getEditorText: (): string => this.editorText,
     });
+  }
+
+  get dialogFocused(): boolean {
+    return this.focusedDialog !== undefined;
+  }
+
+  type(data: string): void {
+    let current = data;
+    for (const listener of this.terminalListeners) {
+      const result = listener(current);
+      if (result?.consume === true) return;
+      if (result?.data !== undefined) current = result.data;
+    }
+    if (current.length === 0) return;
+    if (this.focusedDialog !== undefined) {
+      this.focusedDialog.handleInput(current);
+      return;
+    }
+    if (current === '\r') {
+      this.submitted.push(this.editorText);
+      this.editorText = '';
+      return;
+    }
+    const code = current.codePointAt(0) ?? 0;
+    if (code >= 32 && code !== 127) this.editorText += current;
+  }
+
+  typeEach(keys: string): void {
+    for (const key of keys) this.type(key);
   }
 
   widget(key = MISSION_WIDGET_KEY): readonly string[] | undefined {
