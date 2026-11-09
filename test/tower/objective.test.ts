@@ -527,3 +527,58 @@ describe('tower agents on the real runtime', () => {
     expect(autopilot.calls).toEqual(['start', 'tick inbox', 'tick tool TowerSend']);
   });
 });
+
+describe('autopilot observations', () => {
+  async function launch(h: Harness, name: string, kind: 'worker' | 'reviewer' | 'validator' = 'worker'): Promise<string> {
+    const launched = await h.controller.launchAgent({ name, kind, description: name, cwd: h.repo, prompt: 'go' });
+    if (!launched.ok) throw new Error(launched.reason);
+    return launched.agentId;
+  }
+
+  it('maps live runtime agents, keeping a winding-down agent running and passing the stop reason', async () => {
+    const h = await harness();
+    const running = await launch(h, 'w-running');
+    const idle = await launch(h, 'w-idle');
+    const failed = await launch(h, 'w-failed');
+    const timedOut = await launch(h, 'w-timeout');
+    const stopping = await launch(h, 'w-stopping');
+
+    h.runtime.finish(idle, 'idle');
+    h.runtime.finish(failed, 'failed', { stopReason: 'provider error' });
+    h.runtime.finish(timedOut, 'timed_out', { stopReason: 'timed out after 2h' });
+    h.runtime.finish(stopping, 'stopped', { stopReason: 'user', windingDown: true });
+
+    expect(h.controller.autopilotAgent(running)).toEqual({ status: 'running' });
+    expect(h.controller.autopilotAgent(idle)).toEqual({ status: 'idle' });
+    expect(h.controller.autopilotAgent(failed)).toEqual({ status: 'failed', stopReason: 'provider error' });
+    expect(h.controller.autopilotAgent(timedOut)).toEqual({ status: 'timeout', stopReason: 'timed out after 2h' });
+    expect(h.controller.autopilotAgent(stopping)).toEqual({ status: 'running', stopReason: 'user' });
+  });
+
+  it('reports a disposed validator by its retained outcome and an agent this process never ran as gone', async () => {
+    const h = await harness();
+    await h.controller.enter();
+    const validator = await launch(h, 'ap-v-MS1-scrutiny-1', 'validator');
+
+    h.runtime.finish(validator, 'idle', { summary: 'pass' });
+    await settle();
+
+    expect(h.runtime.disposed).toEqual([validator]);
+    expect(h.controller.autopilotAgent(validator)).toEqual({ status: 'completed' });
+    expect(h.controller.autopilotAgent('agent-from-a-previous-session')).toBeUndefined();
+  });
+
+  it('reports unknown, never running, when the process has no agent runtime', async () => {
+    const h = await harness({ runtime: false });
+
+    expect(h.controller.autopilotAgent('agent-1')).toEqual({ status: 'unknown' });
+  });
+
+  it('sees the orchestrator busy while the main session runs a turn', async () => {
+    const h = await harness();
+
+    expect(h.controller.orchestratorBusy()).toBe(false);
+    h.ctx.idle = false;
+    expect(h.controller.orchestratorBusy()).toBe(true);
+  });
+});

@@ -148,6 +148,20 @@ export interface TowerAutopilot {
   tick(reason: string): Promise<void>;
 }
 
+export type TowerAutopilotAgentStatus =
+  | 'running'
+  | 'idle'
+  | 'completed'
+  | 'failed'
+  | 'timeout'
+  | 'stopped'
+  | 'unknown';
+
+export interface TowerAutopilotAgent {
+  readonly status: TowerAutopilotAgentStatus;
+  readonly stopReason?: string;
+}
+
 export interface TowerControllerOptions {
   readonly pi: TowerExtensionApi;
   readonly createRuntime?: (controller: TowerController) => TowerRuntime;
@@ -404,6 +418,19 @@ export class TowerController implements TowerToolHost {
 
   agentInfo(id: string): TowerAgentInfo | undefined {
     return this.runtimeInstance?.get(id) ?? this.retainedOutput(id);
+  }
+
+  autopilotAgent(agentId: string): TowerAutopilotAgent | undefined {
+    const runtime = this.runtime;
+    if (runtime === undefined) return { status: 'unknown' };
+    const live = runtime.get(agentId);
+    if (live !== undefined) return observedAgent(live, false);
+    const retained = this.retainedOutputs.get(agentId);
+    return retained === undefined ? undefined : observedAgent(retained, true);
+  }
+
+  orchestratorBusy(): boolean {
+    return !this.isMainIdle();
   }
 
   agentOutput(id: string): TowerAgentOutput | undefined {
@@ -1130,6 +1157,25 @@ async function createBaseBranch(repoRoot: string, base: string): Promise<void> {
       `created and switched to "${base}", but committing the checkout's uncommitted changes onto it failed: ${errorText(error)}. ` +
         `The changes are still uncommitted on "${base}" — commit or move them, then re-run /tower ${base}.`,
     );
+  }
+}
+
+function observedAgent(info: TowerAgentInfo, disposed: boolean): TowerAutopilotAgent {
+  const status = observedStatus(info, disposed);
+  return info.stopReason === undefined ? { status } : { status, stopReason: info.stopReason };
+}
+
+function observedStatus(info: TowerAgentInfo, disposed: boolean): TowerAutopilotAgentStatus {
+  if (info.status === 'running' || info.windingDown) return disposed ? 'stopped' : 'running';
+  switch (info.status) {
+    case 'idle':
+      return disposed ? 'completed' : 'idle';
+    case 'failed':
+      return 'failed';
+    case 'stopped':
+      return 'stopped';
+    case 'timed_out':
+      return 'timeout';
   }
 }
 
