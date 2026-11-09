@@ -633,6 +633,62 @@ describe('runHeadless', () => {
     expect(plain(run.errors).at(-1)).toBe('objective O1 needs approval — a human must approve: run /tower approve in pi');
   });
 
+  it('follows the objective when the auto-approval is refused because the tower approved the plan meanwhile', async () => {
+    const run = stubRun((pi, state) => {
+      towerOn(pi, state, snapshot(stage('awaiting-approval', 'pending', 'pending'), FEATURES));
+      pi.reactions['/tower approve --auto'] = {
+        notices: [
+          {
+            level: 'error',
+            text: 'Approval failed — objective O1 is executing — only an objective awaiting approval can be approved; the orchestrator requests approval first',
+          },
+        ],
+        effect: () => {
+          state.push(snapshot(stage('executing', 'active', 'pending'), FEATURES), snapshot(stage('completed', 'passed', 'passed'), merged('M1', 'M2', 'M3')));
+        },
+      };
+    });
+
+    expect(await runHeadless(runOptions({ autoApprove: true, timeoutMs: 60_000 }), run.deps)).toBe(HEADLESS_EXIT.completed);
+
+    expect(run.pi().commands).toEqual(['/tower on', '/tower approve --auto']);
+    expect(plain(run.info)).toContain('objective O1 moved on to executing meanwhile, so pi refused /tower approve --auto — following it');
+    expect(plain(run.info)).toContain('objective O1 "Ship the widget" completed');
+    expect(run.info.some((line) => line.includes('auto-approved'))).toBe(false);
+    expect(run.errors).toEqual([]);
+  });
+
+  it('gives the tower two polls to approve the plan itself before exiting 3, and follows the objective when it does', async () => {
+    const run = stubRun((pi, state) => {
+      towerOn(pi, state, snapshot(stage('awaiting-approval', 'pending', 'pending'), FEATURES));
+      state.onRead = (reads) => {
+        if (reads === 3) state.push(snapshot(stage('executing', 'active', 'pending'), FEATURES), snapshot(stage('completed', 'passed', 'passed'), merged('M1', 'M2', 'M3')));
+      };
+    });
+
+    expect(await runHeadless(runOptions(), run.deps)).toBe(HEADLESS_EXIT.completed);
+
+    expect(run.pi().commands).toEqual(['/tower on']);
+    expect(run.info.filter((line) => line.startsWith('Plan for O1'))).toHaveLength(1);
+    expect(plain(run.info)).toContain('objective O1 moved on to executing while waiting for its approval — following it');
+    expect(run.errors).toEqual([]);
+  });
+
+  it('exits 3 only after the plan stayed awaiting approval for two polls', async () => {
+    const run = stubRun((pi, state) => {
+      towerOn(pi, state, snapshot(stage('awaiting-approval', 'pending', 'pending'), FEATURES));
+    });
+
+    expect(await runHeadless(runOptions(), run.deps)).toBe(HEADLESS_EXIT.approval);
+
+    expect(run.state.reads).toBe(4);
+    expect(run.clock.now()).toBe(2000);
+    expect(run.info.filter((line) => line.startsWith('Plan for O1'))).toHaveLength(1);
+    expect(plain(run.errors)).toEqual([
+      'objective O1 needs approval — re-run with --auto-approve to approve and continue it, or run /tower approve in pi',
+    ]);
+  });
+
   it('keeps exit 1 for a refusal that only mentions a human without the protocol marker', async () => {
     const run = stubRun((pi, state) => {
       towerOn(pi, state, snapshot(stage('awaiting-approval', 'active', 'pending'), FEATURES));

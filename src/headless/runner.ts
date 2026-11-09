@@ -55,16 +55,21 @@ export interface HeadlessDeps {
 
 const ADOPTABLE = new Set(['awaiting-approval', 'executing', 'paused']);
 const TERMINAL = new Set(['completed', 'blocked']);
+const PAST_APPROVAL = new Set(['executing', 'paused', 'completed', 'blocked']);
 const FINISHED_FEATURES = new Set(['merged', 'abandoned']);
+const DEFAULT_POLL_MS = 1000;
+const APPROVAL_GRACE_POLLS = 2;
 const EXTENSION_ENTRY = fileURLToPath(new URL('../index.ts', import.meta.url));
 const EXTENSION_HINT = `is the pi-tower extension loaded? Install it as a pi package or pass -- -e ${EXTENSION_ENTRY}`;
 
 class HeadlessExit extends Error {
   readonly code: number;
+  readonly refusal: readonly string[] | undefined;
 
-  constructor(code: number, message: string) {
+  constructor(code: number, message: string, refusal?: readonly string[]) {
     super(message);
     this.code = code;
+    this.refusal = refusal;
   }
 }
 
@@ -157,6 +162,7 @@ class HeadlessRun {
   private waitingNoted = false;
   private stateError: string | undefined;
   private commandsInFlight = 0;
+  private approvalSince: number | undefined;
 
   constructor(options: HeadlessRunOptions, deps: HeadlessDeps) {
     this.options = options;
@@ -232,9 +238,9 @@ class HeadlessRun {
     return new HeadlessExit(HEADLESS_EXIT.timeout, `timed out after ${String(this.options.timeoutMs)}ms${this.objectiveSuffix()}`);
   }
 
-  private failure(code: number, message: string): HeadlessExit {
+  private failure(code: number, message: string, refusal?: readonly string[]): HeadlessExit {
     const tail = this.pi?.stderrTail() ?? '';
-    return new HeadlessExit(code, tail.length > 0 ? `${message}\npi stderr (last lines):\n${indent(tail)}` : message);
+    return new HeadlessExit(code, tail.length > 0 ? `${message}\npi stderr (last lines):\n${indent(tail)}` : message, refusal);
   }
 
   private async guard<T>(promise: Promise<T>): Promise<T> {
@@ -315,12 +321,7 @@ class HeadlessRun {
     throw this.failure(HEADLESS_EXIT.startup, `pi has no /tower command — ${EXTENSION_HINT}`);
   }
 
-  private async towerCommand(
-    pi: HeadlessPi,
-    text: string,
-    code: number,
-    refused?: (errors: readonly string[]) => HeadlessExit | undefined,
-  ): Promise<PiCommandResult> {
+  private async towerCommand(pi: HeadlessPi, text: string, code: number): Promise<PiCommandResult> {
     if (this.interrupt !== undefined) throw this.interruptExit();
     this.line(`> ${text}`);
     this.commandsInFlight += 1;
@@ -341,7 +342,7 @@ class HeadlessRun {
       );
     }
     const errors = result.notices.filter((notice) => notice.level === 'error').map((notice) => notice.text);
-    if (errors.length > 0) throw refused?.(errors) ?? this.failure(code, `${text} failed: ${errors.join(' | ')}`);
+    if (errors.length > 0) throw this.failure(code, `${text} failed: ${errors.join(' | ')}`, errors);
     for (const notice of result.notices) {
       if (notice.level === 'info') this.line(`pi: ${notice.text.split('\n')[0] ?? ''}`);
       else this.fail(`pi ${notice.level}: ${notice.text}`);
@@ -410,12 +411,16 @@ class HeadlessRun {
         if (this.interrupt !== undefined) throw this.interruptExit();
         continue;
       }
-      await this.deps.clock.sleep(this.deps.pollMs ?? 1000, this.stop.signal);
+      await this.deps.clock.sleep(this.pollMs(), this.stop.signal);
       if (this.interrupt !== undefined) throw this.interruptExit();
     }
   }
 
   private async react(pi: HeadlessPi, objective: HeadlessObjective, features: readonly HeadlessFeature[]): Promise<HeadlessExit | 'approved' | undefined> {
+    if (objective.status !== 'awaiting-approval' && this.approvalSince !== undefined) {
+      this.approvalSince = undefined;
+      this.line(`objective ${objective.id} moved on to ${objective.status} while waiting for its approval — following it`);
+    }
     switch (objective.status) {
       case 'completed':
         return new HeadlessExit(HEADLESS_EXIT.completed, `objective ${objective.id} "${objective.title}" completed`);
@@ -427,13 +432,8 @@ class HeadlessRun {
           `objective ${objective.id} is paused: ${objective.pausedReason ?? 'no reason recorded'} — resume it with /tower resume in pi, then re-run pi-tower run to follow it`,
         );
       case 'awaiting-approval':
+        if (!this.options.autoApprove) return this.awaitApproval(objective, features);
         this.deps.output.info(renderPlan(objective, features));
-        if (!this.options.autoApprove) {
-          throw new HeadlessExit(
-            HEADLESS_EXIT.approval,
-            `objective ${objective.id} needs approval — re-run with --auto-approve to approve and continue it, or run /tower approve in pi`,
-          );
-        }
         await this.approve(pi, objective);
         return 'approved';
       default:
@@ -441,13 +441,39 @@ class HeadlessRun {
     }
   }
 
+  private awaitApproval(objective: HeadlessObjective, features: readonly HeadlessFeature[]): undefined {
+    const now = this.deps.clock.now();
+    if (this.approvalSince === undefined) {
+      this.approvalSince = now;
+      this.deps.output.info(renderPlan(objective, features));
+    }
+    if (now - this.approvalSince < APPROVAL_GRACE_POLLS * this.pollMs()) return undefined;
+    throw new HeadlessExit(
+      HEADLESS_EXIT.approval,
+      `objective ${objective.id} needs approval — re-run with --auto-approve to approve and continue it, or run /tower approve in pi`,
+    );
+  }
+
   private async approve(pi: HeadlessPi, objective: HeadlessObjective): Promise<void> {
-    await this.towerCommand(pi, AUTO_APPROVE_COMMAND, HEADLESS_EXIT.stopped, (errors) => {
-      if (!errors.some((error) => error.includes(TOWER_HUMAN_APPROVAL_MARKER))) return undefined;
-      this.fail(`pi refused ${AUTO_APPROVE_COMMAND}: ${errors.join(' | ')}`);
-      return new HeadlessExit(HEADLESS_EXIT.approval, `objective ${objective.id} needs approval — a human must approve: run /tower approve in pi`);
-    });
+    try {
+      await this.towerCommand(pi, AUTO_APPROVE_COMMAND, HEADLESS_EXIT.stopped);
+    } catch (error) {
+      const refusal = error instanceof HeadlessExit ? error.refusal : undefined;
+      if (refusal === undefined) throw error;
+      const latest = (await this.snapshot())?.objective;
+      if (latest?.id === objective.id && PAST_APPROVAL.has(latest.status)) {
+        this.line(`objective ${objective.id} moved on to ${latest.status} meanwhile, so pi refused ${AUTO_APPROVE_COMMAND} — following it`);
+        return;
+      }
+      if (!refusal.some((text) => text.includes(TOWER_HUMAN_APPROVAL_MARKER))) throw error;
+      this.fail(`pi refused ${AUTO_APPROVE_COMMAND}: ${refusal.join(' | ')}`);
+      throw new HeadlessExit(HEADLESS_EXIT.approval, `objective ${objective.id} needs approval — a human must approve: run /tower approve in pi`);
+    }
     this.line(`auto-approved the plan of ${objective.id} (--auto-approve)`);
+  }
+
+  private pollMs(): number {
+    return this.deps.pollMs ?? DEFAULT_POLL_MS;
   }
 }
 
