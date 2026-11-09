@@ -15,7 +15,9 @@ export type TowerToolName =
   | 'TowerResume'
   | 'TowerTasks'
   | 'TowerTaskOutput'
-  | 'TowerTaskStop';
+  | 'TowerTaskStop'
+  | 'TowerObjective'
+  | 'TowerValidate';
 
 export const TOWER_INIT_DESCRIPTION = [
   'Initialize a tower multi-agent workspace in the current repository.',
@@ -30,11 +32,13 @@ export const TOWER_PLAN_DESCRIPTION = [
   "Write tasks as verifiable check items — the worker ticks them off, the completion report reconciles against them item by item, and the reviewer maps every one to the diff. When the user's own words carry intent your paraphrase could lose, copy the key sentences into `context` verbatim (when in doubt, include it): context supplements your paraphrase, never replaces it, and travels with the mission into the worker and reviewer briefings. Do not paste the full conversation history into it.",
   'Rules enforced by the store: scopes of build missions must be pairwise disjoint or serialized by a dependency — for overlapping build scopes, the store auto-adds merge dependencies from later missions to earlier ones; workers still spawn and edit in parallel; survey missions are read-only and reserve no scope; deps must reference existing mission ids; and mission branches must be unique — a title whose slugged branch collides with any existing mission\'s branch (including abandoned or merged ones) or with an unowned local git branch is rejected, so rename the title and plan again. Titles must be printable ASCII English: a title containing any non-ASCII character (CJK, Cyrillic, Hangul, accented letters) is rejected outright, because non-ASCII text slugs to a generic word like "item" that collides across missions, while printable ASCII punctuation (spaces, "-", "_", "+") folds into the slug without losing words — include a unique identifier word (e.g. a business code like B010100). Plan once, then spawn one worker per mission with TowerSpawn. Requires an active tower workspace (run TowerInit first).',
   'Scope globs do not capture semantic dependencies; add explicit deps when a mission requires another mission to merge first.',
+  'Objective mode: while an objective is open, every mission is a feature of exactly one milestone — pass milestone (e.g. "MS1") on each item; it is required then and must be omitted otherwise. The autopilot starts the features of the current milestone in parallel, each as soon as its deps are merged or abandoned; features planned into later milestones wait until their milestone becomes current. After a failed validation, plan fix features into the milestone that failed with origin "fix" (default "plan"), one per failure or per tightly related group of failures: planning into a failed milestone reopens it, and validation re-runs once the fixes merge.',
 ].join('\n\n');
 
 export const TOWER_SPAWN_DESCRIPTION = [
   'Spawn a tower worker or reviewer as a background subagent and register it in the tower roster.',
   "Workers: pass mission_id — the tool creates the mission worktree, starts the worker's session with that worktree as its working directory, marks the mission active with this worker as owner, and briefs the agent with the full mission text. Reviewers: pass review_target — the reviewer works read-only in the main checkout; when the branch belongs to a mission, the briefing carries the full mission text (title, tasks, and any verbatim user context) plus the author's own review-request when one is on file, so the review verifies intent against the mission, not only code health; the agent must submit its verdict via TowerReview.",
+  'Validators (objective mode): pass kind="validator" with milestone and validation_kind ("scrutiny" or "user-testing"). The tool checks out a detached validation worktree at the current base tip and briefs the validator with the objective, the milestone\'s features and their tasks, the validated commit, and the failures of earlier rounds; the validator works read-only, never commits, and reports exactly once via TowerValidate. When model is omitted, validators use the validator model, falling back to the reviewer model and then the orchestrator model. The autopilot spawns validators by itself — spawn one manually only when the autopilot is off. Validators are one-shot like reviewers: never resume one; every validation round gets a fresh validator under a new name.',
   "Model selection: pass model only when the user explicitly requests a model for this spawn; do not infer a selection from mission text or instructions. The allowed choices are the three configurable roles — orchestrator (also accepted as primary: the tower's own model), worker, and reviewer — plus any optional pool aliases configured for the tower, not arbitrary provider/model ids. When model is omitted, workers use the worker model and reviewers use the reviewer model, each falling back to the orchestrator model when unset; the role models come from tower.json, environment variables, or CLI flags. A choice applies only to this new spawn: it does not change running or resumed agents and is not persisted on the mission.",
   'When the branch already has history, the briefing carries it too: a worker respawned onto a reviewed branch gets the latest review round (verdict, findings, decision) and the previous worker\'s review-request, so rework continues from the verdict instead of starting cold; a reviewer gets the branch\'s earlier review rounds, so repeat findings are verified against the current tip rather than reported again. First spawns have no history sections. Note that a non-clean verdict flips a completed mission back to active — "completed" means awaiting review, while "merged" and "abandoned" are terminal.',
   "If the base checkout has uncommitted changes (staged, unstaged, or untracked) when a worker spawns, the tool captures them as a snapshot commit that becomes the mission branch's first commit — the worker starts from HEAD + that WIP instead of plain HEAD. The checkout itself is never touched (nothing is committed, staged, or stashed there), and the merge gate later diffs the branch from that snapshot while it remains part of the branch's history (falling back to the base branch once a rebase drops the snapshot commit), so the WIP is never mistaken for the worker's own scope. Snapshotting requires the main checkout to be on the recorded base branch: WIP sitting on a different branch (or a detached HEAD) belongs to that line of work, so the spawn is refused rather than mixing that content into the base — switch back to the base or commit/stash first. The snapshot only happens when the branch is first created; re-adding an existing branch reuses it as-is.",
@@ -147,6 +151,28 @@ export const TOWER_TASK_STOP_DESCRIPTION = [
   ].join('\n'),
 ].join('\n\n');
 
+export const TOWER_OBJECTIVE_DESCRIPTION = [
+  'Manage the tower objective: the end-to-end goal the fleet keeps working on until its validation contract is met. The objective is split into ordered milestones; the features of the current milestone run in parallel as ordinary tower missions (each with its own worker, independent review, and merge gate), and a milestone must pass validation before the next one starts. Orchestrator only — workers, reviewers, and validators cannot use this tool. At most one objective is open per workspace.',
+  "The contract has four parts: a goal; a definition of done (verifiable items); optional acceptance commands (shell commands that must exit 0 on the final milestone); and ordered milestones, each with a validation spec — scrutiny (a validator reviews the milestone's merged diff against its features' tasks and runs typecheck/tests), user-testing (a validator exercises the product the way a user would, following qa_instructions), and commands (shell commands the tower runs itself, no model involved). Plan the features of a milestone with TowerPlan(milestone=\"MS1\").",
+  'Actions:',
+  [
+    '- draft — create the objective while you plan it with the human: title, goal, definition_of_done, acceptance_commands, milestones, and optionally a first note. Refused while another objective is still open.',
+    "- update — revise the plan: every draft field you pass replaces the stored one, and note appends a decision or assumption. milestones is the complete ordered list: keep a milestone by passing its id, add one by omitting the id, remove one by leaving it out. After approval, changing the contract (goal, definition_of_done, acceptance_commands, a milestone's validation spec, removing or reordering milestones) sends the objective back to awaiting-approval until the human approves again; appending milestones at the end and adding notes do not.",
+    '- request-approval — hand the plan to the human. Requires a goal, at least one definition-of-done item, at least one milestone, and at least one build feature planned into the first milestone. The human receives the plan summary and an estimated run count (features + 2 × milestones) and approves with `/tower approve`.',
+    '- status — show the objective dashboard: status, elapsed time, cost, every milestone with its features and validation rounds, live agents, and the next expected step.',
+    '- block — stop the objective with reason when the work cannot converge (the same failure keeps coming back, or only the human can resolve it); the human is notified and decides whether to resume.',
+  ].join('\n'),
+  "There is no approve action: only the human approves (`/tower approve`), or auto-approval when the human configured it. Never approve, or claim approval, on the human's behalf. There is no complete action either: completion is automatic and gated — the objective completes only when every milestone has passed validation, no feature is still open, and the final milestone's passing rounds are stamped on the current base tip.",
+  'Once approved, the autopilot drives the mechanics through the same tower tools and gates you use: it spawns workers, reviewers, and validators, rebases stale branches, merges gate-ready branches, starts validation, and advances milestones. You are woken only for judgment work — planning a milestone, planning fix features after a failed validation, answering blockers, routing conflicts and merge blocks, and escalating to the human.',
+].join('\n\n');
+
+export const TOWER_VALIDATE_DESCRIPTION = [
+  'Submit the verdict of the milestone validation you were assigned (via TowerSpawn kind="validator"). Validators only: workers, reviewers, and the orchestrator cannot use this tool, and the mechanical `commands` kind is recorded by the tower itself.',
+  'Pass milestone (e.g. "MS1") and kind ("scrutiny" or "user-testing") exactly as your briefing names them; verdict "pass" only when every check in your briefing holds, otherwise "fail"; failures — one self-contained item per problem (what is wrong, where, how to reproduce, what was expected), at least one on fail and none on pass, because the orchestrator turns each failure into fix features; checks — what you verified; evidence — the commands you ran with their key output, and what you observed.',
+  'The verdict is stamped with the commit your validation worktree was checked out at, as the next round for this milestone and kind (numbered automatically). The milestone passes only when the latest round of every required kind passes on the same commit; a round stamped on an older commit is stale, and validation re-runs on the new base tip.',
+  'Call it exactly once, after you have finished checking. It writes the validation file under .tower/comms/validations/ and stores the standard validation-result notification to the tower in the same protocol flow — do not send a manual TowerSend. Your validation worktree is detached and read-only: never edit files or commit there; report problems as failures instead of fixing them.',
+].join('\n\n');
+
 export const TOWER_TOOL_DESCRIPTIONS: Readonly<Record<TowerToolName, string>> = {
   TowerInit: TOWER_INIT_DESCRIPTION,
   TowerPlan: TOWER_PLAN_DESCRIPTION,
@@ -165,6 +191,8 @@ export const TOWER_TOOL_DESCRIPTIONS: Readonly<Record<TowerToolName, string>> = 
   TowerTasks: TOWER_TASKS_DESCRIPTION,
   TowerTaskOutput: TOWER_TASK_OUTPUT_DESCRIPTION,
   TowerTaskStop: TOWER_TASK_STOP_DESCRIPTION,
+  TowerObjective: TOWER_OBJECTIVE_DESCRIPTION,
+  TowerValidate: TOWER_VALIDATE_DESCRIPTION,
 };
 
 export function towerSpawnDescription(modelLines?: string): string {

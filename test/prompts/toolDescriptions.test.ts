@@ -7,6 +7,7 @@ import {
   TOWER_INIT_DESCRIPTION,
   TOWER_MERGE_DESCRIPTION,
   TOWER_MISSION_DESCRIPTION,
+  TOWER_OBJECTIVE_DESCRIPTION,
   TOWER_PARAMETER_DESCRIPTIONS,
   TOWER_PLAN_DESCRIPTION,
   TOWER_REBASE_DESCRIPTION,
@@ -20,6 +21,7 @@ import {
   TOWER_TASKS_DESCRIPTION,
   TOWER_TEARDOWN_DESCRIPTION,
   TOWER_TOOL_DESCRIPTIONS,
+  TOWER_VALIDATE_DESCRIPTION,
   towerSpawnDescription,
 } from '../../src/prompts/index.ts';
 
@@ -41,10 +43,12 @@ const TOOL_NAMES = [
   'TowerTasks',
   'TowerTaskOutput',
   'TowerTaskStop',
+  'TowerObjective',
+  'TowerValidate',
 ];
 
 describe('TOWER_TOOL_DESCRIPTIONS', () => {
-  it('describes exactly the seventeen tower tools by their registered names', () => {
+  it('describes exactly the nineteen tower tools by their registered names', () => {
     expect(Object.keys(TOWER_TOOL_DESCRIPTIONS)).toEqual(TOOL_NAMES);
   });
 
@@ -67,6 +71,8 @@ describe('TOWER_TOOL_DESCRIPTIONS', () => {
       TowerTasks: TOWER_TASKS_DESCRIPTION,
       TowerTaskOutput: TOWER_TASK_OUTPUT_DESCRIPTION,
       TowerTaskStop: TOWER_TASK_STOP_DESCRIPTION,
+      TowerObjective: TOWER_OBJECTIVE_DESCRIPTION,
+      TowerValidate: TOWER_VALIDATE_DESCRIPTION,
     });
   });
 
