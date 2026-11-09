@@ -194,6 +194,7 @@ export class TowerController implements TowerToolHost {
   private boundRepoRoot: string | undefined;
   private runtimeInstance: TowerRuntime | undefined;
   private autopilot: TowerAutopilot | undefined;
+  private autopilotRunning = false;
   private active = false;
   private shuttingDown = false;
   private releasing: Promise<void> = Promise.resolve();
@@ -466,7 +467,7 @@ export class TowerController implements TowerToolHost {
 
   async autopilotTick(reason: string): Promise<void> {
     const autopilot = this.autopilot;
-    if (autopilot === undefined || !this.active || this.shuttingDown) return;
+    if (autopilot === undefined || !this.autopilotRunning || !this.active || this.shuttingDown) return;
     try {
       await autopilot.tick(reason);
     } catch (error) {
@@ -492,30 +493,30 @@ export class TowerController implements TowerToolHost {
   }
 
   private startAutopilot(): void {
-    if (this.autopilot !== undefined || this.createAutopilot === undefined || this.shuttingDown) return;
+    if (this.autopilotRunning || this.createAutopilot === undefined || this.shuttingDown) return;
     try {
-      const autopilot = this.createAutopilot(this);
-      autopilot.start();
-      this.autopilot = autopilot;
+      this.autopilot ??= this.createAutopilot(this);
+      this.autopilot.start();
     } catch (error) {
       this.log.warn('tower: failed to start the autopilot', { error: errorText(error) });
       return;
     }
+    this.autopilotRunning = true;
     void this.continueObjective();
   }
 
   private stopAutopilot(): void {
-    const autopilot = this.autopilot;
-    this.autopilot = undefined;
+    if (!this.autopilotRunning) return;
+    this.autopilotRunning = false;
     try {
-      autopilot?.stop();
+      this.autopilot?.stop();
     } catch (error) {
       this.log.warn('tower: failed to stop the autopilot', { error: errorText(error) });
     }
   }
 
   private requestAutopilotTick(reason: string): void {
-    if (this.autopilot !== undefined) void this.autopilotTick(reason);
+    if (this.autopilotRunning) void this.autopilotTick(reason);
   }
 
   private async continueObjective(): Promise<void> {

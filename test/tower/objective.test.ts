@@ -356,7 +356,7 @@ describe('autopilot lifecycle', () => {
     } as ToolResultEvent;
   }
 
-  it('starts with tower mode and stops when the mode ends or the session shuts down', async () => {
+  it('starts one runner with tower mode, stops it when the mode ends and the session shuts down, and reuses it', async () => {
     const h = await harness();
     expect(h.autopilots).toEqual([]);
 
@@ -365,14 +365,12 @@ describe('autopilot lifecycle', () => {
     await settle();
     expect(h.autopilots.map((autopilot) => autopilot.calls)).toEqual([['start']]);
     await h.controller.exit();
+    await h.controller.exit();
     expect(h.autopilots[0]?.calls).toEqual(['start', 'stop']);
 
     await h.controller.enter();
     await h.controller.onSessionShutdown();
-    expect(h.autopilots.map((autopilot) => autopilot.calls)).toEqual([
-      ['start', 'stop'],
-      ['start', 'stop'],
-    ]);
+    expect(h.autopilots.map((autopilot) => autopilot.calls)).toEqual([['start', 'stop', 'start', 'stop']]);
   });
 
   it('continues an executing objective with an immediate tick when tower mode is entered', async () => {
