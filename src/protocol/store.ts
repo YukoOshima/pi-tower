@@ -3887,7 +3887,12 @@ export class TowerStore {
       }
       const path = this.abs(join(WORKTREES_DIR, worktree));
       await mkdir(this.abs(WORKTREES_DIR), { recursive: true });
-      await worktreeAddDetached(this.repoRoot, path, commit);
+      try {
+        await worktreeAddDetached(this.repoRoot, path, commit);
+      } catch (error) {
+        if (existsSync(path) || !(await this.pruneStaleValidationWorktree(worktree, path))) throw error;
+        await worktreeAddDetached(this.repoRoot, path, commit);
+      }
       await this.appendLog(TOWER_NAME, 'worktree.add', {
         worktree,
         milestone: milestone.id,
@@ -3896,6 +3901,12 @@ export class TowerStore {
       });
       return { worktree, path, commit, round };
     });
+  }
+
+  private async pruneStaleValidationWorktree(worktree: string, path: string): Promise<boolean> {
+    if ((await tryGit(this.repoRoot, ['worktree', 'remove', '--force', path])) === null) return false;
+    await this.appendLog(TOWER_NAME, 'worktree.prune', { worktree, reason: 'directory-missing' });
+    return true;
   }
 
   async removeValidationWorktree(worktree: string): Promise<boolean> {

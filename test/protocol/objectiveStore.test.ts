@@ -644,6 +644,44 @@ describe('validation worktrees', () => {
     );
   });
 
+  it('reuses the name of a validation worktree deleted while git still registers it, leaving mission worktrees alone', async () => {
+    const tip = await validatingMilestone();
+    const missionPath = store.abs('.tower/worktrees/wt-9');
+    await git(repo, 'worktree', 'add', '-b', 'feat/stale-mission', missionPath, 'main');
+    const stale = await store.prepareValidationWorktree('MS1', 'scrutiny');
+    await rm(stale.path, { recursive: true, force: true });
+    await rm(missionPath, { recursive: true, force: true });
+    await expect(
+      execFileAsync('git', ['worktree', 'add', '--detach', stale.path, tip], {
+        cwd: repo,
+        env: { ...process.env, LC_ALL: 'C' },
+      }),
+    ).rejects.toThrow(/missing but already registered worktree/);
+
+    const prepared = await store.prepareValidationWorktree('MS1', 'scrutiny');
+
+    expect(prepared).toEqual({ worktree: 'val-ms1-scrutiny-r1', path: stale.path, commit: tip, round: 1 });
+    expect(await git(prepared.path, 'rev-parse', 'HEAD')).toBe(tip);
+    expect(await activityLog()).toMatch(
+      / tower worktree\.prune worktree=val-ms1-scrutiny-r1 reason=directory-missing\n\S+ tower worktree\.add worktree=val-ms1-scrutiny-r1 /,
+    );
+    expect(await git(repo, 'worktree', 'list', '--porcelain')).toContain(`${missionPath}\n`);
+    expect((await store.prepareValidationWorktree('MS1', 'scrutiny')).worktree).toBe('val-ms1-scrutiny-r2');
+  });
+
+  it('still fails a validation worktree whose git registration cannot be pruned', async () => {
+    const tip = await validatingMilestone();
+    const stale = await store.prepareValidationWorktree('MS1', 'scrutiny');
+    await git(repo, 'worktree', 'lock', stale.path);
+    await rm(stale.path, { recursive: true, force: true });
+
+    await expect(store.prepareValidationWorktree('MS1', 'scrutiny')).rejects.toThrow(/val-ms1-scrutiny-r1/);
+
+    expect(await activityLog()).not.toContain('worktree.prune');
+    await git(repo, 'worktree', 'unlock', stale.path);
+    expect((await store.prepareValidationWorktree('MS1', 'scrutiny')).commit).toBe(tip);
+  });
+
   it('removes only validation worktrees', async () => {
     await validatingMilestone();
     const prepared = await store.prepareValidationWorktree('MS1', 'scrutiny');
