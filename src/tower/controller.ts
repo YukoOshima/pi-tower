@@ -148,6 +148,7 @@ export interface TowerAutopilot {
   start(): void;
   stop(): void;
   tick(reason: string): Promise<void>;
+  whenIdle(): Promise<void>;
 }
 
 export type TowerAutopilotAgentStatus =
@@ -682,7 +683,10 @@ export class TowerController implements TowerToolHost {
         this.log.warn('tower: failed to stop the tower agents on shutdown', { error: errorText(error) });
       });
     }
-    await Promise.allSettled([...this.pendingWrites]);
+    await Promise.allSettled([
+      ...this.pendingWrites,
+      ...(this.autopilot === undefined ? [] : [this.autopilot.whenIdle()]),
+    ]);
   }
 
   onBeforeAgentStart(

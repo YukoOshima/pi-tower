@@ -43,6 +43,7 @@ import {
   FakePi,
   FakeRuntime,
   FakeSessionManager,
+  commitFile,
   createRepo,
   git,
   removeDir,
@@ -68,6 +69,10 @@ class FakeAutopilot implements TowerAutopilot {
   async tick(reason: string): Promise<void> {
     this.calls.push(`tick ${reason}`);
     await this.onTick?.(reason);
+  }
+
+  async whenIdle(): Promise<void> {
+    this.calls.push('idle');
   }
 }
 
@@ -370,7 +375,7 @@ describe('autopilot lifecycle', () => {
 
     await h.controller.enter();
     await h.controller.onSessionShutdown();
-    expect(h.autopilots.map((autopilot) => autopilot.calls)).toEqual([['start', 'stop', 'start', 'stop']]);
+    expect(h.autopilots.map((autopilot) => autopilot.calls)).toEqual([['start', 'stop', 'start', 'stop', 'idle']]);
   });
 
   it('continues an executing objective with an immediate tick when tower mode is entered', async () => {
@@ -676,6 +681,20 @@ describe('autopilot effects', () => {
     expect((await mission(h, 'M1')).status).toBe('active');
     const rebased = await h.effects.rebase('M1');
     expect(rebased.ok === false ? rebased.error : '').toMatch(/^worker\(s\) ap-w-M1-1 are mid-turn — rebasing under a running worker/);
+  });
+
+  it('reports a rebase that conflicts as done, leaving the blocker for the worker', async () => {
+    const h = await effectsHarness();
+    await h.effects.spawnWorker('M1', 'ap-w-M1-1');
+    h.runtime.finish('agent-1', 'idle');
+    const m1 = await mission(h, 'M1');
+    await commitFile(h.store.abs(join('.tower', 'worktrees', m1.worktree)), 'src/gemm/a.ts', 'branch\n', 'branch change');
+    await commitFile(h.repo, 'src/gemm/a.ts', 'base\n', 'base change');
+
+    const rebased = await h.effects.rebase('M1');
+
+    expect(rebased).toMatchObject({ ok: true, detail: expect.stringMatching(/^rebase of mission M1 .* conflicted and was aborted/) });
+    expect((await mission(h, 'M1')).status).toBe('blocked');
   });
 
   it('wakes the orchestrator with a follow-up turn while tower mode is on and notifies the human', async () => {
