@@ -961,7 +961,7 @@ npm run test:e2e:pi -- --scenarios=objective --report=e2e-objective.md
 
 模型采用 `provider/modelId[:thinking]` 格式。orchestrator、worker 和 reviewer 的模型必须是三个不同的 provider/model id，否则运行不会开始；validator 模型可以与其中之一相同。默认值使用名为 `byteplus-gateway` 的 provider，请把这些模型变量设成你的 pi 配置能访问的模型；运行时使用该配置中的 provider 和凭据。
 
-每次运行都会消耗真实的 token：使用默认的 sonnet、haiku 和 opus 模型（low thinking）时，一次完整运行约需 6 分钟，花费约 1.1–1.3 美元。三个 objective 场景另需约 5 分钟、约 1.4 美元。每个场景都在自己的 `tower.json` 中用 `maxCostUsd` 和 `maxWallTimeMs` 限制其 objective（分别为 6、4 和 5 美元），报告会列出每个场景的耗时和花费。
+每次运行都会消耗真实的 token：使用默认的 sonnet、haiku 和 opus 模型（low thinking）时，一次完整运行约需 6 分钟，花费约 1.1–1.5 美元。三个 objective 场景另需约 4–5 分钟、约 1.2–1.4 美元。每个场景都在自己的 `tower.json` 中用 `maxCostUsd` 和 `maxWallTimeMs` 限制其 objective（分别为 6、4 和 5 美元），报告会列出每个场景的耗时和花费。
 
 端到端实测不会修改你的 pi 设置。每个 pi 进程都在运行目录中拥有自己的 `tower.json`（通过 `PI_TOWER_CONFIG` 指定）和会话目录，并以 `--no-extensions`、`--no-skills`、`--no-prompt-templates`、`--no-context-files` 和 `--offline` 启动。运行前后，runner 会记录 agent 目录（`~/.pi/agent`，或 `PI_CODING_AGENT_DIR`）中 `settings.json` 和 `tower.json` 的指纹；任一文件发生变化，本次运行即判为失败。S16 在其无人值守运行的前后检查得更严格：它对 agent 目录中的每个文件计算哈希，并检查没有任何进程的工作目录或命令行仍位于该场景的运行目录下。
 
