@@ -11,6 +11,8 @@ import {
   runningAgents,
   sortedMilestones,
   sortedMissions,
+  validationAttemptsOn,
+  validationInFlight,
 } from './derive.ts';
 import { computeProgressKey, dedupeKey, digest } from './progress.ts';
 import type {
@@ -216,11 +218,24 @@ function planFeature(draft: Draft, feature: AutopilotMission): void {
   if (autopilot && staleBase && rebaseReady(feature)) {
     draft.rebases.push({ type: 'rebase', mission: feature.id });
   }
-  if (autopilot && !staleBase && reviewDue(feature)) {
-    draft.reviewers.push({ type: 'spawn-reviewer', mission: feature.id });
-  }
+  if (!staleBase && reviewDue(feature)) planReviewer(draft, feature);
   planWorker(draft, feature);
   planMergeBlocked(draft, feature);
+}
+
+function planReviewer(draft: Draft, feature: AutopilotMission): void {
+  const max = draft.objective.limits.maxFeatureAttempts;
+  if (feature.reviewerAttemptsOnTip >= max) {
+    wake(
+      draft,
+      'review-stuck',
+      feature.id,
+      feature.tip ?? '-',
+      `${feature.id}: ${String(feature.reviewerAttemptsOnTip)} reviewer(s) for the current tip ended without a review (max ${String(max)})`,
+    );
+    return;
+  }
+  if (draft.snapshot.settings.autopilot) draft.reviewers.push({ type: 'spawn-reviewer', mission: feature.id });
 }
 
 function rebaseReady(feature: AutopilotMission): boolean {
@@ -415,13 +430,24 @@ function planValidation(
     }
     return;
   }
-  const missing = kinds.filter(
-    (kind) =>
-      latestRound(milestone, kind, commit) === undefined &&
-      !draft.snapshot.validators.some(
-        (run) => run.milestone === milestone.id && run.kind === kind && run.commit === commit,
-      ),
-  );
+  const max = draft.objective.limits.maxFeatureAttempts;
+  const missing: AutopilotValidationKind[] = [];
+  for (const kind of kinds) {
+    if (latestRound(milestone, kind, commit) !== undefined) continue;
+    if (validationInFlight(draft.snapshot, milestone.id, kind, commit)) continue;
+    const attempts = validationAttemptsOn(draft.snapshot, milestone.id, kind, commit);
+    if (attempts < max) {
+      missing.push(kind);
+      continue;
+    }
+    wake(
+      draft,
+      'validation-stuck',
+      `${milestone.id}:${kind}`,
+      commit,
+      `${milestone.id} ${kind}: ${String(attempts)} validator run(s) on ${commit} ended without a verdict (max ${String(max)})`,
+    );
+  }
   const agents = missing.filter((kind) => kind !== 'commands').slice(0, draft.free);
   draft.free -= agents.length;
   const started = missing.filter((kind) => kind === 'commands' || agents.includes(kind));

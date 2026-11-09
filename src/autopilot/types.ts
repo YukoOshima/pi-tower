@@ -127,6 +127,8 @@ export interface AutopilotMission {
   /** An unanswered review-request from the author covers the current tip (a tower rebase keeps it valid). */
   readonly reviewRequestOnTip: boolean;
   readonly reviewerRunning: boolean;
+  /** Reviewers spawned for the current tip that ended without submitting a review. */
+  readonly reviewerAttemptsOnTip: number;
   /** Latest review stamped on the current tip (or carried over by a clean-rebase waiver). */
   readonly latestReviewOnTip?: AutopilotReviewVerdict;
   readonly gate: AutopilotGate;
@@ -145,6 +147,14 @@ export interface AutopilotValidatorRun {
   readonly kind: AutopilotValidationKind;
   readonly commit: string;
   readonly name?: string;
+}
+
+/** Validator runs of `kind` for `milestone` on `commit` that ended without a verdict. */
+export interface AutopilotValidationAttempts {
+  readonly milestone: string;
+  readonly kind: AutopilotValidationKind;
+  readonly commit: string;
+  readonly attempts: number;
 }
 
 export interface AutopilotMemory {
@@ -166,6 +176,7 @@ export interface AutopilotSnapshot {
   /** Every tower mission, objective features and others alike. */
   readonly missions: readonly AutopilotMission[];
   readonly validators: readonly AutopilotValidatorRun[];
+  readonly validationAttempts: readonly AutopilotValidationAttempts[];
   /** Running agents not represented by a mission worker, a mission reviewer or a validator run. */
   readonly otherRunningAgents: number;
   readonly orchestratorBusy: boolean;
@@ -183,6 +194,8 @@ export type AutopilotWakeReason =
   | 'rebase-conflict'
   | 'blocker'
   | 'merge-blocked'
+  | 'review-stuck'
+  | 'validation-stuck'
   | 'stalled';
 
 export type AutopilotResumeReason = 'review-findings' | 'rebase-conflict';
@@ -255,7 +268,10 @@ export interface AutopilotCompleteObjective {
 export interface AutopilotWakeOrchestrator {
   readonly type: 'wake-orchestrator';
   readonly reason: AutopilotWakeReason;
-  /** Mission id for feature wakes, milestone id for milestone wakes, objective id for stalls. */
+  /**
+   * Mission id for feature wakes, milestone id for milestone wakes, `${milestone}:${kind}` for
+   * validation-stuck, objective id for stalls.
+   */
   readonly subject: string;
   readonly revision: string;
   /** Dedupe key `${reason}:${subject}:${revision}`; each key is sent once. */

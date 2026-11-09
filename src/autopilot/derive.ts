@@ -60,6 +60,32 @@ export function latestRound(
   return latest;
 }
 
+export function validationInFlight(
+  snapshot: AutopilotSnapshot,
+  milestoneId: string,
+  kind: AutopilotValidationKind,
+  commit: string,
+): boolean {
+  return snapshot.validators.some(
+    (run) => run.milestone === milestoneId && run.kind === kind && run.commit === commit,
+  );
+}
+
+export function validationAttemptsOn(
+  snapshot: AutopilotSnapshot,
+  milestoneId: string,
+  kind: AutopilotValidationKind,
+  commit: string,
+): number {
+  let attempts = 0;
+  for (const entry of snapshot.validationAttempts) {
+    if (entry.milestone === milestoneId && entry.kind === kind && entry.commit === commit) {
+      attempts += entry.attempts;
+    }
+  }
+  return attempts;
+}
+
 export function failedRoundCount(milestone: AutopilotMilestone, kind: AutopilotValidationKind): number {
   return milestone.rounds.filter((round) => round.kind === kind && round.verdict === 'fail').length;
 }

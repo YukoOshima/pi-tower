@@ -906,6 +906,75 @@ table('manual mode (autopilot=false)', [
   },
 ]);
 
+const silentValidators = (ms: string, kind: Kind, commit: string, attempts: number) => [{ milestone: ms, kind, commit, attempts }];
+
+table('loop guard for agents that end without submitting', [
+  {
+    name: 'a reviewer that ended without a review is replaced while attempts remain',
+    snap: snapshot({ missions: [awaitingReview('M1', { reviewerAttemptsOnTip: 2 })] }),
+    actions: [reviewer('M1')],
+  },
+  {
+    name: 'maxFeatureAttempts silent reviewers on the tip stop reviewer spawns and wake once',
+    snap: snapshot({ missions: [awaitingReview('M1', { reviewerAttemptsOnTip: 3 })] }),
+    actions: [wakeOf('review-stuck', 'M1', 'tip-M1')],
+  },
+  {
+    name: 'the review-stuck wake is not repeated',
+    snap: snapshot({ missions: [awaitingReview('M1', { reviewerAttemptsOnTip: 3 })], memory: { wakeKeys: ['review-stuck:M1:tip-M1'] } }),
+    actions: [],
+  },
+  {
+    name: 'a stuck review on a new tip wakes again',
+    snap: snapshot({ missions: [awaitingReview('M1', { tip: 'tip-M1b', reviewerAttemptsOnTip: 3 })], memory: { wakeKeys: ['review-stuck:M1:tip-M1'] } }),
+    actions: [wakeOf('review-stuck', 'M1', 'tip-M1b')],
+  },
+  {
+    name: 'manual mode still reports a stuck review',
+    snap: snapshot({ settings: { autopilot: false }, missions: [awaitingReview('M1', { reviewerAttemptsOnTip: 3 })] }),
+    actions: [wakeOf('review-stuck', 'M1', 'tip-M1')],
+  },
+  {
+    name: 'a validator that ended without a verdict is replaced while attempts remain',
+    snap: snapshot({ validationAttempts: silentValidators('MS1', 'scrutiny', BASE, 2), missions: DONE_MS1 }),
+    actions: [validate('MS1', BASE, ['scrutiny', 'user-testing'])],
+  },
+  {
+    name: 'maxFeatureAttempts silent validators stop that kind and wake once',
+    snap: snapshot({ validationAttempts: silentValidators('MS1', 'scrutiny', BASE, 3), missions: DONE_MS1 }),
+    actions: [validate('MS1', BASE, ['user-testing']), wakeOf('validation-stuck', 'MS1:scrutiny', BASE)],
+  },
+  {
+    name: 'the validation-stuck wake is not repeated',
+    snap: snapshot({ validationAttempts: silentValidators('MS1', 'scrutiny', BASE, 3), missions: DONE_MS1, memory: { wakeKeys: [`validation-stuck:MS1:scrutiny:${BASE}`] } }),
+    actions: [validate('MS1', BASE, ['user-testing'])],
+  },
+  {
+    name: 'silent validators on another commit do not count',
+    snap: snapshot({ validationAttempts: silentValidators('MS1', 'scrutiny', 'base-old', 9), missions: DONE_MS1 }),
+    actions: [validate('MS1', BASE, ['scrutiny', 'user-testing'])],
+  },
+  {
+    name: 'the commands kind is guarded the same way',
+    snap: snapshot({
+      validationAttempts: silentValidators('MS1', 'commands', BASE, 3),
+      objective: { milestones: [milestone('MS1', 1, { status: 'active', validation: { scrutiny: true, userTesting: true, commands: 1 } })] },
+      missions: DONE_MS1,
+    }),
+    actions: [validate('MS1', BASE, ['scrutiny', 'user-testing']), wakeOf('validation-stuck', 'MS1:commands', BASE)],
+  },
+  {
+    name: 'a stuck final re-validation wakes too',
+    snap: snapshot({
+      baseTip: 'base-1',
+      validationAttempts: silentValidators('MS2', 'scrutiny', 'base-1', 3),
+      objective: { milestones: [PASSED_MS1, FINAL_PASSED] },
+      missions: ALL_MERGED,
+    }),
+    actions: [validate('MS2', 'base-1', ['user-testing']), wakeOf('validation-stuck', 'MS2:scrutiny', 'base-1')],
+  },
+]);
+
 const EXECUTION_TYPES = new Set(['spawn-worker', 'resume-worker', 'respawn-worker', 'spawn-reviewer', 'rebase', 'merge']);
 const BOOKKEEPING_TYPES = new Set(['advance-milestone', 'start-validation', 'complete-objective']);
 
