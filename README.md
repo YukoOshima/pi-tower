@@ -211,7 +211,7 @@ An objective moves through these states:
 Milestones have their own states. A milestone is `pending` until it becomes current, `active` while its features run, and `validating` while its validation runs. Then it is `passed`, or `failed`, which reopens it for fix features, or `blocked` once one validation kind has failed `maxValidationRounds` times. The current milestone is the first one that has not passed. Features of later milestones can be planned early, but they start only when their milestone is current. A current milestone without features wakes the orchestrator to plan them.
 
 - **One objective at a time.** A workspace has at most one open objective. `/tower objective` is accepted when there is none, when the previous one is completed or blocked (it is archived when the new one is drafted), and while the open one is still planning (the orchestrator then revises it). It is refused while an objective is awaiting approval, executing or paused.
-- **Resuming.** `/tower resume` works on a paused or blocked objective. It first reloads the objective's limits from your current [objective settings](#the-objective-section), so raise a budget in `tower.json` before you resume. It also resets the stall counter and reopens a blocked milestone so that the orchestrator can plan fixes. An objective that was never approved goes back to planning.
+- **Resuming.** `/tower resume` works on a paused or blocked objective. It first reloads the objective's limits from your current [objective settings](#the-objective-section), so raise a budget, or `maxValidationRounds` for a milestone that blocked on failed validations, in `tower.json` before you resume: the failed rounds are not reset, so otherwise the next failure of that kind blocks the objective again. It also resets the stall counter and reopens a blocked milestone so that the orchestrator can plan fixes. An objective that was never approved goes back to planning.
 - **Tower mode off.** The autopilot runs only while tower mode is on. After `/tower off`, an executing objective does not advance until you turn tower mode on again.
 
 ### Validation
@@ -236,7 +236,7 @@ Validator agents work in a detached validation worktree, `.tower/worktrees/val-<
 - Rounds are numbered per milestone and kind. A kind that failed on a commit does not run again on that commit: the next round needs a new base tip, normally a merged fix.
 - When the failed rounds of one kind reach `maxValidationRounds` (default 3), the milestone blocks, and so does the objective.
 - When the base moves while a milestone is validating, or after the final milestone passed, validation runs again on the new tip. Rounds on an older commit are stale.
-- When the contract changes, only rounds recorded under the current contract count.
+- When the contract changes, only rounds recorded under the current contract decide whether a milestone passes. Failed rounds still count toward `maxValidationRounds`, whatever the contract or commit they ran on.
 
 ### Autopilot and orchestrator
 
@@ -848,6 +848,7 @@ Start with a few independent missions, and remove finished worktrees to get disk
 
 - **Auto-approval and blocked objectives.** With `"objective": { "autoApprove": true }`, the orchestrator could draft a fresh objective after one blocked, and that objective would be approved automatically. This restarts the wall-time and cost budgets without you. Keep `autoApprove` off for interactive use. The headless runner exits with code 1 on a blocked objective before this can happen.
 - **Validation commands bring their own setup.** They run in a fresh, detached checkout without installed dependencies or build output, so every command must include its setup, for example `npm ci && npm test`.
+- **Failed validation rounds are never reset.** They count toward `maxValidationRounds` across commits, contract changes and `/tower resume`. Before you resume an objective that blocked on failed validations, raise `maxValidationRounds` in `tower.json`; otherwise the next failure of that kind blocks it again.
 - **No browser for user-testing.** User-testing validators have no browser or GUI tooling. Their behavioural QA relies on what bash can drive: CLIs, HTTP calls and scripts.
 - **One-second commit timestamps.** To decide whether a review request covers the current branch tip, the autopilot compares commit timestamps, which have a resolution of one second. This is harmless: reviewers always review the real tip.
 - **Node 22 is untested for `pi-tower`.** The command was developed and tested on Node 26 only. Its code paths for Node 22.x are untested.

@@ -211,7 +211,7 @@ objective 会经历以下状态：
 里程碑也有自己的状态：在成为当前里程碑之前是 `pending`，feature 执行期间是 `active`，验证期间是 `validating`；之后变为 `passed`，或者变为 `failed`（重新开放，等待修复 feature），或者在某类验证失败达到 `maxValidationRounds` 次后变为 `blocked`。当前里程碑是第一个尚未通过的里程碑。后续里程碑的 feature 可以提前规划，但要等所属里程碑成为当前里程碑才会启动。当前里程碑还没有 feature 时，会唤醒 orchestrator 来规划。
 
 - **同一时间只有一个 objective。** 每个工作区最多只有一个未结束的 objective。没有 objective、上一个已完成或已阻塞（起草新 objective 时会把它归档），或者当前的 objective 仍处于 planning（此时由 orchestrator 修订它）时，可以使用 `/tower objective`；objective 正在等待批准、执行中或已暂停时，该命令会被拒绝。
-- **恢复。** `/tower resume` 适用于已暂停或已阻塞的 objective。它会先按当前的 [objective 配置](#objective-配置段)重新载入 objective 的限额，所以请在恢复之前先在 `tower.json` 中调高预算。它还会重置停滞计数，并重新开放被阻塞的里程碑，让 orchestrator 可以规划修复。从未被批准过的 objective 会回到 planning。
+- **恢复。** `/tower resume` 适用于已暂停或已阻塞的 objective。它会先按当前的 [objective 配置](#objective-配置段)重新载入 objective 的限额，所以请在恢复之前先在 `tower.json` 中调高预算；如果里程碑是因验证失败次数过多而被阻塞，请调高 `maxValidationRounds`：失败轮数不会被清零，否则同类验证再失败一次，objective 就会再次被阻塞。它还会重置停滞计数，并重新开放被阻塞的里程碑，让 orchestrator 可以规划修复。从未被批准过的 objective 会回到 planning。
 - **Tower 模式关闭时。** autopilot 只在 Tower 模式开启时运行。`/tower off` 之后，执行中的 objective 会停止推进，直到你重新开启 Tower 模式。
 
 ### 验证
@@ -236,7 +236,7 @@ validator Agent 在一个 detached 的验证 worktree（`.tower/worktrees/val-<m
 - 验证轮次按里程碑和类型分别编号。某类验证在一个 commit 上失败后，不会在同一个 commit 上再次运行：下一轮需要新的 base 最新提交，通常是合并了修复之后。
 - 某类验证的失败轮数达到 `maxValidationRounds`（默认 3）时，里程碑会被阻塞，objective 也随之阻塞。
 - 如果 base 在里程碑验证期间有了新提交，或者在最后一个里程碑通过之后又有新提交，验证会在新的最新提交上重新运行。旧 commit 上的轮次视为过期。
-- 契约改变后，只有在当前契约下记录的轮次才有效。
+- 契约改变后，只有在当前契约下记录的轮次才决定里程碑是否通过；失败轮次无论来自哪份契约、哪个 commit，都仍计入 `maxValidationRounds`。
 
 ### Autopilot 与 orchestrator
 
@@ -848,6 +848,7 @@ pi-tower 提供三道防护：
 
 - **自动批准与被阻塞的 objective。** 设置 `"objective": { "autoApprove": true }` 后，一个 objective 被阻塞之后，orchestrator 可能会起草一个新的 objective，而它会被自动批准。这会在没有你参与的情况下重新开始计算时长和花费预算。交互使用时请保持 `autoApprove` 关闭。无人值守运行器在 objective 被阻塞时会以退出码 1 退出，不会走到这一步。
 - **验证命令需要自带准备步骤。** 它们在一个全新的 detached checkout 中运行，没有安装好的依赖，也没有构建产物，因此每条命令都必须包含准备步骤，例如 `npm ci && npm test`。
+- **验证失败轮数不会清零。** 无论换了几个 commit、契约是否修改过、是否执行过 `/tower resume`，失败轮次都会计入 `maxValidationRounds`。恢复一个因验证失败而被阻塞的 objective 之前，请先在 `tower.json` 中调高 `maxValidationRounds`，否则同类验证再失败一次，它就会再次被阻塞。
 - **user-testing 没有浏览器。** user-testing validator 没有浏览器或 GUI 工具，行为测试只能依靠 bash 能驱动的东西：CLI、HTTP 请求和脚本。
 - **commit 时间戳精度为一秒。** autopilot 通过比较 commit 时间戳来判断某个 review 请求是否覆盖 branch 当前的最新提交，而时间戳的精度只有一秒。这不会造成问题：reviewer 审查的始终是真正的最新提交。
 - **`pi-tower` 在 Node 22 上未经测试。** 这个命令只在 Node 26 上开发和测试过，Node 22.x 下的代码路径尚未测试。

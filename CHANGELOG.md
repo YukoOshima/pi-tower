@@ -35,6 +35,7 @@ Objective mode: the tower keeps working on a plan you approved until every miles
 
 - With `objective.autoApprove` on, the orchestrator could draft a fresh objective after one blocked, and it would be approved automatically, which restarts the wall-time and cost budgets without a human. Keep `autoApprove` off for interactive use; the headless runner exits with 1 on a blocked objective first.
 - Validation commands run in a fresh checkout without installed dependencies and must include their own setup, for example `npm ci && npm test`.
+- Failed validation rounds are never reset: they count toward `maxValidationRounds` across commits, contract changes and `/tower resume`. Raise `maxValidationRounds` in `tower.json` before resuming an objective that blocked on failed validations.
 - User-testing validators have no browser or GUI tooling; behavioural QA uses CLIs, HTTP calls and scripts.
 - Whether a review request covers the branch tip is decided with commit timestamps of one-second resolution. This is harmless: reviewers always review the real tip.
 - The `pi-tower` bin was tested on Node 26 only; its Node 22.x code paths are untested.
