@@ -236,7 +236,7 @@ describe('tower extension factory', () => {
     expect(veto).toEqual({ block: true, reason: todoToolDenied('todo_write') });
 
     expect(tower.getArgumentCompletions?.('mo')).toEqual([
-      { value: 'models', label: 'models', description: 'Show or set the orchestrator, worker and reviewer models' },
+      { value: 'models', label: 'models', description: 'Show or set the orchestrator, worker, reviewer and validator models' },
     ]);
 
     await tower.handler('models', ctx);

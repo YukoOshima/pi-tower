@@ -36,7 +36,7 @@ export const TOWER_SUBCOMMANDS: readonly { readonly value: string; readonly desc
   { value: 'off', description: 'Turn tower mode off; agents keep running and .tower/ stays on disk' },
   { value: 'status', description: 'Show the tower dashboard without a model turn' },
   { value: 'teardown', description: 'Ask the tower to remove the finished mission worktrees' },
-  { value: 'models', description: 'Show or set the orchestrator, worker and reviewer models' },
+  { value: 'models', description: 'Show or set the orchestrator, worker, reviewer and validator models' },
   { value: 'agents', description: 'List the background workers, reviewers and validators and their status' },
   { value: 'stop', description: 'Stop a running worker, reviewer or validator (a human stop: it is never resumed)' },
   {
@@ -55,7 +55,7 @@ export const TOWER_COMMAND_USAGE = [
   '/tower or /tower status — show the tower dashboard without a model turn',
   '/tower teardown — ask the tower to remove the finished mission worktrees',
   '/tower <base-branch> — turn tower mode on with that local branch as the base (a missing branch is created from HEAD)',
-  '/tower models [<role|alias> <provider/model[:thinking]>|<role|alias> --clear] [--project] — show or set the orchestrator, worker and reviewer models',
+  '/tower models [<role|alias> <provider/model[:thinking]>|<role|alias> --clear] [--project] — show or set the orchestrator, worker, reviewer and validator models',
   '/tower agents — list the background workers, reviewers and validators',
   '/tower stop <agent> — stop a running worker, reviewer or validator (a human stop: it is never resumed)',
   '/tower objective [--headless] <text | @file> — hand an objective to the tower: it plans milestones and features (with you, or without questions when --headless), you approve, and the fleet works until every milestone passes validation',

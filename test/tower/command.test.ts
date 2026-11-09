@@ -1286,6 +1286,15 @@ describe('objective command completions and help', () => {
     expect(towerCommandCompletions('pause ')).toBeNull();
   });
 
+  it('names the validator among the roles /tower models shows and sets', () => {
+    expect(TOWER_COMMAND_USAGE).toContain(
+      '\n/tower models [<role|alias> <provider/model[:thinking]>|<role|alias> --clear] [--project] — show or set the orchestrator, worker, reviewer and validator models\n',
+    );
+    expect(towerCommandCompletions('models')).toEqual([
+      { value: 'models', label: 'models', description: 'Show or set the orchestrator, worker, reviewer and validator models' },
+    ]);
+  });
+
   it('names validators among the agents /tower agents lists and /tower stop stops', () => {
     expect(TOWER_COMMAND_USAGE).toContain('\n/tower agents — list the background workers, reviewers and validators\n');
     expect(TOWER_COMMAND_USAGE).toContain(
