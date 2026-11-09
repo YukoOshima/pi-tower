@@ -46,6 +46,8 @@ describe('TOWER_OBJECTIVE_DESCRIPTION', () => {
       'TowerPlan(milestone="MS1")',
       'Orchestrator only',
       'You are woken only for judgment work',
+      'With the autopilot off (objective.autopilot=false) you drive feature execution yourself — spawn workers and reviewers, rebase, merge — while validation start, milestone advancement, and completion stay automatic in both modes.',
+      'recovering stuck reviews and validations',
     ]) {
       expect(TOWER_OBJECTIVE_DESCRIPTION).toContain(sentence);
     }
@@ -99,6 +101,10 @@ describe('objective mode in existing tool descriptions', () => {
       'validators use the validator model, falling back to the reviewer model and then the orchestrator model',
     );
     expect(TOWER_SPAWN_DESCRIPTION).toContain('never resume one');
+    expect(TOWER_SPAWN_DESCRIPTION).toContain(
+      'Validation starts automatically in both autopilot modes — the tower spawns validators itself; spawn one manually only to recover a round that keeps ending without a verdict (a validation-stuck wake).',
+    );
+    expect(TOWER_PLAN_DESCRIPTION).toContain('(with the autopilot off, you spawn them yourself)');
     expect(towerSpawnDescription()).toBe(TOWER_SPAWN_DESCRIPTION);
   });
 

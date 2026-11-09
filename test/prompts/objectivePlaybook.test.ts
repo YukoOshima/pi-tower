@@ -76,7 +76,9 @@ describe('TOWER_OBJECTIVE_PLAYBOOK', () => {
     for (const sentence of [
       'it spawns workers, reviewers, and validators',
       'Do not duplicate these steps and do not poll',
-      'If the autopilot is off, drive the work cycle above yourself',
+      'With the autopilot off (`objective.autopilot=false`), you drive feature execution yourself with the work cycle above — spawn workers and reviewers, rebase, merge — but validation start, milestone advancement, and objective completion stay automatic in both modes',
+      'never start a validation yourself (spawn a validator only to recover a validation-stuck round)',
+      '- review-stuck, validation-stuck → reviewers or validators keep ending without a verdict',
       '- validation-failed → read every failure, then plan fix features into the same milestone with `TowerPlan(milestone, origin="fix")`',
       '- plan-milestone →',
       '- blocker →',
@@ -164,6 +166,9 @@ describe('selectTowerModeReminder with an objective', () => {
       }),
     ).toEqual({ kind: 'sparse', text: `${TOWER_MODE_SPARSE_REMINDER} ${TOWER_OBJECTIVE_SPARSE_REMINDER}` });
     expect(TOWER_OBJECTIVE_SPARSE_REMINDER).toContain('approval comes only from `/tower approve`');
+    expect(TOWER_OBJECTIVE_SPARSE_REMINDER).toContain(
+      'Validation start, milestone advancement, and completion are always automatic; the feature mechanics are too unless the autopilot is off.',
+    );
     expect(TOWER_OBJECTIVE_SPARSE_REMINDER.length).toBeLessThan(TOWER_OBJECTIVE_PLAYBOOK.length / 5);
   });
 

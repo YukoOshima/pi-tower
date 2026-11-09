@@ -147,6 +147,9 @@ describe('fixRequest', () => {
     expect(text).toContain('Call TowerPlan with milestone="MS1" and origin="fix" on every item');
     expect(text).toContain('each failure quoted verbatim');
     expect(text).toContain('Planning into the failed milestone reopens it');
+    expect(text).toContain(
+      '(with the autopilot off, spawn them yourself with TowerSpawn), and validation re-runs automatically on the new base tip',
+    );
     expect(text).toContain('TowerObjective(action="update")');
     expect(text).toContain('TowerObjective(action="block", reason)');
   });
@@ -193,6 +196,7 @@ describe('planMilestoneRequest', () => {
     expect(text).toContain('1. CSV export works\n2. Errors exit non-zero');
     expect(text).toContain('passing milestone="MS2" on every item');
     expect(text).toContain('run in parallel');
+    expect(text).toContain('(with the autopilot off, spawn them yourself with TowerSpawn) — then end your turn.');
   });
 
   it('leaves acceptance commands to the final milestone', () => {
@@ -239,7 +243,9 @@ describe('judgment wakes', () => {
     const text = rebaseConflictWake({ feature: FEATURE, files: ['src/cli.ts', 'README.md'] });
     expect(text.startsWith('rebase-conflict: feature M2 "CLI flag"')).toBe(true);
     expect(text).toContain('Conflicting files:\n- src/cli.ts\n- README.md');
-    expect(text).toContain('The owning worker agent-cli resolves textual conflicts in its own worktree');
+    expect(text).toContain(
+      'The owning worker agent-cli resolves textual conflicts in its own worktree (the autopilot resumes it when it is idle; with the autopilot off, resume it yourself with TowerResume).',
+    );
     expect(text).toContain('decide which side wins and tell agent-cli with TowerSend');
     expect(text).toContain('Never work around the merge gate.');
     const orphan = rebaseConflictWake({ feature: { ...FEATURE, owner: undefined }, files: [] });
@@ -276,7 +282,9 @@ describe('judgment wakes', () => {
     expect(text).toContain('ask the human to commit or stash them; never discard them yourself');
     expect(text.match(/- out-of-scope →/g)).toHaveLength(1);
     expect(text).toContain('TowerStatus shows the full gate state of M2');
-    expect(text).toContain('Never merge around the gate');
+    expect(text).toContain(
+      'Never merge around the gate: once it is ready, the autopilot merges (with the autopilot off, merge with TowerMerge).',
+    );
   });
 });
 

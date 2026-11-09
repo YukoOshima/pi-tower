@@ -156,7 +156,7 @@ export function fixRequest(input: FixRequestInput): string {
       `## Next step — plan fix features into ${milestone.id}`,
       '1. Read every failure (open the report file when you need the evidence) and find its cause — fix causes, not symptoms.',
       `2. Call TowerPlan with milestone="${milestone.id}" and origin="fix" on every item: one feature per failure or per tightly related group, each failure quoted verbatim in the feature's tasks so its worker and reviewer can verify the fix, with disjoint scopes so the fixes run in parallel.`,
-      '3. Planning into the failed milestone reopens it; the autopilot spawns the fix workers, and validation re-runs on the new base tip once every fix is merged.',
+      '3. Planning into the failed milestone reopens it; the autopilot spawns the fix workers (with the autopilot off, spawn them yourself with TowerSpawn), and validation re-runs automatically on the new base tip once every fix is merged.',
       '4. If a failure shows that the contract itself is wrong (definition of done, acceptance commands, or a validation spec), change it with TowerObjective(action="update") instead — the human must approve it again. If the failures cannot be fixed as specified, call TowerObjective(action="block", reason) with what the human must decide.',
     ].join('\n'),
   ];
@@ -207,7 +207,7 @@ export function planMilestoneRequest(input: PlanMilestoneRequestInput): string {
   ].join('\n');
   const next = [
     '## Next step',
-    `Plan its features now with TowerPlan, passing milestone="${milestone.id}" on every item: verifiable tasks that together deliver this milestone's part of the definition of done, disjoint scopes so the features run in parallel, and explicit deps only for real ordering. The autopilot spawns the workers as soon as the features are planned — then end your turn.`,
+    `Plan its features now with TowerPlan, passing milestone="${milestone.id}" on every item: verifiable tasks that together deliver this milestone's part of the definition of done, disjoint scopes so the features run in parallel, and explicit deps only for real ordering. The autopilot spawns the workers as soon as the features are planned (with the autopilot off, spawn them yourself with TowerSpawn) — then end your turn.`,
     "If this milestone turns out unnecessary or wrong, change the plan with TowerObjective(action=\"update\"); removing or reordering milestones needs the human's approval again.",
   ].join('\n');
   return [opening, about, contract, next].join('\n\n');
@@ -265,7 +265,7 @@ export function rebaseConflictWake(input: RebaseConflictWakeInput): string {
   sections.push(
     [
       owner !== undefined
-        ? `The owning worker ${owner} resolves textual conflicts in its own worktree (the autopilot resumes it when it is idle). Your part is the judgment:`
+        ? `The owning worker ${owner} resolves textual conflicts in its own worktree (the autopilot resumes it when it is idle; with the autopilot off, resume it yourself with TowerResume). Your part is the judgment:`
         : `No worker owns this feature any more: spawn one with TowerSpawn(kind="worker", mission_id="${feature.id}") and instructions to rebase onto the base and resolve the conflicts. Your part is the judgment:`,
       `- The features disagree (both changed the same behaviour differently) → decide which side wins and tell ${owner ?? 'the worker'} with TowerSend — it is steered into a running turn or read on the next resume.`,
       '- The features overlap by design (both need the same files) → decide which feature owns what, then re-plan the scope or add a dep so they merge in order.',
@@ -310,7 +310,7 @@ export function mergeBlockedWake(input: MergeBlockedWakeInput): string {
       'Decide and act:',
       ...guidance,
       `- Anything else → follow the gate message; TowerStatus shows the full gate state of ${feature.id}.`,
-      'Never merge around the gate: the autopilot merges as soon as the gate is ready.',
+      'Never merge around the gate: once it is ready, the autopilot merges (with the autopilot off, merge with TowerMerge).',
     ].join('\n'),
   ].join('\n\n');
 }
