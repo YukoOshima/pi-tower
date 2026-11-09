@@ -7,6 +7,7 @@ export const TOWER_MODE_ENTRY = 'tower-mode';
 export const TOWER_REMINDER_MESSAGE = 'tower-mode-reminder';
 export const TOWER_INBOX_WAKE_MESSAGE = 'tower-inbox-wake';
 export const TOWER_AGENT_NOTIFICATION_MESSAGE = 'tower-agent-notification';
+export const TOWER_AUTOPILOT_WAKE_MESSAGE = 'tower-autopilot-wake';
 
 export const TOWER_MODE_TOOLS: readonly TowerToolName[] = [
   'TowerInit',
@@ -25,6 +26,7 @@ export const TOWER_MODE_TOOLS: readonly TowerToolName[] = [
   'TowerTasks',
   'TowerTaskOutput',
   'TowerTaskStop',
+  'TowerObjective',
 ];
 
 export const TOWER_AGENT_TOOLS: readonly TowerToolName[] = [
@@ -35,6 +37,32 @@ export const TOWER_AGENT_TOOLS: readonly TowerToolName[] = [
   'TowerReview',
   'TowerSend',
   'TowerStatus',
+];
+
+export const TOWER_STORE_CHANGING_TOOLS: readonly TowerToolName[] = [
+  'TowerInit',
+  'TowerPlan',
+  'TowerSpawn',
+  'TowerMerge',
+  'TowerRebase',
+  'TowerTeardown',
+  'TowerComplete',
+  'TowerSend',
+  'TowerFinding',
+  'TowerReview',
+  'TowerMission',
+  'TowerResume',
+  'TowerTaskStop',
+  'TowerObjective',
+  'TowerValidate',
+];
+
+export const TOWER_VALIDATOR_AGENT_TOOLS: readonly TowerToolName[] = [
+  'TowerFinding',
+  'TowerInbox',
+  'TowerSend',
+  'TowerStatus',
+  'TowerValidate',
 ];
 
 export const TOWER_WORKER_BASE_TOOLS: readonly string[] = [
@@ -53,6 +81,10 @@ export const HUMAN_STOP_REASON = 'user';
 export const TOWER_STOP_REASON_PREFIX = 'stopped by the tower';
 export const SHUTDOWN_STOP_REASON = 'shutdown';
 export const DEFAULT_AGENT_TIMEOUT_MS = 7_200_000;
+
+export function changesTowerStore(toolName: string): boolean {
+  return TOWER_STORE_CHANGING_TOOLS.some((name) => name === toolName);
+}
 
 export function isHumanStopReason(reason: string | undefined): boolean {
   return reason?.trim() === HUMAN_STOP_REASON;

@@ -1,8 +1,10 @@
 import { CONFIG_DIR_NAME, getAgentDir, type ExtensionAPI } from '@earendil-works/pi-coding-agent';
 
 import { TOWER_MODEL_ENV, TOWER_MODEL_FLAGS, TOWER_ROLES } from './config/index.ts';
-import { createOrchestratorTools, toToolDefinition } from './tools/index.ts';
+import { createObjectiveOrchestratorTools, createOrchestratorTools, toToolDefinition } from './tools/index.ts';
 import { createTowerAgentRuntime } from './tower/agentRuntime.ts';
+import { AutopilotRunner } from './tower/autopilot/index.ts';
+import { towerAutopilotEffects, towerAutopilotObservations } from './tower/autopilotHost.ts';
 import {
   TOWER_COMMAND_DESCRIPTION,
   commandUi,
@@ -30,10 +32,16 @@ export default function towerExtension(pi: ExtensionAPI): void {
     log,
     createRuntime: (owner) =>
       createTowerAgentRuntime(owner, { agentDir, maxRunningAgents: () => models.maxRunningAgents }),
+    createAutopilot: (owner) =>
+      new AutopilotRunner({
+        observations: towerAutopilotObservations(owner),
+        effects: towerAutopilotEffects(owner),
+        log,
+      }),
   });
   const observe = { onContext: controller.observe.bind(controller) };
 
-  for (const tool of createOrchestratorTools(controller)) {
+  for (const tool of [...createOrchestratorTools(controller), ...createObjectiveOrchestratorTools(controller)]) {
     pi.registerTool(toToolDefinition(tool, { ...observe, defaultActive: false }));
   }
 
@@ -62,6 +70,10 @@ export default function towerExtension(pi: ExtensionAPI): void {
             pi.sendUserMessage(text, options);
           },
           models: (words, modelsUi) => handleTowerModelsCommand(controller, words, ctx, modelsUi),
+          objective: {
+            autopilotTick: (reason) => controller.autopilotTick(reason),
+            objectiveSettings: () => controller.objectiveSettings(),
+          },
         },
         ui,
       );
@@ -72,8 +84,14 @@ export default function towerExtension(pi: ExtensionAPI): void {
   pi.on('session_shutdown', () => controller.onSessionShutdown());
   pi.on('before_agent_start', (event, ctx) => controller.onBeforeAgentStart(event, ctx));
   pi.on('tool_call', (event, ctx) => controller.onToolCall(event, ctx));
+  pi.on('tool_result', (event) => {
+    controller.onToolResult(event);
+  });
   pi.on('after_provider_response', (event) => {
     controller.onAfterProviderResponse(event);
+  });
+  pi.on('message_end', (event) => {
+    controller.onMessageEnd(event);
   });
   pi.on('agent_settled', (event, ctx) => {
     controller.onAgentSettled(event, ctx);

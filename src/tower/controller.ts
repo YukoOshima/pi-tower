@@ -1,3 +1,5 @@
+import { readFile } from 'node:fs/promises';
+
 import type {
   AgentSettledEvent,
   AfterProviderResponseEvent,
@@ -5,12 +7,15 @@ import type {
   BeforeAgentStartEventResult,
   ExtensionAPI,
   ExtensionContext,
+  MessageEndEvent,
   SessionStartEvent,
   ToolCallEvent,
   ToolCallEventResult,
+  ToolResultEvent,
 } from '@earendil-works/pi-coding-agent';
 
 import {
+  TOWER_VALIDATOR_ROLE,
   TOWER_WORKER_ROLE,
   formatGateDigestLine,
   renderAgentNotification,
@@ -30,8 +35,10 @@ import {
   commitPaths,
   listBaseDirtyEntries,
   mapWithConcurrency,
+  parseFrontmatter,
   resolveTowerRepoRoot,
   type TowerAgentKind,
+  type TowerState,
 } from '../protocol/index.ts';
 import { createTowerSpawnTool } from '../tools/spawn/spawnTool.ts';
 import {
@@ -39,6 +46,7 @@ import {
   toToolDefinition,
   type TowerInboxSentPayload,
   type TowerLaunchRequest,
+  type TowerObjectiveSettingsView,
   type TowerOwner,
   type TowerSpawnModelResolution,
   type TowerToolHost,
@@ -52,17 +60,31 @@ import {
   isHumanStopReason,
   isTowerStopReason,
   TOWER_AGENT_NOTIFICATION_MESSAGE,
+  TOWER_AUTOPILOT_WAKE_MESSAGE,
   TOWER_INBOX_WAKE_MESSAGE,
   TOWER_MODE_ENTRY,
   TOWER_MODE_TOOLS,
   TOWER_REMINDER_MESSAGE,
   TOWER_STATUS_KEY,
+  changesTowerStore,
 } from './constants.ts';
 import { towerBashGuard } from './guards.ts';
 import { BranchLeases } from './leases.ts';
 import { isForeignLiveOwner, isOwnerLive, isProcessAlive } from './liveness.ts';
 import { latestTowerModeRecord, type TowerModeRecord, type TowerSessionModel } from './modeRecord.ts';
 import { towerPrimaryModel, type TowerModels } from './models.ts';
+import type {
+  AutopilotAgentObservation,
+  AutopilotAgentStatus,
+  AutopilotRuntimeSettings,
+} from './autopilot/index.ts';
+import {
+  autopilotDrivesObjective,
+  isAutopilotInboxMessage,
+  isObjectiveAgent,
+  type AutopilotInboxMessage,
+} from './autopilotEvents.ts';
+import { autopilotSettings, objectiveSettingValues, objectiveSettingsView } from './objectiveSettings.ts';
 import { selectReminderForContext } from './reminders.ts';
 import type {
   TowerAgentEvent,
@@ -76,7 +98,7 @@ import type {
   TowerStopResult,
 } from './runtimeTypes.ts';
 import { towerModeVeto } from './vetoes.ts';
-import { InboxWakeQueue, type InboxWakeBatch } from './wakes.ts';
+import { InboxWakeQueue, type InboxWakeBatch, type InboxWakeEntry } from './wakes.ts';
 
 export type TowerExtensionApi = Pick<
   ExtensionAPI,
@@ -121,8 +143,8 @@ export interface TowerLog {
 
 const SILENT_LOG: TowerLog = { info: () => undefined, warn: () => undefined };
 
-const REVIEWER_SETTLE_POLL_MS = 1_000;
-const REVIEWER_SETTLE_POLL_LIMIT = 1_800;
+const AGENT_SETTLE_POLL_MS = 1_000;
+const AGENT_SETTLE_POLL_LIMIT = 1_800;
 const AGENT_REGISTRATION_WAIT_MS = 30_000;
 
 const DEFAULT_RATE_LIMIT_SNAPSHOT: TowerRateLimitSnapshot = {
@@ -131,9 +153,17 @@ const DEFAULT_RATE_LIMIT_SNAPSHOT: TowerRateLimitSnapshot = {
   blockedUntil: null,
 };
 
+export interface TowerAutopilot {
+  start(): void;
+  stop(): void;
+  tick(reason: string): Promise<void>;
+  whenIdle(): Promise<void>;
+}
+
 export interface TowerControllerOptions {
   readonly pi: TowerExtensionApi;
   readonly createRuntime?: (controller: TowerController) => TowerRuntime;
+  readonly createAutopilot?: (controller: TowerController) => TowerAutopilot;
   readonly models?: TowerModels;
   readonly isProcessAlive?: (pid: number) => boolean;
   readonly log?: TowerLog;
@@ -143,6 +173,7 @@ export class TowerController implements TowerToolHost {
   readonly models: TowerModels | undefined;
   private readonly pi: TowerExtensionApi;
   private readonly createRuntime: ((controller: TowerController) => TowerRuntime) | undefined;
+  private readonly createAutopilot: ((controller: TowerController) => TowerAutopilot) | undefined;
   private readonly alive: (pid: number) => boolean;
   private readonly log: TowerLog;
   private spawnDescription: string | undefined;
@@ -158,6 +189,8 @@ export class TowerController implements TowerToolHost {
   private boundSessionId: string | undefined;
   private boundRepoRoot: string | undefined;
   private runtimeInstance: TowerRuntime | undefined;
+  private autopilot: TowerAutopilot | undefined;
+  private autopilotRunning = false;
   private active = false;
   private shuttingDown = false;
   private releasing: Promise<void> = Promise.resolve();
@@ -166,11 +199,14 @@ export class TowerController implements TowerToolHost {
   private wakeScheduled = false;
   private wakeFlushing = false;
   private wakeWaitingForIdle = false;
+  private orchestratorCostUsd = 0;
+  private objectiveExecuting = false;
 
   constructor(options: TowerControllerOptions) {
     this.pi = options.pi;
     this.models = options.models;
     this.createRuntime = options.createRuntime;
+    this.createAutopilot = options.createAutopilot;
     this.alive = options.isProcessAlive ?? isProcessAlive;
     this.log = options.log ?? SILENT_LOG;
   }
@@ -248,12 +284,17 @@ export class TowerController implements TowerToolHost {
     return this.runtime?.limiter.snapshot() ?? DEFAULT_RATE_LIMIT_SNAPSHOT;
   }
 
+  totalCostUsd(): number {
+    return (this.runtimeInstance?.usage().cost ?? 0) + this.orchestratorCostUsd;
+  }
+
   publishInboxSent(event: TowerInboxSentPayload): void {
     if (!this.active || this.shuttingDown) return;
     if (event.from === TOWER_NAME) return;
     if (event.to !== TOWER_NAME && event.to !== BROADCAST_NAME) return;
     this.wakes.enqueue(this.wakes.entryFor(event));
     this.scheduleInboxWake();
+    this.requestAutopilotTick('inbox');
   }
 
   async steerAgent(agentId: string, text: string): Promise<TowerSteerResult> {
@@ -288,6 +329,17 @@ export class TowerController implements TowerToolHost {
     return { cwd: ctx.cwd, projectTrusted: ctx.isProjectTrusted() };
   }
 
+  objectiveSettings(): TowerObjectiveSettingsView {
+    return objectiveSettingsView(objectiveSettingValues(this.models?.objectiveSettings));
+  }
+
+  autopilotSettings(): AutopilotRuntimeSettings {
+    return autopilotSettings(
+      objectiveSettingValues(this.models?.objectiveSettings),
+      this.rateLimitSnapshot().budget,
+    );
+  }
+
   async reloadModels(): Promise<void> {
     if (this.models === undefined || this.ctx === undefined) return;
     await this.models.load(this.modelsContext(this.ctx));
@@ -315,8 +367,8 @@ export class TowerController implements TowerToolHost {
       description: request.description,
       cwd: request.cwd,
       prompt: request.prompt,
-      appendSystemPrompt: TOWER_WORKER_ROLE,
-      tools: request.kind === 'reviewer' ? TOWER_REVIEWER_BASE_TOOLS : TOWER_WORKER_BASE_TOOLS,
+      appendSystemPrompt: agentRole(request.kind),
+      tools: agentBaseTools(request.kind),
       timeoutMs: this.models?.agentTimeoutMs ?? DEFAULT_AGENT_TIMEOUT_MS,
       ...(request.binding === undefined ? {} : { model: request.binding.model }),
       ...(request.binding?.thinkingLevel === undefined
@@ -368,6 +420,19 @@ export class TowerController implements TowerToolHost {
     return this.runtimeInstance?.get(id) ?? this.retainedOutput(id);
   }
 
+  autopilotAgent(agentId: string): AutopilotAgentObservation | undefined {
+    const runtime = this.runtime;
+    if (runtime === undefined) return { status: 'unknown' };
+    const live = runtime.get(agentId);
+    if (live !== undefined) return observedAgent(live, false);
+    const retained = this.retainedOutputs.get(agentId);
+    return retained === undefined ? undefined : observedAgent(retained, true);
+  }
+
+  orchestratorBusy(): boolean {
+    return !this.isMainIdle();
+  }
+
   agentOutput(id: string): TowerAgentOutput | undefined {
     return this.runtimeInstance?.output(id) ?? this.retainedOutput(id);
   }
@@ -395,6 +460,76 @@ export class TowerController implements TowerToolHost {
 
   async humanStop(id: string): Promise<TowerStopResult> {
     return this.stopAgent(id, HUMAN_STOP_REASON);
+  }
+
+  async autopilotTick(reason: string): Promise<void> {
+    const autopilot = this.autopilot;
+    if (autopilot === undefined || !this.autopilotRunning || !this.active || this.shuttingDown) return;
+    try {
+      await autopilot.tick(reason);
+    } catch (error) {
+      this.log.warn('tower: autopilot tick failed', { reason, error: errorText(error) });
+    }
+    await this.loadedState();
+  }
+
+  wakeOrchestrator(text: string): void {
+    if (!this.active || this.shuttingDown) return;
+    try {
+      this.pi.sendMessage(
+        { customType: TOWER_AUTOPILOT_WAKE_MESSAGE, content: text, display: true },
+        { triggerTurn: true, deliverAs: 'followUp' },
+      );
+    } catch (error) {
+      this.log.warn('tower: failed to deliver the autopilot wake', { error: errorText(error) });
+    }
+  }
+
+  noteTowerToolResult(toolName: string, isError: boolean): void {
+    if (isError || !changesTowerStore(toolName)) return;
+    this.requestAutopilotTick(`tool ${toolName}`);
+  }
+
+  private startAutopilot(): void {
+    if (this.autopilotRunning || this.createAutopilot === undefined || this.shuttingDown) return;
+    try {
+      this.autopilot ??= this.createAutopilot(this);
+      this.autopilot.start();
+    } catch (error) {
+      this.log.warn('tower: failed to start the autopilot', { error: errorText(error) });
+      return;
+    }
+    this.autopilotRunning = true;
+    void this.continueObjective();
+  }
+
+  private stopAutopilot(): void {
+    if (!this.autopilotRunning) return;
+    this.autopilotRunning = false;
+    try {
+      this.autopilot?.stop();
+    } catch (error) {
+      this.log.warn('tower: failed to stop the autopilot', { error: errorText(error) });
+    }
+  }
+
+  private requestAutopilotTick(reason: string): void {
+    if (this.autopilotRunning) void this.autopilotTick(reason);
+  }
+
+  private async continueObjective(): Promise<void> {
+    const state = await this.loadedState();
+    if (state?.objective?.status === 'executing') await this.autopilotTick('restart');
+  }
+
+  private async loadedState(): Promise<TowerState | undefined> {
+    try {
+      const state = await this.store().load();
+      this.objectiveExecuting = state.objective?.status === 'executing';
+      return state;
+    } catch {
+      return undefined;
+    }
   }
 
   async enter(base?: string): Promise<TowerEnterResult> {
@@ -428,6 +563,7 @@ export class TowerController implements TowerToolHost {
       ...(switched ?? {}),
     });
     this.renderStatus();
+    this.startAutopilot();
     return { entered: true };
   }
 
@@ -436,6 +572,7 @@ export class TowerController implements TowerToolHost {
     const record = this.persistedRecord();
     this.persistMode({ active: false });
     this.active = false;
+    this.stopAutopilot();
     this.dropInboxWake();
     this.renderStatus();
     this.log.info('tower: exit', { reason, sessionId: this.boundSessionId });
@@ -539,6 +676,7 @@ export class TowerController implements TowerToolHost {
 
   async onSessionShutdown(): Promise<void> {
     this.shuttingDown = true;
+    this.stopAutopilot();
     this.dropInboxWake();
     for (const agentId of [...this.registrations.keys()]) this.agentRegistered(agentId);
     const runtime = this.runtimeInstance;
@@ -547,19 +685,24 @@ export class TowerController implements TowerToolHost {
         this.log.warn('tower: failed to stop the tower agents on shutdown', { error: errorText(error) });
       });
     }
-    await Promise.allSettled([...this.pendingWrites]);
+    await Promise.allSettled([
+      ...this.pendingWrites,
+      ...(this.autopilot === undefined ? [] : [this.autopilot.whenIdle()]),
+    ]);
   }
 
-  onBeforeAgentStart(
+  async onBeforeAgentStart(
     event: BeforeAgentStartEvent,
     ctx: ExtensionContext,
-  ): BeforeAgentStartEventResult | undefined {
+  ): Promise<BeforeAgentStartEventResult | undefined> {
     this.observe(ctx);
     if (this.active) this.activateTowerTools();
+    const state = this.active ? await this.loadedState() : undefined;
     const reminder = selectReminderForContext(
       this.active,
       ctx.sessionManager.buildContextEntries(),
       event.messageType === 'user' ? 'user' : 'custom',
+      state,
     );
     if (reminder === undefined) return undefined;
     return {
@@ -583,6 +726,15 @@ export class TowerController implements TowerToolHost {
 
   onAfterProviderResponse(event: AfterProviderResponseEvent): void {
     if (event.status === 429) this.runtime?.limiter.reportRateLimited();
+  }
+
+  onToolResult(event: ToolResultEvent): void {
+    this.noteTowerToolResult(event.toolName, event.isError);
+  }
+
+  onMessageEnd(event: MessageEndEvent): void {
+    if (!this.active || event.message.role !== 'assistant') return;
+    this.orchestratorCostUsd += event.message.usage.cost.total;
   }
 
   onAgentSettled(_event: AgentSettledEvent, ctx: ExtensionContext): void {
@@ -640,10 +792,12 @@ export class TowerController implements TowerToolHost {
     }
     this.activateTowerTools();
     this.renderStatus();
+    this.startAutopilot();
   }
 
   private async reconcileForeign(record: TowerModeRecord, reason: string): Promise<void> {
     this.active = false;
+    this.stopAutopilot();
     this.persistMode({ active: false });
     this.renderStatus();
     this.notify(`Tower mode: OFF — ${reason}`, 'warning');
@@ -653,16 +807,44 @@ export class TowerController implements TowerToolHost {
   }
 
   private async adoptTowerRoster(): Promise<void> {
+    const store = this.store();
+    const validators = await store.load().then(validatorWorktrees, () => []);
     try {
-      this.noteRetiredAgents(await this.store().adopt(this.sessionId));
+      this.noteRetiredAgents(await store.adopt(this.sessionId));
     } catch (error) {
       throw new TowerProtocolError(
         `failed to adopt the tower workspace roster: ${errorText(error)}`,
       );
     }
+    const orphaned = validators.filter((entry) => this.runtimeInstance?.get(entry.agentId) === undefined);
+    await this.removeValidationWorktrees(store, orphaned.map((entry) => entry.worktree));
+  }
+
+  private async releaseValidationWorktree(agentId: string): Promise<void> {
+    if (!this.active) return;
+    const store = this.store();
+    const entry = await store.load().then(
+      (state) => (state.sessionId === this.boundSessionId ? store.resolveAgent(state, agentId) : undefined),
+      () => undefined,
+    );
+    if (entry?.kind !== 'validator' || entry.worktree === undefined) return;
+    await this.removeValidationWorktrees(store, [entry.worktree]);
+  }
+
+  private async removeValidationWorktrees(store: TowerStore, worktrees: readonly string[]): Promise<void> {
+    for (const worktree of worktrees) {
+      try {
+        await store.removeValidationWorktree(worktree);
+      } catch (error) {
+        this.log.warn('tower: failed to remove a validation worktree', { worktree, error: errorText(error) });
+      }
+    }
   }
 
   private async releaseTowerOwnership(): Promise<void> {
+    await this.autopilot?.whenIdle().catch((error: unknown) => {
+      this.log.warn('tower: the autopilot did not settle before the workspace was released', { error: errorText(error) });
+    });
     const sessionId = this.boundSessionId;
     if (sessionId === undefined || this.boundRepoRoot === undefined) return;
     await this.store()
@@ -756,9 +938,9 @@ export class TowerController implements TowerToolHost {
     if (batch === undefined) return;
     const generation = this.wakeGeneration;
     this.wakeFlushing = true;
-    let text: string;
+    let wake: { readonly text: string; readonly triggerTurn: boolean };
     try {
-      text = await this.renderInboxWakeText(batch);
+      wake = await this.composeInboxWake(batch);
     } finally {
       if (generation === this.wakeGeneration) this.wakeFlushing = false;
     }
@@ -772,11 +954,11 @@ export class TowerController implements TowerToolHost {
       this.pi.sendMessage(
         {
           customType: TOWER_INBOX_WAKE_MESSAGE,
-          content: text,
+          content: wake.text,
           display: true,
           details: { references: batch.items.length, omitted: batch.omitted },
         },
-        { triggerTurn: true, deliverAs: 'followUp' },
+        { triggerTurn: wake.triggerTurn, deliverAs: 'followUp' },
       );
     } catch (error) {
       this.log.warn('tower: failed to deliver the inbox wake', { error: errorText(error) });
@@ -787,13 +969,36 @@ export class TowerController implements TowerToolHost {
     if (this.wakes.size > 0) this.scheduleInboxWake();
   }
 
-  private async renderInboxWakeText(batch: InboxWakeBatch): Promise<string> {
-    const targets = wakeDigestTargets(batch.items);
+  private async composeInboxWake(
+    batch: InboxWakeBatch,
+  ): Promise<{ readonly text: string; readonly triggerTurn: boolean }> {
     const store = this.store();
-    const state = await store.load().then(
-      (loaded) => loaded,
-      () => undefined,
-    );
+    const state = await this.loadedState();
+    return {
+      text: await this.renderInboxWakeText(batch, store, state),
+      triggerTurn: await this.inboxWakeTriggersTurn(batch, store, state),
+    };
+  }
+
+  private async inboxWakeTriggersTurn(
+    batch: InboxWakeBatch,
+    store: TowerStore,
+    state: TowerState | undefined,
+  ): Promise<boolean> {
+    if (batch.omitted > 0 || !this.autopilotHandles(state)) return true;
+    for (const item of batch.items) {
+      const message = await inboxMessageFields(store, item);
+      if (message === undefined || !isAutopilotInboxMessage(state, message)) return true;
+    }
+    return false;
+  }
+
+  private async renderInboxWakeText(
+    batch: InboxWakeBatch,
+    store: TowerStore,
+    state: TowerState | undefined,
+  ): Promise<string> {
+    const targets = wakeDigestTargets(batch.items);
     let gateDigest: string[] = [];
     if (targets.missionIds.length > 0) {
       if (state === undefined) {
@@ -838,9 +1043,12 @@ export class TowerController implements TowerToolHost {
       return;
     }
     if (event.type !== 'finished') return;
-    this.enqueueDeathWork(event.agentId, () => this.recordTowerAgentDeath(event));
+    this.enqueueDeathWork(event.agentId, async () => {
+      await this.recordTowerAgentDeath(event);
+      this.requestAutopilotTick('agent-end');
+    });
     this.deliverAgentNotification(event);
-    this.retireFinishedReviewer(event);
+    this.retireFinishedAgent(event);
   }
 
   private enqueueDeathWork(agentId: string, work: () => Promise<void>): void {
@@ -930,7 +1138,7 @@ export class TowerController implements TowerToolHost {
   private deliverAgentNotification(event: TowerAgentFinishedEvent): void {
     if (this.shuttingDown || this.abortedSpawns.has(event.agentId)) return;
     const info = this.runtimeInstance?.get(event.agentId);
-    const kind: TowerAgentKind = info?.kind === 'reviewer' ? 'reviewer' : 'worker';
+    const kind = agentKind(info?.kind);
     const status: NotificationEndStatus = event.status === 'idle' ? 'completed' : event.status;
     const text = renderAgentNotification({
       name: info?.name ?? event.name,
@@ -946,47 +1154,75 @@ export class TowerController implements TowerToolHost {
       ...(event.summary === undefined ? {} : { result: event.summary }),
       undeliveredSteers: event.undeliveredSteers ?? [],
     });
-    try {
-      this.pi.sendMessage(
-        {
-          customType: TOWER_AGENT_NOTIFICATION_MESSAGE,
-          content: text,
-          display: true,
-          details: { agentId: event.agentId, taskId: event.taskId, status },
-        },
-        { triggerTurn: true, deliverAs: 'followUp' },
-      );
-    } catch (error) {
-      this.log.warn('tower: failed to deliver the agent notification', { error: errorText(error) });
+    const send = (triggerTurn: boolean): void => {
+      try {
+        this.pi.sendMessage(
+          {
+            customType: TOWER_AGENT_NOTIFICATION_MESSAGE,
+            content: text,
+            display: true,
+            details: { agentId: event.agentId, taskId: event.taskId, status },
+          },
+          { triggerTurn, deliverAs: 'followUp' },
+        );
+      } catch (error) {
+        this.log.warn('tower: failed to deliver the agent notification', { error: errorText(error) });
+      }
+    };
+    if (!this.autopilotRunning || !this.objectiveExecuting || !this.objectiveSettings().autopilot) {
+      send(true);
+      return;
     }
+    this.track(
+      this.agentEndTriggersTurn(event.agentId).then((trigger) => {
+        if (!this.shuttingDown) send(trigger);
+      }),
+    );
   }
 
-  private retireFinishedReviewer(event: TowerAgentFinishedEvent): void {
+  private async agentEndTriggersTurn(agentId: string): Promise<boolean> {
+    const state = await this.loadedState();
+    if (!this.autopilotHandles(state)) return true;
+    return !isObjectiveAgent(state, this.store().resolveAgent(state, agentId));
+  }
+
+  private autopilotHandles(state: TowerState | undefined): state is TowerState {
+    return this.autopilotRunning && autopilotDrivesObjective(state, this.objectiveSettings().autopilot);
+  }
+
+  private retireFinishedAgent(event: TowerAgentFinishedEvent): void {
     const runtime = this.runtimeInstance;
     if (runtime === undefined || this.shuttingDown) return;
     const output = runtime.output(event.agentId);
-    if (output?.kind !== 'reviewer') return;
+    if (output === undefined || agentKind(output.kind) === 'worker') return;
     this.retainedOutputs.set(output.agentId, output);
     queueMicrotask(() => {
-      this.disposeSettledReviewer(runtime, event.agentId, 0);
+      this.disposeSettledAgent(runtime, event.agentId, 0);
     });
   }
 
-  private disposeSettledReviewer(runtime: TowerRuntime, agentId: string, attempt: number): void {
+  private disposeSettledAgent(runtime: TowerRuntime, agentId: string, attempt: number): void {
     if (this.shuttingDown) return;
     const info = runtime.get(agentId);
     if (info === undefined || info.status === 'running') return;
     if (info.windingDown) {
-      if (attempt >= REVIEWER_SETTLE_POLL_LIMIT) return;
+      if (attempt >= AGENT_SETTLE_POLL_LIMIT) return;
       const timer = setTimeout(() => {
-        this.disposeSettledReviewer(runtime, agentId, attempt + 1);
-      }, REVIEWER_SETTLE_POLL_MS);
+        this.disposeSettledAgent(runtime, agentId, attempt + 1);
+      }, AGENT_SETTLE_POLL_MS);
       timer.unref();
       return;
     }
     const output = runtime.output(agentId);
     if (output !== undefined) this.retainedOutputs.set(agentId, output);
-    void runtime.dispose(agentId, 'reviewer finished').catch(() => false);
+    const kind = agentKind(info.kind);
+    const disposed = runtime.dispose(agentId, `${kind} finished`).catch(() => false);
+    if (kind !== 'validator') return;
+    this.track(
+      disposed.then(() => {
+        this.enqueueDeathWork(agentId, () => this.releaseValidationWorktree(agentId));
+      }),
+    );
   }
 
   diagnostic(message: string): void {
@@ -1023,6 +1259,62 @@ async function createBaseBranch(repoRoot: string, base: string): Promise<void> {
       `created and switched to "${base}", but committing the checkout's uncommitted changes onto it failed: ${errorText(error)}. ` +
         `The changes are still uncommitted on "${base}" — commit or move them, then re-run /tower ${base}.`,
     );
+  }
+}
+
+async function inboxMessageFields(store: TowerStore, item: InboxWakeEntry): Promise<AutopilotInboxMessage | undefined> {
+  if (item.file === undefined) return undefined;
+  try {
+    const { fields } = parseFrontmatter(await readFile(store.abs(item.file), 'utf8'));
+    if (fields['type'] !== 'inbox') return undefined;
+    return { action: fields['action'], scope: fields['scope'], missionId: item.missionId };
+  } catch {
+    return undefined;
+  }
+}
+
+function validatorWorktrees(state: TowerState): { readonly agentId: string; readonly worktree: string }[] {
+  return state.roster.agents.flatMap((entry) =>
+    entry.kind === 'validator' && entry.worktree !== undefined
+      ? [{ agentId: entry.agentId, worktree: entry.worktree }]
+      : [],
+  );
+}
+
+function observedAgent(info: TowerAgentInfo, disposed: boolean): AutopilotAgentObservation {
+  const status = observedStatus(info, disposed);
+  return info.stopReason === undefined ? { status } : { status, stopReason: info.stopReason };
+}
+
+function observedStatus(info: TowerAgentInfo, disposed: boolean): AutopilotAgentStatus {
+  if (info.status === 'running' || info.windingDown) return disposed ? 'stopped' : 'running';
+  switch (info.status) {
+    case 'idle':
+      return disposed ? 'completed' : 'idle';
+    case 'failed':
+      return 'failed';
+    case 'stopped':
+      return 'stopped';
+    case 'timed_out':
+      return 'timeout';
+  }
+}
+
+function agentKind(kind: string | undefined): TowerAgentKind {
+  return kind === 'reviewer' || kind === 'validator' ? kind : 'worker';
+}
+
+function agentRole(kind: TowerAgentKind): string {
+  return kind === 'validator' ? TOWER_VALIDATOR_ROLE : TOWER_WORKER_ROLE;
+}
+
+function agentBaseTools(kind: TowerAgentKind): readonly string[] {
+  switch (kind) {
+    case 'worker':
+      return TOWER_WORKER_BASE_TOOLS;
+    case 'reviewer':
+    case 'validator':
+      return TOWER_REVIEWER_BASE_TOOLS;
   }
 }
 

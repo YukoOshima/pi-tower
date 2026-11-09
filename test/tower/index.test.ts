@@ -1,4 +1,4 @@
-import { mkdtemp, readdir } from 'node:fs/promises';
+import { mkdtemp, readdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { TOWER_MODEL_FLAGS } from '../../src/config/index.ts';
 import towerExtension from '../../src/index.ts';
 import { TOWER_MODE_USER_ENABLED_ONLY, todoToolDenied } from '../../src/prompts/index.ts';
+import { TowerStore } from '../../src/protocol/index.ts';
 import {
   TOWER_COMMAND,
   TOWER_MODE_ENTRY,
@@ -22,7 +23,9 @@ const EVENTS = [
   'session_shutdown',
   'before_agent_start',
   'tool_call',
+  'tool_result',
   'after_provider_response',
+  'message_end',
   'agent_settled',
   'model_select',
   'thinking_level_select',
@@ -244,6 +247,45 @@ describe('tower extension factory', () => {
     await tower.handler('off', ctx);
     expect(ctx.ui.notices).toContainEqual({ message: 'Tower mode: OFF', level: 'info' });
     for (const name of TOWER_MODE_TOOLS) expect(pi.activeTools).toContain(name);
+
+    await pi.emit('session_shutdown', { type: 'session_shutdown' }, ctx);
+    expect(pi.unexpected).toEqual([]);
+  });
+
+  it('hands the objective commands the configured settings and an autopilot tick', async () => {
+    const repo = await createRepo('tower-index-objective-');
+    cleanups.push(repo);
+    await writeFile(
+      join(agentDir, 'tower.json'),
+      `${JSON.stringify({ objective: { autopilot: false, maxValidationRounds: 5 } })}\n`,
+    );
+    const store = new TowerStore(repo);
+    await store.init('session-index', 'main');
+    await store.draftObjective({ title: 'Ship', goal: 'ship it', definitionOfDone: ['works'], milestones: [{ title: 'Core' }] });
+    await store.plan([{ title: 'Core feature', scope: ['src/core/**'], milestone: 'MS1' }]);
+    await store.requestObjectiveApproval();
+    const ctx = new FakeContext(repo, new FakeSessionManager('session-index'));
+    ctx.model = ctx.modelRegistry.add('prov', 'session-model');
+    const pi = new RecordingPi();
+    towerExtension(pi.api);
+    const tower = pi.commands.get(TOWER_COMMAND);
+    if (tower === undefined) throw new Error('the tower command is not registered');
+    await pi.emit('session_start', { type: 'session_start', reason: 'startup' }, ctx);
+    await tower.handler('on', ctx);
+
+    await tower.handler('approve', ctx);
+
+    await vi.waitFor(async () => {
+      expect((await store.load()).objective?.autopilot?.progressKey).toBeDefined();
+    });
+    expect((await store.load()).objective).toMatchObject({
+      status: 'executing',
+      approvedBy: 'human',
+      limits: { maxValidationRounds: 3 },
+    });
+    await tower.handler('pause checking the plan', ctx);
+    await tower.handler('resume', ctx);
+    expect((await store.load()).objective).toMatchObject({ status: 'executing', limits: { maxValidationRounds: 5 } });
 
     await pi.emit('session_shutdown', { type: 'session_shutdown' }, ctx);
     expect(pi.unexpected).toEqual([]);

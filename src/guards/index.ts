@@ -24,4 +24,10 @@ export {
   type ShellSubshell,
   type ShellWord,
 } from './shellParser.ts';
-export { findWriteEscapes, isWithinDirectory, resolveToolPath, writeGuardVeto } from './writeGuard.ts';
+export {
+  findWriteEscapes,
+  isWithinDirectory,
+  resolveToolPath,
+  VALIDATOR_WRITE_VETO,
+  writeGuardVeto,
+} from './writeGuard.ts';

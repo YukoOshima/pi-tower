@@ -844,6 +844,27 @@ describe('TowerAgentRuntime', () => {
       });
     });
 
+    it('totals the usage of every agent and run, disposed agents included', async () => {
+      const alpha = started(await runtime.spawn(spec()));
+      const beta = started(await runtime.spawn(spec({ name: 'agent-beta' })));
+      factory.session(alpha.agentId).reply('Alpha step.', { totalTokens: 10, cost: { total: 0.25 } });
+      factory.session(beta.agentId).reply('Beta step.', { totalTokens: 5, cost: { total: 0.5 } });
+      const finished = nextEvent(runtime, 'finished');
+      factory.session(alpha.agentId).settle();
+      await finished;
+      started(await runtime.resume(alpha.agentId, 'Continue.'));
+      factory.session(alpha.agentId).reply('Alpha again.', { totalTokens: 2, cost: { total: 0.125 } });
+      const again = nextEvent(runtime, 'finished');
+      factory.session(alpha.agentId).settle();
+      await again;
+      await runtime.dispose(alpha.agentId);
+      factory.session(beta.agentId).reply('Beta again.', { totalTokens: 1, cost: { total: 0.125 } });
+
+      expect(runtime.get(alpha.agentId)).toBeUndefined();
+      expect(runtime.list().map((info) => [info.name, info.usage.cost])).toEqual([['agent-beta', 0.625]]);
+      expect(runtime.usage()).toMatchObject({ totalTokens: 18, cost: 1 });
+    });
+
     it('keeps only the most recent tool calls', async () => {
       const { agentId } = started(await runtime.spawn(spec()));
       const session = factory.session(agentId);

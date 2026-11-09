@@ -927,8 +927,8 @@ describe('inbox wakes', () => {
 });
 
 describe('tower-mode reminders', () => {
-  function inject(h: Harness, messageType: 'user' | 'custom' = 'user') {
-    const result = h.controller.onBeforeAgentStart(beforeStart(messageType), h.ctx.asContext);
+  async function inject(h: Harness, messageType: 'user' | 'custom' = 'user') {
+    const result = await h.controller.onBeforeAgentStart(beforeStart(messageType), h.ctx.asContext);
     if (result?.message !== undefined) {
       h.session.append({ type: 'custom_message', customType: result.message.customType, content: result.message.content, display: result.message.display, details: result.message.details });
     }
@@ -937,10 +937,10 @@ describe('tower-mode reminders', () => {
 
   it('injects the full reminder as a hidden persisted message once tower mode is on', async () => {
     const h = await harness();
-    expect(inject(h)).toBeUndefined();
+    expect(await inject(h)).toBeUndefined();
 
     await h.controller.enter();
-    const message = inject(h);
+    const message = await inject(h);
 
     expect(message).toEqual({ customType: TOWER_REMINDER_MESSAGE, content: TOWER_MODE_FULL_REMINDER, display: false, details: { kind: 'full' } });
   });
@@ -948,53 +948,53 @@ describe('tower-mode reminders', () => {
   it('follows the sparse and full refresh cadence and refreshes on new human input', async () => {
     const h = await harness();
     await h.controller.enter();
-    expect(inject(h)?.details).toEqual({ kind: 'full' });
+    expect((await inject(h))?.details).toEqual({ kind: 'full' });
 
     h.session.appendMessage('assistant');
-    expect(inject(h, 'custom')).toBeUndefined();
+    expect(await inject(h, 'custom')).toBeUndefined();
     h.session.appendMessage('assistant');
-    expect(inject(h, 'custom')?.content).toBe(TOWER_MODE_SPARSE_REMINDER);
+    expect((await inject(h, 'custom'))?.content).toBe(TOWER_MODE_SPARSE_REMINDER);
 
     for (let index = 0; index < 5; index += 1) h.session.appendMessage('assistant');
-    expect(inject(h, 'custom')?.content).toBe(TOWER_MODE_FULL_REMINDER);
+    expect((await inject(h, 'custom'))?.content).toBe(TOWER_MODE_FULL_REMINDER);
 
     h.session.appendMessage('assistant');
-    expect(inject(h, 'user')?.content).toBe(TOWER_MODE_FULL_REMINDER);
+    expect((await inject(h, 'user'))?.content).toBe(TOWER_MODE_FULL_REMINDER);
   });
 
   it('does not refresh the full reminder for injected custom messages', async () => {
     const h = await harness();
     await h.controller.enter();
-    inject(h);
+    await inject(h);
     h.session.appendMessage('assistant');
     h.session.append({ type: 'custom_message', customType: TOWER_INBOX_WAKE_MESSAGE, content: 'wake', display: true });
 
-    expect(inject(h, 'custom')).toBeUndefined();
+    expect(await inject(h, 'custom')).toBeUndefined();
   });
 
   it('injects the exit reminder once after tower mode turns off and the full one on re-entry', async () => {
     const h = await harness();
     await h.controller.enter();
-    inject(h);
+    await inject(h);
     await h.controller.exit();
 
-    expect(inject(h)?.content).toBe(TOWER_MODE_EXIT_REMINDER);
-    expect(inject(h)).toBeUndefined();
+    expect((await inject(h))?.content).toBe(TOWER_MODE_EXIT_REMINDER);
+    expect(await inject(h)).toBeUndefined();
 
     await h.controller.enter();
-    expect(inject(h)?.content).toBe(TOWER_MODE_FULL_REMINDER);
+    expect((await inject(h))?.content).toBe(TOWER_MODE_FULL_REMINDER);
   });
 
   it('re-arms the full reminder after a compaction drops the last one from the context', async () => {
     const h = await harness();
     await h.controller.enter();
-    inject(h);
+    await inject(h);
     h.session.appendMessage('assistant');
-    expect(inject(h, 'custom')).toBeUndefined();
+    expect(await inject(h, 'custom')).toBeUndefined();
 
     h.session.compact();
 
-    expect(inject(h, 'custom')?.content).toBe(TOWER_MODE_FULL_REMINDER);
+    expect((await inject(h, 'custom'))?.content).toBe(TOWER_MODE_FULL_REMINDER);
   });
 });
 

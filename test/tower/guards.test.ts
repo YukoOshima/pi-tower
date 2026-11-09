@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import type { ExtensionAPI, ToolCallEvent } from '@earendil-works/pi-coding-agent';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { writeGuardVeto } from '../../src/guards/index.ts';
+import { VALIDATOR_WRITE_VETO, writeGuardVeto } from '../../src/guards/index.ts';
 import { TowerStore, WORKTREES_DIR } from '../../src/protocol/index.ts';
 import {
   TOWER_AGENT_GUARDS_EXTENSION,
@@ -131,6 +131,21 @@ describe('towerWriteGuard', () => {
     expect(
       await towerWriteGuard(write('../../../README.md'), repo, worker({ kind: 'reviewer', cwd: repo })),
     ).toBeUndefined();
+  });
+
+  it('keeps validators read-only even inside their own validation worktree', async () => {
+    const validationWorktree = store.abs(join(WORKTREES_DIR, 'val-ms1-scrutiny-r1'));
+    const validator = worker({ agentId: 'agent-v1', kind: 'validator', cwd: validationWorktree });
+
+    expect(await towerWriteGuard(write('src/a.ts'), validationWorktree, validator)).toEqual({
+      block: true,
+      reason: VALIDATOR_WRITE_VETO,
+    });
+    expect(await towerWriteGuard(edit(join(validationWorktree, 'b.ts')), validationWorktree, validator)).toEqual({
+      block: true,
+      reason: VALIDATOR_WRITE_VETO,
+    });
+    expect(await towerWriteGuard(bash('npm test'), validationWorktree, validator)).toBeUndefined();
   });
 });
 

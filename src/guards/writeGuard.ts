@@ -37,6 +37,10 @@ export function writeGuardVeto(worktree: string, escapes: readonly string[]): st
   );
 }
 
+export const VALIDATOR_WRITE_VETO =
+  'tower validators are read-only: they judge the milestone on its exact commit and never edit files. ' +
+  'Record every problem as a failure in your TowerValidate verdict, or file it with TowerFinding.';
+
 function expandPath(path: string, home: string): string {
   if (path === '~') return home;
   if (path.startsWith('~/')) return join(home, path.slice(2));
