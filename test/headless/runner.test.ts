@@ -336,10 +336,56 @@ describe('runHeadless', () => {
       expect(plain(run.errors)).toEqual(['pi did not start: No API key found for fake']);
     });
 
-    it('when the pi-tower extension is not loaded', async () => {
-      const run = stubRun(() => undefined);
+    it('when pi lists no /tower extension command, before any prompt could start a model turn', async () => {
+      const run = stubRun((pi) => {
+        pi.getCommands = {
+          type: 'response',
+          command: 'get_commands',
+          success: true,
+          data: { commands: [{ name: 'tower', source: 'prompt' }, { name: 'skill:tower', source: 'skill' }, { name: 'review', source: 'extension' }] },
+        };
+      });
+      expect(await runHeadless(runOptions(), run.deps)).toBe(HEADLESS_EXIT.startup);
+      expect(run.pi().commands).toEqual([]);
+      const [message] = plain(run.errors);
+      expect(message).toMatch(/^pi has no \/tower command — is the pi-tower extension loaded\? Install it as a pi package or pass -- -e \S+[\\/]src[\\/]index\.ts$/);
+    });
+
+    it('when the extension is loaded twice and pi renamed /tower', async () => {
+      const run = stubRun((pi) => {
+        pi.getCommands = {
+          type: 'response',
+          command: 'get_commands',
+          success: true,
+          data: { commands: [{ name: 'tower:1', source: 'extension' }, { name: 'tower:2', source: 'extension' }] },
+        };
+      });
+      expect(await runHeadless(runOptions(), run.deps)).toBe(HEADLESS_EXIT.startup);
+      expect(run.pi().commands).toEqual([]);
+      expect(plain(run.errors)).toEqual([
+        'the pi-tower extension is loaded more than once, so pi renamed its commands to /tower:1, /tower:2 and /tower is ambiguous — load it only once (drop -e when pi-tower is also installed as a pi package)',
+      ]);
+    });
+
+    it('when pi does not answer get_commands', async () => {
+      const run = stubRun((pi) => {
+        const send = pi.send.bind(pi);
+        pi.send = async (command) => {
+          if (command.type === 'get_commands') throw new Error('timeout after 60000ms waiting for the get_commands response');
+          return send(command);
+        };
+      });
+      expect(await runHeadless(runOptions(), run.deps)).toBe(HEADLESS_EXIT.startup);
+      expect(plain(run.errors)).toEqual(['pi did not answer get_commands: timeout after 60000ms waiting for the get_commands response']);
+    });
+
+    it('when a pi without get_commands sends /tower on to the model, caught by the fallback check', async () => {
+      const run = stubRun((pi) => {
+        pi.getCommands = { type: 'response', command: 'get_commands', success: false, error: 'Unknown command: get_commands' };
+      });
       expect(await runHeadless(runOptions(), run.deps)).toBe(HEADLESS_EXIT.startup);
       expect(run.pi().commands).toEqual(['/tower on']);
+      expect(plain(run.info)).toContain('pi cannot list its commands (Unknown command: get_commands) — checking how it handles /tower on instead');
       const [message] = plain(run.errors);
       expect(message).toMatch(/^pi did not run \/tower on as a pi-tower command \(the prompt was started\) — is the pi-tower extension loaded\? Install it as a pi package or pass -- -e \S+[\\/]src[\\/]index\.ts$/);
     });

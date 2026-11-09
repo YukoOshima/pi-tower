@@ -27,6 +27,8 @@ export interface FakeScenario {
   readonly startupExit?: number;
   readonly ignoreSigterm?: boolean;
   readonly spawnChild?: boolean;
+  readonly registered?: readonly string[];
+  readonly noGetCommands?: boolean;
   readonly silent?: readonly string[];
   readonly commands?: readonly FakeCommand[];
 }
@@ -123,6 +125,19 @@ function onRecord(record: Json): void {
   switch (type) {
     case 'get_state':
       emit({ id: record.id, type: 'response', command: 'get_state', success: true, data: { model: { provider: 'fake', id: 'fake-model' }, isStreaming: false } });
+      return;
+    case 'get_commands':
+      if (scenario.noGetCommands === true) {
+        emit({ id: record.id, type: 'response', command: type, success: false, error: `Unknown command: ${type}` });
+        return;
+      }
+      emit({
+        id: record.id,
+        type: 'response',
+        command: type,
+        success: true,
+        data: { commands: (scenario.registered ?? ['tower']).map((name) => ({ name, source: 'extension' })) },
+      });
       return;
     case 'prompt':
       void onPrompt(record.id, String(record.message));

@@ -213,7 +213,8 @@ describe('pi-tower CLI (bin/pi-tower.js)', () => {
   });
 
   it.each([
-    ['the pi-tower extension is not loaded', { commands: [] }, 'pi did not run /tower on as a pi-tower command (the prompt was started)'],
+    ['the pi-tower extension is not loaded', { registered: [], commands: [] }, 'pi has no /tower command — is the pi-tower extension loaded?'],
+    ['a pi without get_commands sends /tower on to the model', { noGetCommands: true, commands: [] }, 'pi did not run /tower on as a pi-tower command (the prompt was started)'],
     ['pi crashes during startup', { stderr: 'Error: cannot find module x\n', startupExit: 1 }, 'pi did not start (FAKE_PI): pi is gone (exited with code 1)'],
     ['/tower on fails', { commands: [{ match: '/tower on', before: [{ notify: { level: 'error', text: 'Tower mode could not be enabled — not a git repository.' } }] }] }, '/tower on failed: Tower mode could not be enabled — not a git repository.'],
   ] as const)('exits 4 when %s', { timeout: 20_000 }, async (_label, scenario, message) => {
@@ -221,6 +222,14 @@ describe('pi-tower CLI (bin/pi-tower.js)', () => {
     const result = await cli(runArgs(fake, scenario));
     expect(result.code).toBe(4);
     expect(result.stderr).toContain(message.replace('FAKE_PI', fake.piBin));
+  });
+
+  it('checks get_commands first, so a missing extension never gets a prompt that could start a model turn', { timeout: 20_000 }, async () => {
+    const fake = world();
+    const result = await cli(runArgs(fake, { registered: ['review'], commands: [] }));
+    expect(result.code).toBe(4);
+    expect(fake.log().filter((entry) => entry.kind === 'command').map((entry) => (entry.record as Json).type)).toEqual(['get_state', 'get_commands']);
+    expect(fake.commands()).toEqual([]);
   });
 
   it('exits 4 when the pi executable does not exist', async () => {

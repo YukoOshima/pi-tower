@@ -59,6 +59,7 @@ export class StubPi implements HeadlessPi {
   exit: PiExit | undefined;
   stderr = '';
   getState: PiEvent = { type: 'response', command: 'get_state', success: true, data: {} };
+  getCommands: PiEvent = { type: 'response', command: 'get_commands', success: true, data: { commands: [{ name: 'tower', source: 'extension' }] } };
   readonly options: PiRpcOptions;
   readonly reactions: Record<string, StubReaction> = {};
   readonly commands: string[] = [];
@@ -79,6 +80,7 @@ export class StubPi implements HeadlessPi {
   async send(command: Readonly<Record<string, unknown>>): Promise<PiEvent> {
     if (this.exit !== undefined) throw new Error(`pi is gone (${this.exit.reason})`);
     if (command.type === 'get_state') return this.getState;
+    if (command.type === 'get_commands') return this.getCommands;
     return { type: 'response', command: String(command.type), success: true };
   }
 

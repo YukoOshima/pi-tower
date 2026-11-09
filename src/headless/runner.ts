@@ -1,7 +1,7 @@
 import { fileURLToPath } from 'node:url';
 
 import type { HeadlessRunOptions } from './args.ts';
-import { noticeOf, PI_DIALOG_METHODS, stringField, type PiCommandResult, type PiEvent, type PiExit, type PiRpcOptions, type PiUiResponse } from './rpc.ts';
+import { noticeOf, PI_DIALOG_METHODS, recordField, stringField, type PiCommandResult, type PiEvent, type PiExit, type PiRpcOptions, type PiUiResponse } from './rpc.ts';
 import type { HeadlessFeature, HeadlessMilestone, HeadlessObjective, HeadlessSnapshot } from './state.ts';
 
 export const HEADLESS_EXIT = {
@@ -56,6 +56,7 @@ const ADOPTABLE = new Set(['awaiting-approval', 'executing', 'paused']);
 const TERMINAL = new Set(['completed', 'blocked']);
 const FINISHED_FEATURES = new Set(['merged', 'abandoned']);
 const EXTENSION_ENTRY = fileURLToPath(new URL('../index.ts', import.meta.url));
+const EXTENSION_HINT = `is the pi-tower extension loaded? Install it as a pi package or pass -- -e ${EXTENSION_ENTRY}`;
 
 class HeadlessExit extends Error {
   readonly code: number;
@@ -257,6 +258,7 @@ class HeadlessRun {
     });
     this.line(`started pi (${this.options.piBin} --mode rpc) in ${this.options.cwd}`);
     await this.handshake(pi);
+    await this.checkTowerCommand(pi);
     await this.towerCommand(pi, '/tower on', HEADLESS_EXIT.startup);
     const baseline = (await this.snapshot())?.objective;
     if (baseline !== undefined && ADOPTABLE.has(baseline.status)) {
@@ -285,6 +287,34 @@ class HeadlessRun {
     }
   }
 
+  private async checkTowerCommand(pi: HeadlessPi): Promise<void> {
+    let response: PiEvent;
+    try {
+      response = await this.guard(pi.send({ type: 'get_commands' }, this.deps.commandTimeoutMs ?? 60_000));
+    } catch (error) {
+      if (error instanceof HeadlessExit) throw error;
+      throw this.failure(HEADLESS_EXIT.startup, `pi did not answer get_commands: ${errorText(error)}`);
+    }
+    const listed = recordField(response, 'data')?.commands;
+    if (response.success !== true || !Array.isArray(listed)) {
+      this.line(`pi cannot list its commands (${stringField(response, 'error') ?? 'no command list'}) — checking how it handles /tower on instead`);
+      return;
+    }
+    const names = listed
+      .map((entry: unknown) => (typeof entry === 'object' && entry !== null ? (entry as Readonly<Record<string, unknown>>) : {}))
+      .filter((entry) => entry.source === undefined || entry.source === 'extension')
+      .map((entry) => (typeof entry.name === 'string' ? entry.name : ''));
+    if (names.includes('tower')) return;
+    const duplicates = names.filter((name) => /^tower:\d+$/.test(name));
+    if (duplicates.length > 0) {
+      throw this.failure(
+        HEADLESS_EXIT.startup,
+        `the pi-tower extension is loaded more than once, so pi renamed its commands to ${duplicates.map((name) => `/${name}`).join(', ')} and /tower is ambiguous — load it only once (drop -e when pi-tower is also installed as a pi package)`,
+      );
+    }
+    throw this.failure(HEADLESS_EXIT.startup, `pi has no /tower command — ${EXTENSION_HINT}`);
+  }
+
   private async towerCommand(pi: HeadlessPi, text: string, code: number): Promise<PiCommandResult> {
     this.line(`> ${text}`);
     this.commandsInFlight += 1;
@@ -301,7 +331,7 @@ class HeadlessRun {
     if (result.disposition !== 'handled') {
       throw this.failure(
         code,
-        `pi did not run ${text} as a pi-tower command (the prompt was ${result.disposition ?? 'not handled'}) — is the pi-tower extension loaded? Install it as a pi package or pass -- -e ${EXTENSION_ENTRY}`,
+        `pi did not run ${text} as a pi-tower command (the prompt was ${result.disposition ?? 'not handled'}) — ${EXTENSION_HINT}`,
       );
     }
     const errors = result.notices.filter((notice) => notice.level === 'error');
