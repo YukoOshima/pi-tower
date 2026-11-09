@@ -92,7 +92,8 @@ describe('upstream tower tool descriptions', () => {
       TOWER_INIT_DESCRIPTION,
       [
         'Initialize a tower multi-agent workspace in the current repository.',
-        'Only the user can enable it (`/tower on`); the agent can never enter tower mode by itself.',
+        'Only the user can enable it (`/mission` or `/tower on`); the agent can never enter tower mode by itself.',
+        'Entering tower mode (`/mission` or `/tower on`) already runs this adoption',
         'Idempotent — an existing workspace is reported, never reset.',
         'roster entries the previous session spawned are retired (their agent ids cannot be resumed across sessions)',
         'only stale branches must rebase onto the new base before merging',
@@ -155,6 +156,7 @@ describe('upstream tower tool descriptions', () => {
         '- it contains uncommitted changes (`uncommitted changes`) — removed only when force is set.',
         'a dry run changes nothing on disk or in state',
         'Tower mode stays active after teardown',
+        'the human turns the mode off explicitly with /mission exit or /tower off',
         'is always kept as the audit trail',
       ],
     ],

@@ -936,7 +936,7 @@ describe('/tower objective status', () => {
 
       expect(shown.errors).toEqual([]);
       expect(shown.notices).toEqual([{ title: title.replace(/^# /, ''), body: body.join('\n') }]);
-      expect(shown.notices[0]?.title).toBe('Objective O1 — Ship');
+      expect(shown.notices[0]?.title).toBe('Mission O1 — Ship');
       expect(shown.notices[0]?.body).toContain('validation: scrutiny');
       expect(shown.notices[0]?.body).not.toContain('user-testing');
     } finally {

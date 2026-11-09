@@ -67,12 +67,12 @@ describe('TowerStatus with an objective', () => {
 
     const output = await status();
 
-    expect(output).toContain('## Objective O1 — Ship CSV export');
+    expect(output).toContain('## Mission O1 — Ship CSV export');
     expect(output).toContain('### Milestones');
     expect(output).toContain(`🔍 MS1 Data model — validating ${short}`);
     expect(output).toContain('### Live agents (1)\n- val-a — validator · MS1 scrutiny r1');
     expect(output).toContain('### Next\nValidating MS1');
-    expect(output.indexOf('## Objective O1')).toBeLessThan(output.indexOf('## Missions'));
+    expect(output.indexOf('## Mission O1')).toBeLessThan(output.indexOf('## Missions'));
     expect(output).toContain(
       `- val-a (validator) — agent agent-1, validating MS1 scrutiny r1 on ${short} (worktree val-ms1-scrutiny-r1), model fake/default-model`,
     );

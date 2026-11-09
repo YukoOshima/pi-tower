@@ -138,7 +138,7 @@ export interface ApprovalRequestInput {
     PromptMilestone,
     'id' | 'title' | 'description' | 'order' | 'validation'
   >[];
-  readonly features: readonly Pick<PromptFeature, 'id' | 'title' | 'milestone'>[];
+  readonly features: readonly Pick<PromptFeature, 'id' | 'title' | 'milestone' | 'deps'>[];
   readonly approvalReason?: string;
   readonly notes?: readonly string[];
   readonly skipKinds?: readonly PromptValidationKind[];
@@ -236,7 +236,7 @@ export function planMilestoneRequest(input: PlanMilestoneRequestInput): string {
   ].join('\n');
   const next = [
     '## Next step',
-    `Plan its features now with TowerPlan, passing milestone="${milestone.id}" on every item: verifiable tasks that together deliver this milestone's part of the definition of done, disjoint scopes so the features run in parallel, and explicit deps only for real ordering. The autopilot spawns the workers as soon as the features are planned (with the autopilot off, spawn them yourself with TowerSpawn) — then end your turn.`,
+    `Plan its features now with TowerPlan, passing milestone="${milestone.id}" on every item: as many small, independent features as the work allows, with verifiable tasks that together deliver this milestone's part of the definition of done. Give each feature a file scope disjoint from the others so the features run in parallel — features of one milestone whose scopes overlap run one after another — add deps only where a feature needs another feature's merged code, and name any skill available in this session that fits a feature in its context. The autopilot spawns the workers as soon as the features are planned (with the autopilot off, spawn them yourself with TowerSpawn) — then end your turn.`,
     "If this milestone turns out unnecessary or wrong, change the plan with TowerObjective(action=\"update\"); removing or reordering milestones needs the human's approval again.",
   ].join('\n');
   return [opening, about, contract, next].join('\n\n');
@@ -386,9 +386,9 @@ export function budgetPausedNotice(input: BudgetPausedNoticeInput): string {
       ? `its cost budget is used up — ${formatUsd(input.costUsd ?? 0)} spent of ${input.maxCostUsd !== undefined ? formatUsd(input.maxCostUsd) : 'the limit'} (tower.json "objective" → maxCostUsd)`
       : `its wall-time limit is reached — ${formatDuration(input.elapsedMs ?? 0)} elapsed of ${input.maxWallTimeMs !== undefined ? formatDuration(input.maxWallTimeMs) : 'the limit'} (tower.json "objective" → maxWallTimeMs)`;
   return [
-    `${capitalize(objectiveLabel(input.objective))} is paused: ${usage}.`,
-    'No new agents start while it is paused; merged work, open branches, and the validation history are kept.',
-    'To continue, raise or remove the limit in tower.json, then run /tower resume. To stop here, leave it paused.',
+    `${capitalize(missionLabel(input.objective))} is paused: ${usage}.`,
+    'No new agents start while it is paused; merged features, open branches, and the validation history are kept.',
+    'To continue, raise or remove the limit in tower.json, then run /mission resume. To stop here, leave it paused.',
   ].join('\n');
 }
 
@@ -405,11 +405,11 @@ export function objectiveCompletedNotice(input: ObjectiveCompletedNoticeInput): 
     ...(input.costUsd !== undefined ? [`Cost: ${formatUsd(input.costUsd)}.`] : []),
   ];
   return [
-    `${capitalize(objectiveLabel(input.objective))} is complete: every milestone passed validation, and the final validation ran on ${input.base} at ${shortCommit(input.baseTip)}.`,
+    `${capitalize(missionLabel(input.objective))} is complete: every milestone passed validation, and the final validation ran on ${input.base} at ${shortCommit(input.baseTip)}.`,
     milestones.join('\n'),
     totals.join(' '),
     `Definition of done, verified by the validators:\n${numberedList(input.objective.definitionOfDone)}`,
-    `The result is on ${input.base}. /tower teardown removes the mission worktrees (branches and .tower/comms/ stay as the audit trail); /tower objective starts the next objective.`,
+    `The result is on ${input.base}. The mission worktrees are cleaned up automatically unless objective.autoTeardown is off — then /tower teardown removes them; branches and .tower/comms/ stay as the audit trail. /mission starts the next mission.`,
   ]
     .filter((section) => section.length > 0)
     .join('\n\n');
@@ -419,12 +419,12 @@ export function objectiveBlockedNotice(input: ObjectiveBlockedNoticeInput): stri
   const { milestone } = input;
   const failures = input.failures ?? [];
   const sections = [
-    `${capitalize(objectiveLabel(input.objective))} is blocked: ${sentence(input.reason)}` +
+    `${capitalize(missionLabel(input.objective))} is blocked: ${sentence(input.reason)}` +
       (milestone !== undefined ? `\nMilestone ${milestone.id} "${milestone.title}" is ${milestone.status}.` : ''),
   ];
   if (failures.length > 0) sections.push(`Latest failures:\n${numberedList(failures)}`);
   sections.push(
-    'No new work starts while it is blocked; merged work and open branches are kept. Decide how to continue: tell the orchestrator what to change or answer what it needs, then run /tower resume (resuming also resets the stall counters) — or leave the objective blocked.',
+    'No new work starts while it is blocked; merged features and open branches are kept. Decide how to continue: tell the orchestrator what to change or answer what it needs, then run /mission resume (resuming also resets the stall counters) — or leave the mission blocked.',
   );
   return sections.join('\n\n');
 }
@@ -449,7 +449,7 @@ export function approvalRequest(input: ApprovalRequestInput): string {
         ? ` Approval reason: ${input.approvalReason}.`
         : '';
   const sections = [
-    `${capitalize(objectiveLabel(objective))} is ready for your approval.${reason}`,
+    `${capitalize(missionLabel(objective))} is ready for your approval.${reason}`,
     `Goal: ${objective.goal.trim()}`,
     `Definition of done:\n${numberedList(objective.definitionOfDone)}`,
   ];
@@ -460,7 +460,7 @@ export function approvalRequest(input: ApprovalRequestInput): string {
   }
   sections.push(
     [
-      'Milestones — in order; the features inside a milestone run in parallel:',
+      'Milestones — validation checkpoints, in order; the features of a milestone run in parallel:',
       ...milestones.map((milestone, index) =>
         milestonePlan(
           milestone,
@@ -475,7 +475,7 @@ export function approvalRequest(input: ApprovalRequestInput): string {
   if (notes.length > 0) sections.push(`Assumptions and notes:\n${notes.map((note) => `- ${note.trim()}`).join('\n')}`);
   sections.push(
     `Estimated runs: ≈ ${String(estimateObjectiveRuns(features.length, milestones.length))} (${countLabel(features.length, 'feature')} + 2 × ${countLabel(milestones.length, 'milestone')}). This is a floor, not a ceiling: failed validations add fix features and further validation rounds.`,
-    'To approve, run: /tower approve\nOnly you can approve — the orchestrator cannot. To change the plan, tell the orchestrator what to change; it updates the plan and asks for approval again.',
+    'To approve, use the approval dialog or run: /mission approve\nOnly you can approve — the orchestrator cannot. To change the plan, tell the orchestrator what to change; it updates the plan and asks for approval again.',
   );
   return sections.join('\n\n');
 }
@@ -483,13 +483,21 @@ export function approvalRequest(input: ApprovalRequestInput): string {
 function milestonePlan(
   milestone: Pick<PromptMilestone, 'id' | 'title' | 'description' | 'validation'>,
   index: number,
-  features: readonly Pick<PromptFeature, 'id' | 'title'>[],
+  features: readonly Pick<PromptFeature, 'id' | 'title' | 'deps'>[],
   acceptanceCommands: readonly string[],
   skipKinds: readonly PromptValidationKind[],
 ): string {
+  const ids = new Set(features.map((feature) => feature.id));
+  const waitsFor = (feature: Pick<PromptFeature, 'id' | 'deps'>): string[] =>
+    (feature.deps ?? []).filter((dep) => dep !== feature.id && ids.has(dep));
+  const waiting = features.filter((feature) => waitsFor(feature).length > 0).length;
+  const listed = features.map((feature) => {
+    const deps = waitsFor(feature);
+    return `${feature.id} "${feature.title}"${deps.length > 0 ? ` (after ${deps.join(', ')})` : ''}`;
+  });
   const planned =
     features.length > 0
-      ? `${countLabel(features.length, 'feature')}: ${features.map((feature) => `${feature.id} "${feature.title}"`).join(', ')}`
+      ? `${parallelism(features.length, waiting)}: ${listed.join(', ')}`
       : 'features are planned when it becomes current';
   const description = milestone.description?.replaceAll(/\s+/g, ' ').trim();
   return [
@@ -545,8 +553,19 @@ function failedRoundBlock(round: PromptValidationRound): string {
   return `${header}\n${failures}`;
 }
 
+function parallelism(count: number, waiting: number): string {
+  if (count === 1) return '1 feature';
+  if (waiting === 0) return `${String(count)} features, ${count === 2 ? 'both' : `all ${String(count)}`} in parallel`;
+  const starting = count - waiting;
+  return `${String(count)} features (${starting === 1 ? '1 starts at once' : `${String(starting)} start in parallel`}, ${String(waiting)} after ${waiting === 1 ? 'its' : 'their'} deps merge)`;
+}
+
 function objectiveLabel(objective: ObjectiveRef): string {
   return `objective ${objective.id} "${objective.title}"`;
+}
+
+function missionLabel(objective: ObjectiveRef): string {
+  return `mission ${objective.id} "${objective.title}"`;
 }
 
 function milestoneLabel(milestone: MilestoneRef): string {

@@ -25,13 +25,13 @@ export function objectiveFeatureSpawnRefusal(
     case 'planning':
       return `${feature}, which is still planning — nothing starts before the human approves: finish the plan and hand it over with TowerObjective(action="request-approval"); ${NOTHING_CREATED}`;
     case 'awaiting-approval':
-      return `${feature}, which is awaiting approval — nothing starts before the human approves it with /tower approve; ${NOTHING_CREATED}`;
+      return `${feature}, which is awaiting approval — nothing starts before the human approves it in the approval dialog or with /mission approve; ${NOTHING_CREATED}`;
     case 'paused':
-      return `${feature}, which is paused${because(objective.pausedReason)} — no new work starts until the human resumes it with /tower resume; ${NOTHING_CREATED}`;
+      return `${feature}, which is paused${because(objective.pausedReason)} — no new work starts until the human resumes it with /mission resume; ${NOTHING_CREATED}`;
     case 'blocked':
-      return `${feature}, which is blocked${because(objective.blockedReason)} — the human decides how to continue and resumes it with /tower resume; ${NOTHING_CREATED}`;
+      return `${feature}, which is blocked${because(objective.blockedReason)} — the human decides how to continue and resumes it with /mission resume; ${NOTHING_CREATED}`;
     case 'completed':
-      return `${feature}, which is completed — plan further work into a new objective; ${NOTHING_CREATED}`;
+      return `${feature}, which is completed — plan further work into a new objective, which the human starts with /mission; ${NOTHING_CREATED}`;
     case 'executing': {
       const current = currentMilestone(objective);
       if (current?.id === milestone.id) return undefined;

@@ -87,7 +87,7 @@ function headerSection(input: ObjectiveStatusInput): string {
     ...(objective.approvedBy !== undefined ? [`approved by ${objective.approvedBy}`] : []),
   ];
   const lines = [
-    `# Objective ${objective.id} — ${objective.title}`,
+    `# Mission ${objective.id} — ${objective.title}`,
     facts.join(' · '),
     `Goal: ${preview(objective.goal, OBJECTIVE_GOAL_PREVIEW_MAX)}`,
   ];
@@ -212,16 +212,16 @@ function agentLine(input: ObjectiveStatusInput, agent: PromptLiveAgent): string 
 function nextStep(input: ObjectiveStatusInput, current: PromptMilestone | undefined, final: boolean): string {
   const { objective } = input;
   if (objective.status === 'planning') {
-    return "The orchestrator plans the objective with the human, drafts it with TowerObjective, plans the first milestone's features, and requests approval.";
+    return 'The orchestrator plans the mission with the human: it asks about the goal, drafts the milestones, plans the features of every milestone to run in parallel, and requests approval.';
   }
   if (objective.status === 'awaiting-approval') {
-    return 'Waiting for the human: approve with /tower approve, or tell the orchestrator what to change.';
+    return 'Waiting for the human: approve in the approval dialog or with /mission approve, or tell the orchestrator what to change.';
   }
   if (objective.status === 'paused') {
-    return `Paused${objective.pausedReason !== undefined ? ` (${objective.pausedReason})` : ''} — /tower resume continues.`;
+    return `Paused${objective.pausedReason !== undefined ? ` (${objective.pausedReason})` : ''} — /mission resume continues.`;
   }
   if (objective.status === 'blocked') {
-    return `Blocked${objective.blockedReason !== undefined ? ` (${objective.blockedReason})` : ''} — the human decides; /tower resume continues.`;
+    return `Blocked${objective.blockedReason !== undefined ? ` (${objective.blockedReason})` : ''} — the human decides; /mission resume continues.`;
   }
   if (objective.status === 'completed') {
     return `Done${objective.completedAt !== undefined ? ` — completed at ${objective.completedAt}` : ''}.`;
@@ -235,7 +235,7 @@ function executingNextStep(
   final: boolean,
 ): string {
   if (current === undefined) {
-    return 'Every milestone passed — the objective completes once the final validation is stamped on the current base tip.';
+    return 'Every milestone passed — the mission completes once the final validation is stamped on the current base tip.';
   }
   if (current.status === 'failed') {
     return `${current.id} failed validation — the orchestrator plans fix features into it (TowerPlan with milestone="${current.id}", origin "fix").`;

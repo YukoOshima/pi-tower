@@ -234,7 +234,7 @@ describe('awaiting approval', () => {
     await settle(runner);
     expect(tower.notices).toHaveLength(1);
     expect(tower.notices[0]).toMatchObject({ level: 'info' });
-    expect(tower.notices[0]!.text).toContain('Objective O1 "Ship" is ready for your approval.');
+    expect(tower.notices[0]!.text).toContain('Mission O1 "Ship" is ready for your approval.');
     expect((await objectiveOf()).autopilot?.wakeKeys).toEqual([expect.stringMatching(/^approval:O1:[0-9a-f]{16}$/)]);
     expect((await objectiveOf()).status).toBe('awaiting-approval');
     await store.updateObjective({ notes: ['assume the default port'] });
@@ -381,7 +381,7 @@ describe('executing', () => {
     expect(objective.status).toBe('paused');
     expect(objective.pausedReason).toMatch(/^max-cost: cost \$1\.25 reached the \$1 limit/);
     expect(tower.notices.at(-1)).toMatchObject({ level: 'warning' });
-    expect(tower.notices.at(-1)!.text).toMatch(/^Objective O1 "Ship" is paused: its cost budget is used up — \$1\.25 spent of \$1\.00/);
+    expect(tower.notices.at(-1)!.text).toMatch(/^Mission O1 "Ship" is paused: its cost budget is used up — \$1\.25 spent of \$1\.00/);
     expect(tower.calls.filter((call) => call.startsWith('spawnWorker'))).toEqual([]);
   });
 
@@ -637,7 +637,7 @@ describe('executing', () => {
     expect(objective.status).toBe('blocked');
     expect(objective.blockedReason).toMatch(/^the autopilot saw no progress after 3 stall wake\(s\)/);
     expect(tower.notices.at(-1)).toMatchObject({ level: 'error' });
-    expect(tower.notices.at(-1)!.text).toMatch(/^Objective O1 "Ship" is blocked: the autopilot saw no progress/);
+    expect(tower.notices.at(-1)!.text).toMatch(/^Mission O1 "Ship" is blocked: the autopilot saw no progress/);
     await settle(runner);
     await settle(runner);
     expect(tower.notices.filter((notice) => notice.level === 'error')).toHaveLength(1);
@@ -875,7 +875,7 @@ describe('terminal objectives the runner did not end itself', () => {
     await settle(runner);
     expect(tower.notices).toHaveLength(1);
     expect(tower.notices[0]).toMatchObject({ level: 'error' });
-    expect(tower.notices[0]!.text).toMatch(/^Objective O1 "Ship" is blocked: the human must choose the database\./);
+    expect(tower.notices[0]!.text).toMatch(/^Mission O1 "Ship" is blocked: the human must choose the database\./);
     expect((await objectiveOf()).autopilot?.wakeKeys).toEqual([expect.stringMatching(/^blocked-notice:O1:[0-9a-f]{16}$/)]);
     const activity = await readFile(store.abs(ACTIVITY_LOG), 'utf8');
     expect(activity).toMatch(/ autopilot notify-human objective=O1 reason=blocked\n/);
@@ -895,7 +895,7 @@ describe('terminal objectives the runner did not end itself', () => {
     expect(tower.notices).toHaveLength(1);
     const notice = tower.notices[0]!;
     expect(notice.level).toBe('error');
-    expect(notice.text).toContain(`Objective O1 "Ship" is blocked: ${blocked.blockedReason!}`);
+    expect(notice.text).toContain(`Mission O1 "Ship" is blocked: ${blocked.blockedReason!}`);
     expect(notice.text).toContain('Milestone MS1 "Core" is blocked.');
     expect(notice.text).toMatch(/Latest failures:\n1\. `echo broken; exit 3` failed: exit code 3/);
   });
@@ -912,7 +912,7 @@ describe('terminal objectives the runner did not end itself', () => {
     await settle(runner);
     expect(tower.notices).toHaveLength(1);
     expect(tower.notices[0]).toMatchObject({ level: 'info' });
-    expect(tower.notices[0]!.text).toMatch(/^Objective O1 "Ship" is complete: every milestone passed validation/);
+    expect(tower.notices[0]!.text).toMatch(/^Mission O1 "Ship" is complete: every milestone passed validation/);
     expect((await objectiveOf()).autopilot?.wakeKeys).toEqual(['completed-notice:O1']);
   });
 

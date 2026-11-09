@@ -80,7 +80,7 @@ describe('TowerObjective tool', () => {
     });
     const status = await objective({ action: 'status' });
     expect(status.isError).toBeUndefined();
-    expect(status.output).toContain('# Objective O1 — Ship CSV export');
+    expect(status.output).toContain('# Mission O1 — Ship CSV export');
   });
 
   it.each([
@@ -122,7 +122,9 @@ describe('TowerObjective tool', () => {
     expect(result.output).toContain('objective O1 drafted: "Ship CSV export" — status planning');
     expect(result.output).toContain('1. MS1 "Data model" — pending · validation: user-testing');
     expect(result.output).toContain('2. MS2 "CLI command" — pending · validation: user-testing · commands `npm ci && npm test`');
-    expect(result.output).toContain('TowerPlan(milestone="MS1")');
+    expect(result.output).toContain(
+      'Next: plan the features of every milestone up front, starting with TowerPlan(milestone="MS1") — small features with disjoint scopes, so each milestone runs them in parallel — refine the plan with TowerObjective(action="update"), then hand it to the human with TowerObjective(action="request-approval").',
+    );
     expect(result.output).not.toContain('maxCostUsd');
     const stored = (await store.load()).objective!;
     expect(stored.limits).toEqual({ maxValidationRounds: 5, maxFeatureAttempts: 2, maxWallTimeMs: 3_600_000, maxCostUsd: 20 });
@@ -233,7 +235,9 @@ describe('TowerObjective tool', () => {
 
     expect(result.isError).toBeUndefined();
     expect(result.output).toContain('status awaiting-approval');
-    expect(result.output).toContain('is awaiting approval again');
+    expect(result.output).toContain(
+      'is awaiting approval again: no new work starts until the human approves the revised plan in the approval dialog or with /mission approve.',
+    );
     expect((await store.load()).objective?.approvalReason).toBe('contract-changed');
   });
 
@@ -270,13 +274,36 @@ describe('TowerObjective tool', () => {
 
     expect(result.isError).toBeUndefined();
     expect(result.output).toContain('objective O1 is now awaiting approval (estimated runs ≈ 5)');
-    expect(result.output).toContain('never approve or claim approval');
-    expect(result.output).toContain('is ready for your approval');
+    expect(result.output).toContain(
+      'Only the human approves — in the approval dialog or with /mission approve, or auto-approval when the human configured it; never approve or claim approval',
+    );
+    expect(result.output).toContain('Mission O1 "Ship CSV export" is ready for your approval');
     expect(result.output).toContain('1. MS1 "Data model" — 1 feature: M1 "Build csv model"');
     expect(result.output).toContain('   validation: scrutiny');
     expect(result.output).not.toContain('user-testing');
-    expect(result.output).toContain('To approve, run: /tower approve');
+    expect(result.output).toContain('To approve, use the approval dialog or run: /mission approve');
+    expect(result.output).not.toMatch(/\/tower\b/);
     expect((await store.load()).objective?.status).toBe('awaiting-approval');
+  });
+
+  it('shows the human how many features of each milestone run in parallel, from the planned deps', async () => {
+    expect((await objective(DRAFT)).isError).toBeUndefined();
+    await store.plan([
+      { title: 'Build csv model', scope: ['src/model/**'], milestone: 'MS1' },
+      { title: 'Build csv writer', scope: ['src/writer/**'], milestone: 'MS1', deps: ['M1'] },
+      { title: 'Document csv', scope: ['docs/**'], milestone: 'MS1' },
+      { title: 'Build csv cli', scope: ['src/cli/**'], milestone: 'MS2', deps: ['M2'] },
+      { title: 'Test csv cli', scope: ['test/cli/**'], milestone: 'MS2' },
+    ]);
+
+    const result = await objective({ action: 'request-approval' });
+
+    expect(result.isError).toBeUndefined();
+    expect(result.output).toContain(
+      '1. MS1 "Data model" — 3 features (2 start in parallel, 1 after its deps merge): M1 "Build csv model", M2 "Build csv writer" (after M1), M3 "Document csv"',
+    );
+    expect(result.output).toContain('2. MS2 "CLI command" — 2 features, both in parallel: M4 "Build csv cli", M5 "Test csv cli"');
+    expect(result.output).toContain('Estimated runs: ≈ 9 (5 features + 2 × 2 milestones). This is a floor, not a ceiling');
   });
 
   it('renders the objective dashboard with live agents and the skipped kinds', async () => {
@@ -292,7 +319,7 @@ describe('TowerObjective tool', () => {
     const result = await objective({ action: 'status' });
 
     expect(result.isError).toBeUndefined();
-    expect(result.output).toContain('# Objective O1 — Ship CSV export');
+    expect(result.output).toContain('# Mission O1 — Ship CSV export');
     expect(result.output).toContain('🔵 MS1 Data model — active · features 0/1 merged · validation: user-testing');
     expect(result.output).toContain('- 🔵 M1 Build csv model — active · worker agent-model');
     expect(result.output).toContain('## Live agents (1)\n- agent-model — worker · M1 Build csv model');
@@ -311,9 +338,12 @@ describe('TowerObjective tool', () => {
     const result = await objective({ action: 'block', reason: 'the vendor API is down for days' });
 
     expect(result.isError).toBeUndefined();
-    expect(result.output).toContain('objective O1 is blocked');
-    expect(result.output).toContain('Objective O1 "Ship CSV export" is blocked: the vendor API is down for days.');
+    expect(result.output).toContain(
+      'objective O1 is blocked — the autopilot starts no new work. The human decides how to continue and resumes with /mission resume.',
+    );
+    expect(result.output).toContain('Mission O1 "Ship CSV export" is blocked: the vendor API is down for days.');
     expect(result.output).toContain('Milestone MS1 "Data model" is active.');
+    expect(result.output).not.toMatch(/\/tower\b/);
     const stored = (await store.load()).objective!;
     expect(stored.status).toBe('blocked');
     expect(stored.blockedReason).toBe('the vendor API is down for days');

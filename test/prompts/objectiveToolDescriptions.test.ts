@@ -20,9 +20,24 @@ describe('TOWER_OBJECTIVE_DESCRIPTION', () => {
       (match) => match[1],
     );
     expect(actions).toEqual(['draft', 'update', 'request-approval', 'status', 'block']);
-    expect(TOWER_OBJECTIVE_DESCRIPTION).toContain('There is no approve action: only the human approves (`/tower approve`)');
+    expect(TOWER_OBJECTIVE_DESCRIPTION).toContain(
+      'There is no approve action: only the human approves (in the approval dialog or with `/mission approve`), or auto-approval when the human configured it.',
+    );
+    expect(TOWER_OBJECTIVE_DESCRIPTION).toContain(
+      'The human receives the plan summary and an estimated run count (features + 2 × milestones) and approves in the approval dialog or with `/mission approve`.',
+    );
     expect(TOWER_OBJECTIVE_DESCRIPTION).toContain("Never approve, or claim approval, on the human's behalf.");
     expect(TOWER_OBJECTIVE_DESCRIPTION).toContain('There is no complete action either: completion is automatic and gated');
+    expect(TOWER_OBJECTIVE_DESCRIPTION).not.toMatch(/\/tower\b/);
+  });
+
+  it('names the human mission terminology and the up-front parallel planning', () => {
+    expect(TOWER_OBJECTIVE_DESCRIPTION).toContain(
+      'The human calls the objective "the mission" and its features "features" (`/mission` shows it); the tool names stay as they are.',
+    );
+    expect(TOWER_OBJECTIVE_DESCRIPTION).toContain(
+      'Plan the features of every milestone with TowerPlan(milestone="MS1") before request-approval — small features with disjoint scopes, so each milestone fans out in parallel.',
+    );
   });
 
   it('states the completion gate and the approval preconditions', () => {
@@ -98,6 +113,20 @@ describe('objective mode in existing tool descriptions', () => {
     expect(TOWER_PLAN_DESCRIPTION).toContain('with origin "fix" (default "plan")');
     expect(TOWER_PLAN_DESCRIPTION).toContain('planning into a failed milestone reopens it');
     expect(TOWER_PLAN_DESCRIPTION).toContain('in parallel');
+  });
+
+  it('teaches TowerPlan to plan every milestone up front as small disjoint-scope features', () => {
+    expect(TOWER_PLAN_DESCRIPTION).toContain(
+      'Plan the features of every milestone before requesting approval, and split each milestone into as many small features with disjoint scopes as the work allows: overlapping scopes inside one milestone auto-wire a dependency, so those features start one after another instead of in parallel.',
+    );
+    const { scope, deps, context } = TOWER_PARAMETER_DESCRIPTIONS.TowerPlan;
+    expect(scope).toContain(
+      'the store auto-adds a dependency that serializes their merges — and, in objective mode, their start, so the features of one milestone need disjoint scopes to run in parallel.',
+    );
+    expect(deps).toContain(
+      'In objective mode a feature also starts only after its deps merge, so add one only where the feature needs that merged code.',
+    );
+    expect(context).toContain('Name any available skill that fits the work, so the worker uses it.');
   });
 
   it('teaches TowerSpawn the validator kind', () => {

@@ -4,7 +4,7 @@ export const TOWER_MAIN_AGENT_ONLY =
   'Tower orchestration tools are only supported by the main agent.';
 
 export const TOWER_MODE_USER_ENABLED_ONLY =
-  'tower mode is not active — only the user can enable it (with /tower on), never the agent. ' +
+  'tower mode is not active — only the user can enable it (with /mission or /tower on), never the agent. ' +
   'Ask the user to turn tower mode on, then drive the tower protocol.';
 
 export function todoToolDenied(toolName: string): string {

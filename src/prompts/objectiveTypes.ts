@@ -107,4 +107,5 @@ export interface PromptFeature {
   readonly attempts?: number;
   readonly owner?: string;
   readonly tasks?: readonly PromptMissionTask[];
+  readonly deps?: readonly string[];
 }
