@@ -51,6 +51,7 @@ import {
   type TowerSpawnToolInput,
 } from './spawn.ts';
 import type { TowerValidatorKind } from '../validate/validate.ts';
+import { objectiveFeatureSpawnRefusal } from './objectiveFeature.ts';
 import {
   buildValidatorPrompt,
   resolveValidationTarget,
@@ -127,6 +128,8 @@ async function spawn(host: TowerToolHost, args: TowerSpawnToolInput): Promise<To
         isError: true,
       };
     }
+    const featureRefusal = objectiveFeatureSpawnRefusal(state, mission);
+    if (featureRefusal !== undefined) return { output: featureRefusal, isError: true };
   } else {
     reviewTarget = args.review_target;
     if (reviewTarget === undefined) {
