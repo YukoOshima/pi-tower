@@ -181,6 +181,50 @@ describe('awaiting approval', () => {
   });
 });
 
+describe('contract revisions and human-only approval', () => {
+  it('a contract change while blocked refuses the automatic approval and notifies the human once', async () => {
+    await draft();
+    await store.approveObjective('human');
+    await store.blockObjective('waiting for the human');
+    await store.updateObjective({ definitionOfDone: ['works', 'and is documented'] });
+    const { runner, tower } = setup({ autoApprove: true });
+    await settle(runner);
+    await settle(runner);
+    const objective = await objectiveOf();
+    expect(objective).toMatchObject({ status: 'awaiting-approval', approvalRequiresHuman: true });
+    expect(tower.notices).toHaveLength(1);
+    expect(tower.notices[0]).toMatchObject({ level: 'warning' });
+    expect(tower.notices[0]!.text).toContain('only a human can approve it');
+    expect(tower.notices[0]!.text).toContain('The contract changed after approval');
+    expect(tower.calls.filter((call) => call.startsWith('spawnWorker'))).toEqual([]);
+    await store.approveObjective('human');
+    await settle(runner);
+    expect(tower.calls).toContain('spawnWorker M1 ap-w-M1-1');
+  });
+
+  it('validators briefed under a changed contract state its revision and their rounds decide the milestone', async () => {
+    await draft({ scrutiny: true });
+    await store.approveObjective('human');
+    await store.updateObjective({ acceptanceCommands: ['test -f README.md'] });
+    await store.approveObjective('human');
+    await store.updateMission('tower', 'M1', { status: 'abandoned' });
+    const { runner, tower } = setup();
+    await settle(runner);
+    const validator = (await store.load()).roster.agents.find((entry) => entry.kind === 'validator');
+    expect(validator).toMatchObject({ name: 'ap-v-MS1-scrutiny-1', contractRevision: 1 });
+    await tower.actAll();
+    await settle(runner);
+    const objective = await objectiveOf();
+    expect(objective.contractRevision).toBe(1);
+    expect(objective.milestones[0]!.rounds.map((round) => [round.kind, round.verdict, round.contractRevision])).toEqual([
+      ['commands', 'pass', 1],
+      ['scrutiny', 'pass', 1],
+    ]);
+    expect(objective.status).toBe('completed');
+    expect(tower.notices.at(-1)!.text).toContain('is complete');
+  });
+});
+
 describe('headless planning', () => {
   it('wakes a quiet headless planner once per planning progress key', async () => {
     await draft({ request: false });
