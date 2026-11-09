@@ -36,7 +36,8 @@ import type { TowerAgentSessionRequest } from '../../src/runtime/index.ts';
 import { createTowerSpawnTool } from '../../src/tools/spawn/spawnTool.ts';
 import { ORCHESTRATOR_CALLER } from '../../src/tools/support.ts';
 import { createTowerAgentRuntime } from '../../src/tower/agentRuntime.ts';
-import { towerAutopilotEffects } from '../../src/tower/autopilotHost.ts';
+import { AutopilotRunner } from '../../src/tower/autopilot/index.ts';
+import { towerAutopilotEffects, towerAutopilotObservations } from '../../src/tower/autopilotHost.ts';
 import { commandUi, handleTowerCommand, type TowerCommandDeps } from '../../src/tower/command.ts';
 import {
   TOWER_AGENT_NOTIFICATION_MESSAGE,
@@ -108,6 +109,7 @@ interface HarnessOptions {
   readonly prepare?: (store: TowerStore) => Promise<void>;
   readonly entries?: FakeSessionManager['entries'];
   readonly createRuntime?: (controller: TowerController) => TowerRuntime;
+  readonly createAutopilot?: (controller: TowerController) => TowerAutopilot;
   readonly alive?: (pid: number) => boolean;
 }
 
@@ -147,11 +149,13 @@ async function harness(options: HarnessOptions = {}): Promise<Harness> {
     ...(models === undefined ? {} : { models }),
     isProcessAlive: options.alive ?? (() => true),
     ...(options.runtime === false ? {} : { createRuntime: options.createRuntime ?? (() => runtime) }),
-    createAutopilot: () => {
-      const autopilot = new FakeAutopilot();
-      autopilots.push(autopilot);
-      return autopilot;
-    },
+    createAutopilot:
+      options.createAutopilot ??
+      (() => {
+        const autopilot = new FakeAutopilot();
+        autopilots.push(autopilot);
+        return autopilot;
+      }),
     log: {
       info: () => undefined,
       warn: (message) => {
@@ -1014,5 +1018,62 @@ describe('the /tower objective command hooks', () => {
       approvedBy: 'human',
       limits: { maxValidationRounds: 5, maxCostUsd: 20 },
     });
+  });
+});
+
+describe('the autopilot runner wired to the controller', () => {
+  const runners: AutopilotRunner[] = [];
+
+  afterEach(async () => {
+    for (const runner of runners.splice(0)) await runner.whenIdle();
+  });
+
+  function realRunner(controller: TowerController): AutopilotRunner {
+    const runner = new AutopilotRunner({
+      observations: towerAutopilotObservations(controller),
+      effects: towerAutopilotEffects(controller),
+    });
+    runners.push(runner);
+    return runner;
+  }
+
+  it('spawns the current milestone feature when tower mode is entered with an executing objective', async () => {
+    const h = await harness({ prepare: executingObjective, createAutopilot: realRunner });
+
+    await h.controller.enter();
+
+    await vi.waitFor(() => expect(h.runtime.specs.map((spec) => [spec.name, spec.kind])).toEqual([['ap-w-M1-1', 'worker']]), WAIT);
+    await runners[0]?.whenIdle();
+    const state = await h.store.load();
+    expect(state.missions.find((mission) => mission.id === 'M1')).toMatchObject({ status: 'active', owner: 'ap-w-M1-1' });
+    expect(await readFile(h.store.abs(ACTIVITY_LOG), 'utf8')).toMatch(/ autopilot spawn-worker .*name=ap-w-M1-1/);
+  });
+
+  it('gives a feature whose worker a restart retired a fresh worker on the same branch', async () => {
+    const h = await harness({
+      prepare: async (store) => {
+        await executingObjective(store);
+        await store.registerSpawnedAgent(
+          {
+            name: 'ap-w-M1-1',
+            agentId: 'agent-before-restart',
+            sessionId: SESSION_ID,
+            kind: 'worker',
+            missionId: 'M1',
+            spawnedAt: new Date().toISOString(),
+          },
+          { id: 'M1', owner: 'ap-w-M1-1' },
+        );
+      },
+      entries: [ACTIVE_MODE_RECORD],
+      createAutopilot: realRunner,
+    });
+
+    expect(h.controller.isActive).toBe(true);
+    await vi.waitFor(() => expect(h.runtime.specs.map((spec) => spec.name)).toEqual(['ap-w-M1-2']), WAIT);
+    await runners[0]?.whenIdle();
+    const m1 = (await h.store.load()).missions.find((mission) => mission.id === 'M1');
+    expect(m1).toMatchObject({ owner: 'ap-w-M1-2' });
+    expect(h.runtime.specs[0]?.cwd).toBe(h.store.abs(join(WORKTREES_DIR, m1?.worktree ?? '')));
   });
 });
