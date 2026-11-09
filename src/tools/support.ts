@@ -1,13 +1,15 @@
 import type { ExtensionContext, ToolDefinition } from '@earendil-works/pi-coding-agent';
 import { Type, type Static, type TSchema, type TUnsafe } from 'typebox';
 
-import type { TowerToolName } from '../prompts/index.ts';
+import { TOWER_OBJECTIVE_DEFAULTS } from '../config/index.ts';
+import type { PromptValidationKind, TowerToolName } from '../prompts/index.ts';
 import {
   GitError,
   MAIN_AGENT_ID,
   TowerProtocolError,
   type TowerAgentKind,
   type TowerStore,
+  type TowerValidationSettings,
 } from '../protocol/index.ts';
 import type {
   TowerAgentInfo,
@@ -99,6 +101,50 @@ export interface TowerToolHost {
   listAgents(activeOnly: boolean): readonly TowerAgentInfo[];
   resumeAgent(agentId: string, prompt: string): Promise<TowerRunStartResult>;
   stopAgent(id: string, reason: string): Promise<TowerStopResult>;
+  objectiveSettings?(): TowerObjectiveSettingsView;
+}
+
+export interface TowerObjectiveSettingsView {
+  readonly autopilot: boolean;
+  readonly autoApprove: boolean;
+  readonly maxValidationRounds: number;
+  readonly maxFeatureAttempts: number;
+  readonly skipScrutiny: boolean;
+  readonly skipUserTesting: boolean;
+  readonly maxWallTimeMs?: number;
+  readonly maxCostUsd?: number;
+}
+
+export const DEFAULT_OBJECTIVE_SETTINGS_VIEW: TowerObjectiveSettingsView = {
+  autopilot: TOWER_OBJECTIVE_DEFAULTS.autopilot,
+  autoApprove: TOWER_OBJECTIVE_DEFAULTS.autoApprove,
+  maxValidationRounds: TOWER_OBJECTIVE_DEFAULTS.maxValidationRounds,
+  maxFeatureAttempts: TOWER_OBJECTIVE_DEFAULTS.maxFeatureAttempts,
+  skipScrutiny: TOWER_OBJECTIVE_DEFAULTS.skipScrutiny,
+  skipUserTesting: TOWER_OBJECTIVE_DEFAULTS.skipUserTesting,
+  ...(TOWER_OBJECTIVE_DEFAULTS.maxWallTimeMs === undefined
+    ? {}
+    : { maxWallTimeMs: TOWER_OBJECTIVE_DEFAULTS.maxWallTimeMs }),
+  ...(TOWER_OBJECTIVE_DEFAULTS.maxCostUsd === undefined
+    ? {}
+    : { maxCostUsd: TOWER_OBJECTIVE_DEFAULTS.maxCostUsd }),
+};
+
+export function objectiveSettingsOf(
+  host: Pick<TowerToolHost, 'objectiveSettings'>,
+): TowerObjectiveSettingsView {
+  return host.objectiveSettings?.() ?? DEFAULT_OBJECTIVE_SETTINGS_VIEW;
+}
+
+export function validationSettingsOf(settings: TowerObjectiveSettingsView): TowerValidationSettings {
+  return { skipScrutiny: settings.skipScrutiny, skipUserTesting: settings.skipUserTesting };
+}
+
+export function skippedValidationKinds(settings: TowerObjectiveSettingsView): PromptValidationKind[] {
+  return [
+    ...(settings.skipScrutiny ? (['scrutiny'] as const) : []),
+    ...(settings.skipUserTesting ? (['user-testing'] as const) : []),
+  ];
 }
 
 export async function runTowerTool(
