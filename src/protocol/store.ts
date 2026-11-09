@@ -1551,11 +1551,6 @@ export class TowerStore {
           `milestone ${milestone.id} is validated on the current base tip ${baseTip.slice(0, 7)} of "${state.base}", not on ${resolved.slice(0, 7)}`,
         );
       }
-      if (milestone.status === 'failed' && milestone.validationCommit === baseTip) {
-        throw new TowerProtocolError(
-          `milestone ${milestone.id} failed validation on ${baseTip.slice(0, 7)}, which is still the base tip — a new validation needs a new base tip: merge a fix planned into ${milestone.id} first`,
-        );
-      }
       if (
         milestone.status === 'passed' &&
         milestone.validationCommit === baseTip &&
@@ -1563,6 +1558,16 @@ export class TowerStore {
       ) {
         throw new TowerProtocolError(
           `final milestone ${milestone.id} already passed on the current base tip ${baseTip.slice(0, 7)} — it is validated again only after the base tip moves`,
+        );
+      }
+      const failedHere = requiredValidationKinds(objective, milestone, settings).flatMap((kind) =>
+        milestone.rounds
+          .filter((round) => round.kind === kind && round.verdict === 'fail' && round.validatedCommit === baseTip)
+          .map((round) => `${kind} r${String(round.round)}`),
+      );
+      if (failedHere.length > 0) {
+        throw new TowerProtocolError(
+          `milestone ${milestone.id} already failed ${failedHere.join(', ')} on the base tip ${baseTip.slice(0, 7)} — a new validation needs a new base tip: merge a fix planned into ${milestone.id} first`,
         );
       }
       const now = new Date().toISOString();

@@ -1301,13 +1301,48 @@ describe('restarting a validation', () => {
     });
     const before = await readFile(store.abs(STATE_FILE), 'utf8');
     await expect(store.startMilestoneValidation('MS1', tip)).rejects.toThrow(
-      new RegExp(`MS1 failed validation on ${tip.slice(0, 7)}, which is still the base tip — a new validation needs a new base tip`),
+      `milestone MS1 already failed scrutiny r1 on the base tip ${tip.slice(0, 7)} — a new validation needs a new base tip: merge a fix planned into MS1 first`,
     );
     expect(await readFile(store.abs(STATE_FILE), 'utf8')).toBe(before);
     await commitFile(repo, 'fix.txt', 'fixed\n', 'fix merged');
     const fixed = await git(repo, 'rev-parse', 'main');
     const restarted = await store.startMilestoneValidation('MS1', fixed);
     expect(restarted.milestone).toMatchObject({ status: 'validating', validationCommit: fixed });
+  });
+
+  it('refuses the same tip after a fix was planned and abandoned, and allows the tip a merged fix creates', async () => {
+    const tip = await validatingMilestone();
+    await registerScrutiny('val-fail', tip);
+    await store.submitValidation('val-fail', { milestone: 'MS1', kind: 'scrutiny', verdict: 'fail', failures: ['broken'] });
+    const [fix] = await store.plan([{ title: 'Fix core', scope: ['src/fix/**'], milestone: 'MS1' }]);
+    await store.updateMission('tower', fix!.id, { status: 'abandoned' });
+    expect((await readState()).objective!.milestones[0]!.status).toBe('active');
+    const snapshot = async (): Promise<string> =>
+      [
+        await readFile(store.abs(STATE_FILE), 'utf8'),
+        await readFile(store.abs('.tower/comms/MISSIONS.md'), 'utf8'),
+        await activityLog(),
+      ].join('\n---\n');
+    const before = await snapshot();
+    await expect(store.startMilestoneValidation('MS1', tip)).rejects.toThrow(
+      `milestone MS1 already failed scrutiny r1 on the base tip ${tip.slice(0, 7)} — a new validation needs a new base tip`,
+    );
+    expect(await snapshot()).toBe(before);
+    await commitFile(repo, 'src/fix/fix.ts', 'export const fixed = true;\n', 'fix merged');
+    const fixed = await git(repo, 'rev-parse', 'main');
+    expect((await store.startMilestoneValidation('MS1', fixed)).milestone).toMatchObject({
+      status: 'validating',
+      validationCommit: fixed,
+    });
+  });
+
+  it('ignores a failed round of a kind that is no longer required', async () => {
+    const tip = await validatingMilestone();
+    await registerScrutiny('val-fail', tip);
+    await store.submitValidation('val-fail', { milestone: 'MS1', kind: 'scrutiny', verdict: 'fail', failures: ['broken'] });
+    const restarted = await store.startMilestoneValidation('MS1', tip, { skipScrutiny: true });
+    expect(restarted.requiredKinds).toEqual(['user-testing']);
+    expect(restarted.milestone).toMatchObject({ status: 'validating', validationCommit: tip });
   });
 
   it('restarts a validating milestone on the same commit and prepares a worktree for a missing kind', async () => {
