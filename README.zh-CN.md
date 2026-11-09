@@ -932,7 +932,7 @@ npm test
 
 默认运行 S1 到 S13 这七个场景。Objective 场景 S15、S16 和 S17 只在被选中时运行，可以按编号选择，也可以用关键字 `objective`：`--scenarios=objective` 运行这三个，`--scenarios=all,objective` 运行全部十个。任一选中的场景失败或你的 pi 设置被改动时，退出码为 1；达到全局超时时退出码为 2。
 
-Objective 场景使用一个小型的 Node CLI 仓库，只依据持久化的证据做断言：`state.json`、活动日志、验证文件和 roster。在 S15 中，验收命令是仓库之外的一个脚本：它在 Tower 的 `commands` 验证中第一次运行时失败，并指出缺少的交付物（`docs/USAGE.md`）；之后只有修复交付了它，脚本才会通过。因此每次运行都会走完修复循环。三个场景还会检查：每次里程碑验证都在产生其 commit 的合并之后 15 秒内开始，并且 autopilot 从不重复启动同一个 Agent。
+Objective 场景使用一个小型的 Node CLI 仓库。它们依据持久化、确定性的证据做断言，从不依据模型生成的文字：`state.json`、活动日志、验证文件和审查文件、roster、git（`main` 的最新提交、历史及其中的文件）、Agent 会话记录里的时间戳、工作目录和工具调用，以及确定性的命令输出（`pi-tower run` 的进度行、斜杠命令的回复，以及 S15 验收脚本对自身每次运行的记录）。在 S15 中，验收命令是仓库之外的一个脚本：它在 Tower 的 `commands` 验证中第一次运行时失败，并指出缺少的交付物（`docs/USAGE.md`）；之后只有修复交付了它，脚本才会通过。因此每次运行都会走完修复循环。三个场景还会检查：每次里程碑验证都在产生其 commit 的合并之后 15 秒内开始，并且 autopilot 从不重复启动同一个 Agent。
 
 ```sh
 npm run test:e2e:pi -- --selfcheck
@@ -963,7 +963,7 @@ npm run test:e2e:pi -- --scenarios=objective --report=e2e-objective.md
 
 每次运行都会消耗真实的 token：使用默认的 sonnet、haiku 和 opus 模型（low thinking）时，一次完整运行约需 6 分钟，花费约 1.1–1.5 美元。三个 objective 场景另需约 4–5 分钟、约 1.2–1.4 美元。每个场景都在自己的 `tower.json` 中用 `maxCostUsd` 和 `maxWallTimeMs` 限制其 objective（分别为 6、4 和 5 美元），报告会列出每个场景的耗时和花费。
 
-端到端实测不会修改你的 pi 设置。每个 pi 进程都在运行目录中拥有自己的 `tower.json`（通过 `PI_TOWER_CONFIG` 指定）和会话目录，并以 `--no-extensions`、`--no-skills`、`--no-prompt-templates`、`--no-context-files` 和 `--offline` 启动。运行前后，runner 会记录 agent 目录（`~/.pi/agent`，或 `PI_CODING_AGENT_DIR`）中 `settings.json` 和 `tower.json` 的指纹；任一文件发生变化，本次运行即判为失败。S16 在其无人值守运行的前后检查得更严格：它对 agent 目录中的每个文件计算哈希，并检查没有任何进程的工作目录或命令行仍位于该场景的运行目录下。
+端到端实测不会修改你的 pi 设置。每个 pi 进程都在运行目录中拥有自己的 `tower.json`（通过 `PI_TOWER_CONFIG` 指定）和会话目录，并以 `--no-extensions`、`--no-skills`、`--no-prompt-templates`、`--no-context-files` 和 `--offline` 启动。运行前后，runner 会记录 agent 目录（`~/.pi/agent`，或 `PI_CODING_AGENT_DIR`）中 `settings.json` 和 `tower.json` 的指纹；任一文件发生变化，本次运行即判为失败。S16 在其无人值守运行的前后检查得更严格：它对 agent 目录中的每个文件计算哈希，并检查没有任何进程的工作目录或命令行仍位于该场景的运行目录下。在 Linux 上，这项进程检查读取 `/proc`。在没有 procfs 的系统上（例如 macOS），它从 `ps` 获取命令行；如果安装了 `lsof`，再从 `lsof` 获取工作目录。如果 `ps` 也无法运行，报告会用一条说明把该检查记为不适用，而不是判为通过。
 
 ## 许可证与致谢
 
