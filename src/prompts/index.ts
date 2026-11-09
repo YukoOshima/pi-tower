@@ -29,6 +29,9 @@ export {
   TOWER_MODE_FULL_REFRESH_TURNS,
   TOWER_MODE_FULL_REMINDER,
   TOWER_MODE_SPARSE_REMINDER,
+  TOWER_OBJECTIVE_HEADLESS_PLAYBOOK,
+  TOWER_OBJECTIVE_PLAYBOOK,
+  TOWER_OBJECTIVE_SPARSE_REMINDER,
   selectTowerModeReminder,
   towerModeReminderVariant,
   type TowerModeReminder,
@@ -36,6 +39,7 @@ export {
   type TowerModeReminderKind,
   type TowerModeReminderMark,
   type TowerModeReminderVariant,
+  type TowerObjectivePlaybookVariant,
   type TowerReminderHistoryEntry,
 } from './reminders.ts';
 export {
