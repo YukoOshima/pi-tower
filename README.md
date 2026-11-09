@@ -45,6 +45,8 @@ Kimi Code's Tower has two model settings. The primary model runs the tower and e
 | `worker` | Every worker spawned for a mission | The orchestrator's model and thinking level |
 | `reviewer` | Every independent reviewer | The orchestrator's model and thinking level |
 
+[Objective mode](#objective-mode) adds a fourth, optional role, `validator`, for the agents that validate milestones. When it is not set, validators use the reviewer's model and thinking level, or the orchestrator's when no reviewer is configured either. You only need it to give validation a model of its own.
+
 You can also define a pool of named models (`models`). The tower uses a pool model for a single spawn when you ask for it.
 
 A minimal setup goes in `~/.pi/agent/tower.json`:
@@ -243,6 +245,7 @@ The autopilot:
 - starts a worker for each feature of the current milestone whose dependencies are merged or abandoned, up to `maxRunningAgents`;
 - spawns a reviewer for each review request on the current branch tip;
 - resumes an idle worker that received review findings or has a rebase conflict to resolve;
+- nudges a worker that stopped without finishing its feature (no `TowerComplete`, no blocker, no message) to finish it or say what blocks it, once per branch tip;
 - replaces a worker that failed or timed out with a fresh one on the same branch, up to `maxFeatureAttempts` workers per feature, but never a worker you stopped;
 - rebases stale branches and merges the branches that pass the gate;
 - starts validation: it spawns the validators and runs the commands;
@@ -255,16 +258,17 @@ The orchestrator is woken only for judgment, with one of these reasons:
 - `validation-failed`: plan fix features from the failures;
 - `blocker`: a worker reported a blocker or asked a question;
 - `feature-attempts-exhausted`: a feature used up its worker attempts;
+- `worker-idle`: a worker stopped again without finishing after it was nudged;
 - `merge-blocked`: the merge gate is blocked for a reason that needs judgment, such as files outside the feature's scope;
 - `rebase-conflict`: a conflict that no worker can take over;
 - `review-stuck` and `validation-stuck`: reviewers or validators keep ending without a result;
 - `stalled`: nothing has moved for `stallTimeoutMs`.
 
-Each wake is sent once per situation. While the autopilot drives an executing objective, the finished agents and the inbox messages that it handles itself reach the orchestrator as context without starting a model turn, so the orchestrator spends tokens on judgment only. When the same autopilot action is refused on three ticks in a row, the orchestrator gets the exact error and a suggested remedy.
+Each wake is sent once per situation. While the autopilot drives an executing objective, the mechanical events of its features reach the orchestrator as context without starting a model turn: agents that end, review requests and survey summaries, review results, and validation results. Only the autopilot's own wakes and the messages that need judgment, such as a worker's question, start a turn, so the orchestrator spends tokens on judgment only. When the same autopilot action is refused on three ticks in a row, the orchestrator gets the exact error and a suggested remedy.
 
 You stay in charge. Talk to the orchestrator as usual, stop an agent for good with `/tower stop <agent>` (the autopilot never replaces a worker you stopped), or stop all new work with `/tower pause`.
 
-**Manual mode.** With `"objective": { "autopilot": false }` in `tower.json`, the orchestrator drives feature execution itself, as in a plain tower run: it spawns workers and reviewers, resumes and replaces workers, rebases and merges with the tower tools. Validation, milestone advancement, completion, the watchdog and the budgets stay automatic.
+**Manual mode.** With `"objective": { "autopilot": false }` in `tower.json`, the orchestrator drives feature execution itself, as in a plain tower run: it spawns workers and reviewers, resumes and replaces workers, rebases and merges with the tower tools, and every agent end and inbox message starts its turn as before. Validation, milestone advancement, completion, the watchdog, the budgets and the judgment wakes stay automatic.
 
 ### Watchdog, stall wakes and budgets
 
@@ -406,6 +410,7 @@ pi-tower reads its settings from `tower.json`. This is [`examples/tower.json`](e
     "thinkingLevel": "high",
     "description": "independent second opinion from another vendor"
   },
+  "validator": "openai/gpt-5.5:xhigh",
   "models": {
     "fast": {
       "model": "anthropic/claude-haiku-5-5",
@@ -413,7 +418,12 @@ pi-tower reads its settings from `tower.json`. This is [`examples/tower.json`](e
     }
   },
   "maxRunningAgents": 4,
-  "agentTimeoutMs": 3600000
+  "agentTimeoutMs": 3600000,
+  "objective": {
+    "maxWallTimeMs": 14400000,
+    "maxCostUsd": 40,
+    "stallTimeoutMs": 300000
+  }
 }
 ```
 
@@ -422,8 +432,10 @@ Line by line:
 - The tower plans and merges on Claude Opus with thinking `high`.
 - Workers build on Claude Sonnet with thinking `medium`.
 - Reviewers use a model from another vendor with thinking `high`, which gives an independent second opinion.
+- Validators of an objective use the same vendor's model with thinking `xhigh`, for slower and more thorough checks.
 - The pool adds one extra model, `fast`. The tower uses it only for a spawn you explicitly ask it for.
-- At most 4 workers and reviewers run at the same time, and each run is stopped after one hour.
+- At most 4 agents run at the same time, and each run is stopped after one hour.
+- An objective pauses after 4 hours or once it has cost $40, whichever comes first, and the orchestrator is woken after 5 quiet minutes instead of 3.
 
 Replace the model ids with ones your pi can use. `pi --list-models` lists them.
 
@@ -432,9 +444,11 @@ Replace the model ids with ones your pi can use. `pi --list-models` lists them.
 | `orchestrator` | Model spec for the main session while tower mode is on | The session's current model |
 | `worker` | Model spec for workers | Inherits the orchestrator, including its thinking level |
 | `reviewer` | Model spec for reviewers | Inherits the orchestrator, including its thinking level |
+| `validator` | Model spec for the validators of an objective | Inherits the reviewer, including its thinking level, or the orchestrator when no reviewer is set |
 | `models` | Pool: an object that maps an alias to a model spec | No pool |
-| `maxRunningAgents` | Positive integer: the most workers and reviewers that may run at the same time | `256` |
-| `agentTimeoutMs` | Positive integer, at most 2147483647: the wall-clock limit of one worker or reviewer run, in milliseconds | `7200000` (2 hours) |
+| `maxRunningAgents` | Positive integer: the most workers, reviewers and validators that may run at the same time | `256` |
+| `agentTimeoutMs` | Positive integer, at most 2147483647: the wall-clock limit of one worker, reviewer or validator run, in milliseconds | `7200000` (2 hours) |
+| `objective` | Object: the settings of objective mode, described in [The `objective` section](#the-objective-section) | All defaults |
 
 A **model spec** has one of two forms:
 
@@ -446,24 +460,46 @@ Rules for model specs and the file:
 - Thinking levels are `off`, `minimal`, `low`, `medium`, `high`, `xhigh` and `max`. Without a level, pi's default thinking level for the model is used.
 - A `:suffix` counts as a thinking level only if it is one of these words. Any other suffix stays part of the model id.
 - Set the thinking level once: either as the `:suffix` or as `thinkingLevel`, not both.
-- Pool aliases are 1 to 64 characters long. They contain letters, digits, `.`, `_` and `-`, and start with a letter or a digit. `primary`, `orchestrator`, `worker` and `reviewer` are reserved, in any letter case.
-- The file is plain JSON, so comments are not allowed. Unknown keys are rejected with the list of allowed keys. An empty file counts as `{}`.
+- Pool aliases are 1 to 64 characters long. They contain letters, digits, `.`, `_` and `-`, and start with a letter or a digit. `primary`, `orchestrator`, `worker`, `reviewer` and `validator` are reserved, in any letter case.
+- The file is plain JSON, so comments are not allowed. Unknown keys are rejected with the list of allowed keys, inside the `objective` section too. An empty file counts as `{}`.
+
+### The `objective` section
+
+The optional `objective` object tunes [objective mode](#objective-mode). Every key is optional.
+
+| Key | Value | Default | What it does |
+| --- | --- | --- | --- |
+| `autopilot` | `true` or `false` | `true` | The autopilot drives feature execution. `false` selects [manual mode](#autopilot-and-orchestrator). |
+| `autoApprove` | `true` or `false` | `false` | Approves every plan automatically, recorded as an automatic approval. Keep it off for interactive use; see [Known limitations](#known-limitations). |
+| `maxValidationRounds` | Positive integer | `3` | Failed rounds of one validation kind after which the milestone and the objective block |
+| `maxFeatureAttempts` | Positive integer | `3` | Worker spawns per feature. It also caps the reviewers per branch tip and the validators per milestone, kind and commit that may end without a result before the orchestrator is woken. |
+| `watchdogIntervalMs` | Positive integer, at most 2147483647 | `60000` (1 minute) | How often the watchdog checks the objective |
+| `stallTimeoutMs` | Positive integer, at most 2147483647 | `180000` (3 minutes) | How long nothing may change before a stall wake |
+| `maxStallWakes` | Positive integer | `3` | Stall wakes in a row without progress before the objective blocks |
+| `maxWallTimeMs` | Positive integer, at most 2147483647 | unset | Pauses the objective this many milliseconds after its first approval |
+| `maxCostUsd` | Positive number | unset | Pauses the objective once its recorded cost reaches this many US dollars |
+| `skipScrutiny` | `true` or `false` | `false` | Never requires `scrutiny` validation |
+| `skipUserTesting` | `true` or `false` | `false` | Never requires `user-testing` validation |
+| `autoTeardown` | `true` or `false` | `false` | Accepted and shown by `/tower models`, but not used yet: a completed objective never removes worktrees by itself. Run `/tower teardown`. |
+
+`maxValidationRounds`, `maxFeatureAttempts`, `maxWallTimeMs` and `maxCostUsd` are copied into an objective when it is drafted, and `/tower resume` copies them again; the orchestrator cannot change them. The other keys take effect as soon as the configuration is reloaded, except `watchdogIntervalMs`, which applies the next time tower mode turns on. `/tower models` shows every key with its value and source, but it does not edit them: edit the section in `tower.json` by hand.
 
 ### Where settings come from
 
 | Source | Sets | Notes |
 | --- | --- | --- |
-| `--tower-orchestrator-model`, `--tower-worker-model`, `--tower-reviewer-model` | One role each | pi command-line flags, string spec |
-| `PI_TOWER_ORCHESTRATOR_MODEL`, `PI_TOWER_WORKER_MODEL`, `PI_TOWER_REVIEWER_MODEL` | One role each | Environment variables, string spec |
+| `--tower-orchestrator-model`, `--tower-worker-model`, `--tower-reviewer-model`, `--tower-validator-model` | One role each | pi command-line flags, string spec |
+| `PI_TOWER_ORCHESTRATOR_MODEL`, `PI_TOWER_WORKER_MODEL`, `PI_TOWER_REVIEWER_MODEL`, `PI_TOWER_VALIDATOR_MODEL` | One role each | Environment variables, string spec |
 | `<project>/.pi/tower.json` | Any key | Read only when pi trusts the project (see `/trust`). An untrusted project's file is ignored, and `/tower models` says so. |
 | `<agentDir>/tower.json` | Any key | Global file. The agent directory is `~/.pi/agent` unless `PI_CODING_AGENT_DIR` moves it. |
 | `PI_TOWER_CONFIG=<path>` | — | Replaces the path of the global file. `~/` is expanded, and relative paths resolve against the current directory. |
 
 Precedence, from highest to lowest:
 
-- **Roles:** flag, then environment variable, then the project file, then the global file. A role that is still unset falls back as described in the table at the top: the orchestrator falls back to the session model, and the worker and reviewer inherit the orchestrator.
+- **Roles:** flag, then environment variable, then the project file, then the global file. A role that is still unset falls back as described in the table at the top: the orchestrator falls back to the session model, the worker and reviewer inherit the orchestrator, and the validator inherits the reviewer when one is configured and the orchestrator otherwise.
 - **`models`:** the pools of the global and project files are merged. A project alias replaces a global alias with the same name.
 - **`maxRunningAgents` and `agentTimeoutMs`:** the project file wins over the global file. There is no flag or environment variable for them.
+- **`objective`:** key by key, the project file wins over the global file, so a project can override one key and keep the others from the global file. There is no flag or environment variable for them.
 
 For example, this run takes the orchestrator and worker from `tower.json` but overrides two roles for this run only:
 
@@ -481,29 +517,47 @@ The sources are checked together. One invalid value in any of them, such as a ty
 
 ### `/tower models`
 
-`/tower models` shows the model, thinking level and source of every role and pool alias. It also shows the status of both config files and lists problems, such as a model that is not in pi's model registry or a provider without credentials. If a file does not parse, it shows the error instead. Here, `examples/tower.json` is the global file and `PI_TOWER_REVIEWER_MODEL=openai/gpt-5.5:high` is set:
+`/tower models` shows the model, thinking level and source of every role and pool alias, followed by the objective settings. It also shows the status of both config files and lists problems, such as a model that is not in pi's model registry or a provider without credentials. If a file does not parse, it shows the error instead. Here, `examples/tower.json` is the global file and `PI_TOWER_REVIEWER_MODEL=openai/gpt-5.5:high` is set:
 
 ```text
 role          model                        thinking             source
 orchestrator  anthropic/claude-opus-5-5    high (configured)    /home/you/.pi/agent/tower.json (global)
 worker        anthropic/claude-sonnet-5-5  medium (configured)  /home/you/.pi/agent/tower.json (global)
 reviewer      openai/gpt-5.5               high (configured)    env PI_TOWER_REVIEWER_MODEL
+validator     openai/gpt-5.5               xhigh (configured)   /home/you/.pi/agent/tower.json (global)
 models.fast   anthropic/claude-haiku-5-5   pi default           /home/you/.pi/agent/tower.json (global)
 
 global config: /home/you/.pi/agent/tower.json (loaded)
 project config: /home/you/work/shop/.pi/tower.json (not found)
+
+objective            value     source
+autopilot            true      default
+autoApprove          false     default
+maxValidationRounds  3         default
+maxFeatureAttempts   3         default
+watchdogIntervalMs   60000     default
+stallTimeoutMs       300000    /home/you/.pi/agent/tower.json (global)
+maxStallWakes        3         default
+maxWallTimeMs        14400000  /home/you/.pi/agent/tower.json (global)
+maxCostUsd           40        /home/you/.pi/agent/tower.json (global)
+skipScrutiny         false     default
+skipUserTesting      false     default
+autoTeardown         false     default
 ```
 
-You can also change the configuration from inside pi:
+Without a `validator` entry, its row reads `inherited from reviewer` (or `inherited from orchestrator` when no reviewer is configured either).
+
+You can also change the model configuration from inside pi:
 
 ```text
 /tower models worker anthropic/claude-sonnet-5-5:medium     # set a role in the global tower.json
+/tower models validator openai/gpt-5.5:xhigh                # give the validators a model of their own
 /tower models fast anthropic/claude-haiku-5-5               # set (or add) the pool alias "fast"
 /tower models reviewer openai/gpt-5.5:high --project        # write <project>/.pi/tower.json instead
 /tower models reviewer --clear                              # remove the setting again
 ```
 
-- The target is `orchestrator` (or its alias `primary`), `worker`, `reviewer`, or a pool alias. `models.<alias>` works as well.
+- The target is `orchestrator` (or its alias `primary`), `worker`, `reviewer`, `validator`, or a pool alias. `models.<alias>` works as well.
 - Writes are atomic, and an object entry keeps its `description`.
 - After a write, pi-tower reloads the configuration, and the next spawn uses it.
 - pi-tower warns you when a higher-precedence source (a flag, an environment variable or the project file) still overrides the value you wrote, or when you write to the file of an untrusted project.
@@ -518,13 +572,13 @@ If an orchestrator is configured by a file, an environment variable or a flag, `
 
 ### Choosing a model for one spawn
 
-By default, workers run on the `worker` model and reviewers on the `reviewer` model. To use a different model for one agent, ask the tower in a normal message:
+By default, workers run on the `worker` model, reviewers on the `reviewer` model and validators on the `validator` model. To use a different model for one agent, ask the tower in a normal message:
 
 - "Spawn the reviewer for feat/checkout-docs with the worker model."
 - "Use the fast model for agent-docs."
 - "Run this reviewer on primary."
 
-The allowed choices are `orchestrator` (or its alias `primary`), `worker`, `reviewer`, and the aliases of your `models` pool. Any other provider/model id is refused, and the error lists the allowed choices. Add the model to `models` first if you need it.
+The allowed choices are `orchestrator` (or its alias `primary`), `worker`, `reviewer`, `validator`, and the aliases of your `models` pool. Any other provider/model id is refused, and the error lists the allowed choices. Add the model to `models` first if you need it. The autopilot always spawns with the role model.
 
 - The tower passes a model only when you ask for one explicitly.
 - A choice applies only to that new agent. It does not change running or resumed agents and is not saved for later spawns.
@@ -547,11 +601,12 @@ An agent keeps its model for its whole life. A resumed worker continues on the m
 | Tower (main agent) | Primary model | `orchestrator` (default: the session model) |
 | Worker default | `[secondary_model] default_model`, else the primary model | `worker` (default: the orchestrator) |
 | Reviewer default | Always the primary model | `reviewer` (default: the orchestrator) |
-| Choice for one spawn | `primary` or a pool alias | `orchestrator`/`primary`, `worker`, `reviewer`, or a pool alias |
+| Validator default | — (no objective mode) | `validator` (default: the reviewer, else the orchestrator) |
+| Choice for one spawn | `primary` or a pool alias | `orchestrator`/`primary`, `worker`, `reviewer`, `validator`, or a pool alias |
 | Where to configure | `config.toml` (`[secondary_model]`) | `tower.json` (global or project), environment variables, flags, `/tower models` |
 | Switching the main model | — | `/tower on` switches to the orchestrator, `/tower off` switches back |
 
-With Kimi Code, you cannot give reviewers a model different from the tower's without asking for it on every spawn. With pi-tower, all three roles are independent settings.
+With Kimi Code, you cannot give reviewers a model different from the tower's without asking for it on every spawn. With pi-tower, all three roles are independent settings, and so is the optional validator.
 
 ## Command reference
 
