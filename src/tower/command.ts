@@ -513,7 +513,7 @@ function openObjectiveRefusal(objective: TowerObjective): string {
       ? 'approve its plan with /tower approve, or ask the tower to change it'
       : objective.status === 'paused'
         ? 'continue it with /tower resume, or ask the tower to block it first'
-        : 'pause it with /tower pause, or ask the tower to block it first';
+        : 'let the fleet finish it, ask the tower to block it, or wait until it completes or blocks — pausing does not help: a paused objective is refused too';
   return `Objective ${objective.id} "${objective.title}" is ${objective.status} — /tower objective plans a new objective only when none is open or the open one is still planning. See it with /tower objective status; ${next}.`;
 }
 

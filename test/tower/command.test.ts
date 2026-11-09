@@ -843,7 +843,10 @@ describe('/tower objective', () => {
     ]);
     await store.approveObjective('auto');
     expect((await h.run('objective again')).errors).toEqual([
-      refusal('executing', 'pause it with /tower pause, or ask the tower to block it first'),
+      refusal(
+        'executing',
+        'let the fleet finish it, ask the tower to block it, or wait until it completes or blocks — pausing does not help: a paused objective is refused too',
+      ),
     ]);
     await store.pauseObjective('lunch');
     expect((await h.run('objective again')).errors).toEqual([
