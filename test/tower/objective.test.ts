@@ -43,6 +43,7 @@ import { commandUi, handleTowerCommand, type TowerCommandDeps } from '../../src/
 import {
   TOWER_AGENT_NOTIFICATION_MESSAGE,
   TOWER_AUTOPILOT_WAKE_MESSAGE,
+  TOWER_INBOX_WAKE_MESSAGE,
   TOWER_MODE_ENTRY,
   TOWER_REVIEWER_BASE_TOOLS,
   TOWER_VALIDATOR_AGENT_TOOLS,
@@ -1197,5 +1198,110 @@ describe('agent-end notifications while the autopilot drives an objective', () =
 
     await vi.waitFor(() => expect(notifications(h)).toHaveLength(1), WAIT);
     expect(notifications(h)[0]?.options).toEqual({ triggerTurn: false, deliverAs: 'followUp' });
+  });
+});
+
+describe('inbox wakes while the autopilot drives an objective', () => {
+  interface Message {
+    readonly from: string;
+    readonly subject: string;
+    readonly scope?: string;
+    readonly action?: string;
+  }
+
+  const REVIEW_REQUEST: Message = { from: 'ap-w-M2-1', subject: 'review-request', scope: 'M2', action: 'complete' };
+  const REVIEW_RESULT: Message = { from: 'ap-r-M2-1', subject: 'review-result', scope: 'M2', action: 'review-result' };
+  const VALIDATION_RESULT: Message = {
+    from: 'ap-w-M2-1',
+    subject: 'validation MS1 scrutiny r1: pass',
+    scope: 'MS1',
+    action: 'validation-result',
+  };
+  const CLARIFY: Message = { from: 'ap-w-M2-1', subject: 'clarify-request' };
+  const CHORE_DONE: Message = { from: 'agent-docs', subject: 'review-request', scope: 'M1', action: 'complete' };
+
+  async function executing(config?: unknown): Promise<Harness> {
+    const h = await harness({ prepare: objectiveWithChore, ...(config === undefined ? {} : { config }) });
+    await h.controller.enter();
+    await vi.waitFor(() => expect(h.autopilots[0]?.calls).toContain('tick restart'), WAIT);
+    const spawnedAt = new Date().toISOString();
+    for (const entry of [
+      { name: 'ap-w-M2-1', agentId: 'agent-w', kind: 'worker', missionId: 'M2' },
+      { name: 'ap-r-M2-1', agentId: 'agent-r', kind: 'reviewer', reviewMissionId: 'M2' },
+      { name: 'agent-docs', agentId: 'agent-d', kind: 'worker', missionId: 'M1' },
+    ] as const) {
+      await h.store.registerAgent({ ...entry, sessionId: SESSION_ID, spawnedAt });
+    }
+    await settle();
+    return h;
+  }
+
+  async function deliver(h: Harness, messages: readonly Message[]) {
+    const stored = [];
+    for (const message of messages) {
+      stored.push(
+        await h.store.sendDetailed(message.from, {
+          to: 'tower',
+          subject: message.subject,
+          body: message.subject,
+          ...(message.scope === undefined ? {} : { scope: message.scope }),
+          ...(message.action === undefined ? {} : { action: message.action }),
+        }),
+      );
+    }
+    for (const sent of stored) {
+      h.controller.publishInboxSent({
+        from: sent.item.from,
+        to: sent.item.to,
+        subject: sent.item.subject,
+        messageId: sent.item.messageId,
+        file: sent.item.file,
+        sentAt: sent.item.sentAt,
+        ...(sent.missionId === undefined ? {} : { missionId: sent.missionId }),
+      });
+    }
+    await vi.waitFor(() => expect(h.pi.sentOfType(TOWER_INBOX_WAKE_MESSAGE)).toHaveLength(1), WAIT);
+    return h.pi.sentOfType(TOWER_INBOX_WAKE_MESSAGE)[0];
+  }
+
+  it('delivers a batch of review requests, review results and validation results as context only', async () => {
+    const h = await executing();
+
+    const wake = await deliver(h, [REVIEW_REQUEST, REVIEW_RESULT, VALIDATION_RESULT]);
+
+    expect(wake?.options).toEqual({ triggerTurn: false, deliverAs: 'followUp' });
+    expect(wake?.message.details).toEqual({ references: 3, omitted: 0 });
+  });
+
+  it('wakes the orchestrator for a mixed batch with one message that needs judgment', async () => {
+    const h = await executing();
+
+    const wake = await deliver(h, [REVIEW_REQUEST, REVIEW_RESULT, CLARIFY, VALIDATION_RESULT]);
+
+    expect(wake?.options).toEqual({ triggerTurn: true, deliverAs: 'followUp' });
+    expect(wake?.message.details).toEqual({ references: 4, omitted: 0 });
+  });
+
+  it('wakes the orchestrator for a mechanical message outside the objective', async () => {
+    const h = await executing();
+
+    const wake = await deliver(h, [REVIEW_RESULT, CHORE_DONE]);
+
+    expect(wake?.options).toEqual({ triggerTurn: true, deliverAs: 'followUp' });
+  });
+
+  it('keeps waking the orchestrator for mechanical batches with the autopilot off or the objective paused', async () => {
+    const off = await executing({ objective: { autopilot: false } });
+    expect((await deliver(off, [REVIEW_REQUEST, REVIEW_RESULT]))?.options).toEqual({
+      triggerTurn: true,
+      deliverAs: 'followUp',
+    });
+
+    const paused = await executing();
+    await paused.store.pauseObjective('the human is reviewing the plan');
+    expect((await deliver(paused, [REVIEW_REQUEST, REVIEW_RESULT]))?.options).toEqual({
+      triggerTurn: true,
+      deliverAs: 'followUp',
+    });
   });
 });

@@ -1,3 +1,5 @@
+import { readFile } from 'node:fs/promises';
+
 import type {
   AgentSettledEvent,
   AfterProviderResponseEvent,
@@ -33,6 +35,7 @@ import {
   commitPaths,
   listBaseDirtyEntries,
   mapWithConcurrency,
+  parseFrontmatter,
   resolveTowerRepoRoot,
   type TowerAgentKind,
   type TowerState,
@@ -75,7 +78,12 @@ import type {
   AutopilotAgentStatus,
   AutopilotRuntimeSettings,
 } from './autopilot/index.ts';
-import { autopilotDrivesObjective, isObjectiveAgent } from './autopilotEvents.ts';
+import {
+  autopilotDrivesObjective,
+  isAutopilotInboxMessage,
+  isObjectiveAgent,
+  type AutopilotInboxMessage,
+} from './autopilotEvents.ts';
 import { autopilotSettings, objectiveSettingValues, objectiveSettingsView } from './objectiveSettings.ts';
 import { selectReminderForContext } from './reminders.ts';
 import type {
@@ -90,7 +98,7 @@ import type {
   TowerStopResult,
 } from './runtimeTypes.ts';
 import { towerModeVeto } from './vetoes.ts';
-import { InboxWakeQueue, type InboxWakeBatch } from './wakes.ts';
+import { InboxWakeQueue, type InboxWakeBatch, type InboxWakeEntry } from './wakes.ts';
 
 export type TowerExtensionApi = Pick<
   ExtensionAPI,
@@ -930,9 +938,9 @@ export class TowerController implements TowerToolHost {
     if (batch === undefined) return;
     const generation = this.wakeGeneration;
     this.wakeFlushing = true;
-    let text: string;
+    let wake: { readonly text: string; readonly triggerTurn: boolean };
     try {
-      text = await this.renderInboxWakeText(batch);
+      wake = await this.composeInboxWake(batch);
     } finally {
       if (generation === this.wakeGeneration) this.wakeFlushing = false;
     }
@@ -946,11 +954,11 @@ export class TowerController implements TowerToolHost {
       this.pi.sendMessage(
         {
           customType: TOWER_INBOX_WAKE_MESSAGE,
-          content: text,
+          content: wake.text,
           display: true,
           details: { references: batch.items.length, omitted: batch.omitted },
         },
-        { triggerTurn: true, deliverAs: 'followUp' },
+        { triggerTurn: wake.triggerTurn, deliverAs: 'followUp' },
       );
     } catch (error) {
       this.log.warn('tower: failed to deliver the inbox wake', { error: errorText(error) });
@@ -961,13 +969,36 @@ export class TowerController implements TowerToolHost {
     if (this.wakes.size > 0) this.scheduleInboxWake();
   }
 
-  private async renderInboxWakeText(batch: InboxWakeBatch): Promise<string> {
-    const targets = wakeDigestTargets(batch.items);
+  private async composeInboxWake(
+    batch: InboxWakeBatch,
+  ): Promise<{ readonly text: string; readonly triggerTurn: boolean }> {
     const store = this.store();
-    const state = await store.load().then(
-      (loaded) => loaded,
-      () => undefined,
-    );
+    const state = await this.loadedState();
+    return {
+      text: await this.renderInboxWakeText(batch, store, state),
+      triggerTurn: await this.inboxWakeTriggersTurn(batch, store, state),
+    };
+  }
+
+  private async inboxWakeTriggersTurn(
+    batch: InboxWakeBatch,
+    store: TowerStore,
+    state: TowerState | undefined,
+  ): Promise<boolean> {
+    if (batch.omitted > 0 || !this.autopilotHandles(state)) return true;
+    for (const item of batch.items) {
+      const message = await inboxMessageFields(store, item);
+      if (message === undefined || !isAutopilotInboxMessage(state, message)) return true;
+    }
+    return false;
+  }
+
+  private async renderInboxWakeText(
+    batch: InboxWakeBatch,
+    store: TowerStore,
+    state: TowerState | undefined,
+  ): Promise<string> {
+    const targets = wakeDigestTargets(batch.items);
     let gateDigest: string[] = [];
     if (targets.missionIds.length > 0) {
       if (state === undefined) {
@@ -1228,6 +1259,17 @@ async function createBaseBranch(repoRoot: string, base: string): Promise<void> {
       `created and switched to "${base}", but committing the checkout's uncommitted changes onto it failed: ${errorText(error)}. ` +
         `The changes are still uncommitted on "${base}" — commit or move them, then re-run /tower ${base}.`,
     );
+  }
+}
+
+async function inboxMessageFields(store: TowerStore, item: InboxWakeEntry): Promise<AutopilotInboxMessage | undefined> {
+  if (item.file === undefined) return undefined;
+  try {
+    const { fields } = parseFrontmatter(await readFile(store.abs(item.file), 'utf8'));
+    if (fields['type'] !== 'inbox') return undefined;
+    return { action: fields['action'], scope: fields['scope'], missionId: item.missionId };
+  } catch {
+    return undefined;
   }
 }
 
