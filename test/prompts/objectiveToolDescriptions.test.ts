@@ -43,6 +43,7 @@ describe('TOWER_OBJECTIVE_DESCRIPTION', () => {
       'scrutiny (a validator reviews',
       'user-testing (a validator exercises the product the way a user would, following qa_instructions)',
       'commands (shell commands the tower runs itself, no model involved)',
+      'Milestone commands and acceptance commands run mechanically in a fresh detached checkout of the base tip with no installed dependencies or build output, so each command must include its own setup (e.g. `npm ci && npm test`).',
       'TowerPlan(milestone="MS1")',
       'Orchestrator only',
       'You are woken only for judgment work',
@@ -141,6 +142,11 @@ describe('objective mode parameter descriptions', () => {
       'Each item: id?, title, description?, scrutiny?, user_testing?, commands?, qa_instructions?',
     );
     expect(reason).toContain('Required with "block"');
+    const { acceptance_commands, milestone_commands } = TOWER_PARAMETER_DESCRIPTIONS.TowerObjective;
+    for (const text of [acceptance_commands, milestone_commands]) {
+      expect(text).toContain('fresh checkout of the validated commit with no installed dependencies');
+      expect(text).toContain('"npm ci && npm test"');
+    }
   });
 
   it('describes every TowerValidate parameter', () => {

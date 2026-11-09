@@ -54,6 +54,7 @@ describe('TOWER_OBJECTIVE_PLAYBOOK', () => {
       'scrutiny (a validator reviews the merged diff',
       'user-testing (a validator exercises the product the way a user would',
       '`qa_instructions`',
+      'Milestone commands and acceptance commands run mechanically in a fresh detached checkout of the base tip with no installed dependencies or build output, so each command must include its own setup (e.g. `npm ci && npm test`).',
       'passing `milestone` on every item',
       'the features inside a milestone run in parallel',
     ]) {
@@ -111,6 +112,7 @@ describe('TOWER_OBJECTIVE_HEADLESS_PLAYBOOK', () => {
 
   it('shares the contract, autopilot, and judgment sections with the interactive playbook', () => {
     for (const shared of [
+      'Milestone commands and acceptance commands run mechanically in a fresh detached checkout of the base tip with no installed dependencies or build output, so each command must include its own setup (e.g. `npm ci && npm test`).',
       '2. **Give every milestone a validation contract.**',
       '3. **Plan features with `TowerPlan(milestone)`.**',
       '4. **Request approval — never self-approve.**',

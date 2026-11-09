@@ -117,7 +117,7 @@ export const TOWER_PARAMETER_DESCRIPTIONS = {
     definition_of_done:
       'Verifiable completion criteria, one per item — validators judge the work against them (draft/update; at least one before request-approval)',
     acceptance_commands:
-      'Shell commands that must exit 0 on the final milestone before the objective can complete (e.g. "npm test"); the tower runs them itself on the validated commit (draft/update)',
+      'Shell commands that must exit 0 on the final milestone before the objective can complete; the tower runs them itself in a fresh checkout of the validated commit with no installed dependencies, so each includes its own setup (e.g. "npm ci && npm test") (draft/update)',
     milestones:
       'Ordered milestones (draft/update). On update this is the complete ordered list: keep an existing milestone by passing its id, add one by omitting the id, remove one by leaving it out. Each item: id?, title, description?, scrutiny?, user_testing?, commands?, qa_instructions?',
     milestone_id:
@@ -130,7 +130,7 @@ export const TOWER_PARAMETER_DESCRIPTIONS = {
     milestone_user_testing:
       'Milestone item `user_testing`: run the user-testing validator (behavioural QA that exercises the product the way a user would); default true',
     milestone_commands:
-      'Milestone item `commands`: shell commands the tower runs on the validated commit; the milestone passes only if every one exits 0 (default none)',
+      'Milestone item `commands`: shell commands the tower runs in a fresh checkout of the validated commit with no installed dependencies, so each includes its own setup (e.g. "npm ci && npm test"); the milestone passes only if every one exits 0 (default none)',
     milestone_qa_instructions:
       'Milestone item `qa_instructions`: how the user-testing validator exercises the product — how to start it, which flows to drive, what to observe',
     note: 'Append a note to the objective — a decision, an assumption, or context for the human (draft/update). Notes never require re-approval.',
