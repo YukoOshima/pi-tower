@@ -1533,7 +1533,8 @@ export class TowerStore {
 
   /**
    * Wave 2 must pass the configured objective settings (skipScrutiny, skipUserTesting): they decide
-   * the required kinds (none passes the milestone immediately), whether a passed final milestone is
+   * the required kinds (the milestone passes immediately when none is required, or when every one
+   * already passed on the commit under the current contract), whether a passed final milestone is
    * stale, and which failed rounds block a same-tip restart. The default `{}` requires every kind.
    */
   async startMilestoneValidation(
@@ -1608,7 +1609,7 @@ export class TowerStore {
       milestone.validationCommit = resolved;
       delete milestone.passedAt;
       const requiredKinds = requiredValidationKinds(objective, milestone, settings);
-      if (requiredKinds.length === 0) {
+      if (milestonePassesOn(objective, milestone, resolved, settings)) {
         milestone.status = 'passed';
         milestone.passedAt = now;
       }

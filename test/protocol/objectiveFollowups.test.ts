@@ -125,6 +125,15 @@ describe('objective mode', () => {
     expect(before).toContain('"objectiveMode": "headless"');
   });
 
+  it('is written by no other objective step', async () => {
+    await approvedObjective();
+    await store.updateObjective({ notes: ['n'], limits: { maxCostUsd: 3 } });
+    await store.pauseObjective('p');
+    await store.resumeObjective();
+    await store.blockObjective('b');
+    expect(await rawState()).not.toContain('objectiveMode');
+  });
+
   it('shares the planning rule through canPlanObjective', () => {
     const objective = (status: TowerObjective['status']) => ({ status }) as TowerObjective;
     expect(canPlanObjective(undefined)).toBe(true);
@@ -133,5 +142,95 @@ describe('objective mode', () => {
         canPlanObjective(objective(status)),
       ),
     ).toEqual([true, false, false, false, true, true]);
+  });
+});
+
+const SPAWNED_AT = '2026-11-09T00:00:00.000Z';
+
+async function registerValidator(
+  name: string,
+  kind: 'scrutiny' | 'user-testing',
+  commit: string,
+  contractRevision?: number,
+): Promise<void> {
+  await store.registerAgent({
+    name,
+    agentId: `agent-${name}`,
+    kind: 'validator',
+    milestoneId: 'MS1',
+    validationKind: kind,
+    validatedCommit: commit,
+    ...(contractRevision === undefined ? {} : { contractRevision }),
+    spawnedAt: SPAWNED_AT,
+  });
+}
+
+async function report(name: string, kind: 'scrutiny' | 'user-testing', verdict: 'pass' | 'fail') {
+  return store.submitValidation(name, {
+    milestone: 'MS1',
+    kind,
+    verdict,
+    ...(verdict === 'fail' ? { failures: [`${kind} broke`] } : {}),
+  });
+}
+
+async function validatingMilestone(): Promise<string> {
+  await approvedObjective();
+  await mutateState((state) => {
+    state.missions[0]!.status = 'merged';
+  });
+  const tip = await git(repo, 'rev-parse', 'main');
+  await store.startMilestoneValidation('MS1', tip);
+  return tip;
+}
+
+describe('starting a validation whose required kinds already passed', () => {
+  it('passes a failed milestone at once when the kind that failed is no longer required', async () => {
+    const tip = await validatingMilestone();
+    await registerValidator('v-scrutiny', 'scrutiny', tip);
+    expect((await report('v-scrutiny', 'scrutiny', 'pass')).milestone.status).toBe('validating');
+    await registerValidator('v-qa', 'user-testing', tip);
+    expect((await report('v-qa', 'user-testing', 'fail')).milestone.status).toBe('failed');
+    await expect(store.startMilestoneValidation('MS1', tip)).rejects.toThrow(/already failed user-testing r1/);
+
+    const started = await store.startMilestoneValidation('MS1', tip, { skipUserTesting: true });
+
+    expect(started.requiredKinds).toEqual(['scrutiny']);
+    expect(started.milestone).toMatchObject({ status: 'passed', validationCommit: tip, passedAt: expect.any(String) });
+    expect((await readState()).objective!.milestones[0]).toMatchObject({ status: 'passed', validationCommit: tip });
+    expect(await activityLog()).toContain(
+      `milestone.validate objective=O1 milestone=MS1 commit=${tip.slice(0, 7)} kinds=scrutiny status=passed`,
+    );
+    expect(await store.activateNextMilestone()).toMatchObject({ id: 'MS2', status: 'active' });
+  });
+
+  it('re-derives a validating milestone whose remaining kind passed when the other is switched off', async () => {
+    const tip = await validatingMilestone();
+    await registerValidator('v-scrutiny', 'scrutiny', tip);
+    await report('v-scrutiny', 'scrutiny', 'pass');
+
+    const restarted = await store.startMilestoneValidation('MS1', tip);
+    expect(restarted.milestone.status).toBe('validating');
+
+    const derived = await store.startMilestoneValidation('MS1', tip, { skipUserTesting: true });
+    expect(derived.milestone.status).toBe('passed');
+  });
+
+  it('does not count passes stamped on another commit or under an older contract revision', async () => {
+    const tip = await validatingMilestone();
+    await registerValidator('v-scrutiny', 'scrutiny', tip);
+    await report('v-scrutiny', 'scrutiny', 'pass');
+    await store.updateObjective({ definitionOfDone: ['works', 'documented'] });
+    await store.approveObjective('human');
+
+    const sameTip = await store.startMilestoneValidation('MS1', tip, { skipUserTesting: true });
+    expect(sameTip.milestone.status).toBe('validating');
+
+    await commitFile(repo, 'next.txt', 'next\n', 'base moved');
+    const next = await git(repo, 'rev-parse', 'main');
+    await registerValidator('v-scrutiny-2', 'scrutiny', tip, 1);
+    await report('v-scrutiny-2', 'scrutiny', 'pass');
+    const moved = await store.startMilestoneValidation('MS1', next, { skipUserTesting: true });
+    expect(moved.milestone).toMatchObject({ status: 'validating', validationCommit: next });
   });
 });
