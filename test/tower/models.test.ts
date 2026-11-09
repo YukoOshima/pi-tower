@@ -239,7 +239,7 @@ describe('spawn model resolution', () => {
     expect(await h.controller.resolveSpawnModel('worker', 'gpt-9')).toEqual({
       ok: false,
       error:
-        'Invalid model "gpt-9" — available models: orchestrator, primary, worker, reviewer, fast (primary is an alias of orchestrator). Omit model to use the worker default; other provider/model ids are not accepted — add them to "models" in tower.json first.',
+        'Invalid model "gpt-9" — available models: orchestrator, primary, worker, reviewer, validator, fast (primary is an alias of orchestrator). Omit model to use the worker default; other provider/model ids are not accepted — add them to "models" in tower.json first.',
     });
   });
 
@@ -285,6 +285,32 @@ describe('spawn model resolution', () => {
       ok: true,
       binding: { choice: 'reviewer', model: 'prov/reviewer-model' },
     });
+  });
+
+  it('resolves validator spawns from the validator role and checks the reviewer it inherits', async () => {
+    const h = await harness({ global: { reviewer: 'prov/ghost-reviewer' } });
+    const resolveValidator = () =>
+      h.models.resolveSpawn('validator', undefined, h.controller.primaryModel(), h.ctx.modelRegistry);
+    expect(resolveValidator()).toEqual({
+      ok: false,
+      error: `tower spawn refused — the validator model "validator" is not usable: reviewer: model "prov/ghost-reviewer" (set by ${h.globalPath} (global)) is not in pi's model registry — check the provider/modelId (pi --list-models shows them)`,
+    });
+    h.ctx.modelRegistry.add('prov', 'ghost-reviewer');
+    expect(resolveValidator()).toEqual({ ok: true, binding: { choice: 'validator', model: 'prov/ghost-reviewer' } });
+
+    const configured = await harness({
+      global: { reviewer: 'prov/reviewer-model' },
+      env: { PI_TOWER_VALIDATOR_MODEL: 'prov/env-validator:high' },
+    });
+    configured.ctx.modelRegistry.add('prov', 'env-validator');
+    expect(
+      configured.models.resolveSpawn(
+        'validator',
+        undefined,
+        configured.controller.primaryModel(),
+        configured.ctx.modelRegistry,
+      ),
+    ).toEqual({ ok: true, binding: { choice: 'validator', model: 'prov/env-validator', thinkingLevel: 'high' } });
   });
 
   it('refuses every spawn while the tower model configuration does not load', async () => {
@@ -390,7 +416,7 @@ describe('TowerSpawn model description', () => {
 
     await runModels(h, ['fast', 'prov/fast-model']);
     expect(spawnDescription(h)).toContain('- fast: prov/fast-model, pi default thinking');
-    expect(h.models.targets()).toEqual(['orchestrator', 'worker', 'reviewer', 'primary', 'fast']);
+    expect(h.models.targets()).toEqual(['orchestrator', 'worker', 'reviewer', 'validator', 'primary', 'fast']);
   });
 });
 
@@ -412,6 +438,33 @@ describe('/tower models', () => {
     expect(body).toContain('- worker: model "prov/missing-model"');
   });
 
+  it('shows the objective settings with their sources after the models', async () => {
+    const h = await harness({
+      global: { objective: { maxCostUsd: 25, autopilot: true } },
+      project: { objective: { autopilot: false } },
+    });
+
+    const shown = await runModels(h, []);
+
+    expect(shown.errors).toEqual([]);
+    const rows = (shown.notices[0]?.body ?? '').split('\n').map((line) => line.split(/\s{2,}/));
+    const header = rows.findIndex((cells) => cells.join('|') === 'objective|value|source');
+    expect(header).toBeGreaterThan(rows.findIndex((cells) => cells[0] === 'validator'));
+    expect(rows[header - 1]).toEqual(['']);
+    expect(rows.slice(header + 1)).toHaveLength(12);
+    expect(rows).toContainEqual(['autopilot', 'false', `${h.projectPath} (project)`]);
+    expect(rows).toContainEqual(['maxCostUsd', '25', `${h.globalPath} (global)`]);
+    expect(rows).toContainEqual(['maxValidationRounds', '3', 'default']);
+    expect(h.models.objectiveSettings?.autopilot).toStrictEqual({
+      value: false,
+      source: { kind: 'file', scope: 'project', path: h.projectPath },
+    });
+
+    const broken = await harness({ global: { objective: { autopilot: 'yes' } } });
+    expect(broken.models.objectiveSettings).toBeUndefined();
+    expect(broken.models.loadError).toContain('objective.autopilot: expected true or false, got "yes"');
+  });
+
   it('writes the global tower.json by default and --project writes the project file', async () => {
     const h = await harness();
 
@@ -428,6 +481,26 @@ describe('/tower models', () => {
 
     const again = await runModels(h, ['reviewer', 'prov/review-model', '--project']);
     expect(again.notices[0]?.body).toContain(`reviewer is already prov/review-model in ${h.projectPath}.`);
+  });
+
+  it('sets and clears the validator model and shows it inheriting the reviewer otherwise', async () => {
+    const h = await harness({ global: { reviewer: 'prov/review-model:low' } });
+
+    const inherited = await runModels(h, []);
+    expect(inherited.notices[0]?.body).toMatch(
+      /validator\s+prov\/review-model\s+low \(inherited from reviewer\)\s+inherited from reviewer/,
+    );
+
+    const set = await runModels(h, ['validator', 'prov/validator-model:high', '--project']);
+    expect(set.errors).toEqual([]);
+    expect(set.warnings).toEqual([]);
+    expect(await readConfig(h.projectPath)).toEqual({ validator: 'prov/validator-model:high' });
+    expect(set.notices[0]?.body).toContain(`Set validator = prov/validator-model:high in ${h.projectPath}.`);
+    expect(set.notices[0]?.body).toMatch(/validator\s+prov\/validator-model\s+high \(configured\)/);
+
+    const cleared = await runModels(h, ['validator', '--clear', '--project']);
+    expect(cleared.notices[0]?.body).toContain(`Cleared validator in ${h.projectPath}.`);
+    expect(await readConfig(h.projectPath)).toEqual({});
   });
 
   it('maps primary to the orchestrator and pool aliases to models.<alias>', async () => {

@@ -1,6 +1,6 @@
 import type { TowerModelRef, TowerRole, TowerThinkingLevel } from './types.ts';
 
-export const TOWER_ROLES: readonly TowerRole[] = ['orchestrator', 'worker', 'reviewer'];
+export const TOWER_ROLES: readonly TowerRole[] = ['orchestrator', 'worker', 'reviewer', 'validator'];
 
 export const TOWER_THINKING_LEVELS: readonly TowerThinkingLevel[] = [
   'off',

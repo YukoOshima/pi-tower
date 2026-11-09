@@ -102,7 +102,7 @@ describe('validateModelBindings', () => {
   it('reports a broken orchestrator once and names the roles that fall back to it', () => {
     const both = resolveTowerModels(config({ roles: { orchestrator: value('anthropic/claude-opus-9') } }), SESSION);
     expect(validateModelBindings(both, registry([], [])).map((problem) => problem.message)).toEqual([
-      'orchestrator: model "anthropic/claude-opus-9" (set by /u/.pi/agent/tower.json (global)) is not in pi\'s model registry — check the provider/modelId (pi --list-models shows them); worker and reviewer fall back to it',
+      'orchestrator: model "anthropic/claude-opus-9" (set by /u/.pi/agent/tower.json (global)) is not in pi\'s model registry — check the provider/modelId (pi --list-models shows them); worker, reviewer and validator fall back to it',
     ]);
     const one = resolveTowerModels(
       config({ roles: { orchestrator: value('anthropic/claude-opus-9'), worker: value('openai/gpt-5.1') } }),
@@ -110,7 +110,36 @@ describe('validateModelBindings', () => {
     );
     const problems = validateModelBindings(one, registry(['openai/gpt-5.1'], ['openai']));
     expect(problems).toHaveLength(1);
-    expect(problems[0]?.message.endsWith('; reviewer falls back to it')).toBe(true);
+    expect(problems[0]?.message.endsWith('; reviewer and validator fall back to it')).toBe(true);
+  });
+
+  it('checks a configured validator and leaves an inheriting one to the role it inherits', () => {
+    const own = resolveTowerModels(
+      config({
+        roles: {
+          reviewer: value('openai/gpt-5.1'),
+          validator: value('openai/gpt-9', { kind: 'env', variable: 'PI_TOWER_VALIDATOR_MODEL' }),
+        },
+      }),
+      SESSION,
+    );
+    expect(validateModelBindings(own, registry(['openai/gpt-5.1'], ['openai']))).toStrictEqual([
+      {
+        target: 'validator',
+        kind: 'not-found',
+        model: 'openai/gpt-9',
+        message:
+          'validator: model "openai/gpt-9" (set by env PI_TOWER_VALIDATOR_MODEL) is not in pi\'s model registry — check the provider/modelId (pi --list-models shows them)',
+      },
+    ]);
+    const inheriting = resolveTowerModels(config({ roles: { reviewer: value('openai/gpt-5.1') } }), SESSION);
+    expect(validateModelBindings(inheriting, registry([], [])).map((problem) => problem.target)).toEqual([
+      'reviewer',
+    ]);
+    const unresolved = resolveTowerModels(config({ roles: { worker: value('openai/gpt-5.1') } }), undefined);
+    expect(validateModelBindings(unresolved, registry(['openai/gpt-5.1'], ['openai']))[0]?.message).toMatch(
+      /; reviewer and validator fall back to it$/,
+    );
   });
 
   it('hints at a mistyped thinking level when an unknown model id ends in :<word>', () => {

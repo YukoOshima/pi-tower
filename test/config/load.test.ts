@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   loadTowerConfig,
   readTowerModelFlags,
+  resolveObjectiveSettings,
   TowerConfigError,
   towerConfigPaths,
 } from '../../src/config/index.ts';
@@ -125,6 +126,31 @@ describe('loadTowerConfig', () => {
     });
   });
 
+  it('reads the validator role from the global file, the project file, env and flag in precedence order', async () => {
+    await writeJson(globalFile, { validator: 'global/validator' });
+    expect((await loadTowerConfig(input())).roles).toStrictEqual({
+      validator: { value: { provider: 'global', modelId: 'validator' }, source: globalSource() },
+    });
+    await writeJson(projectFile, { validator: { model: 'project/validator', thinkingLevel: 'high' } });
+    expect((await loadTowerConfig(input())).roles.validator).toStrictEqual({
+      value: { provider: 'project', modelId: 'validator', thinkingLevel: 'high' },
+      source: projectSource(),
+    });
+    const env = { PI_TOWER_VALIDATOR_MODEL: 'env/validator:low' };
+    expect((await loadTowerConfig(input({ env }))).roles.validator).toStrictEqual({
+      value: { provider: 'env', modelId: 'validator', thinkingLevel: 'low' },
+      source: { kind: 'env', variable: 'PI_TOWER_VALIDATOR_MODEL' },
+    });
+    const flagged = await loadTowerConfig(input({ env, flags: { validator: 'flag/validator:max' } }));
+    expect(flagged.roles.validator).toStrictEqual({
+      value: { provider: 'flag', modelId: 'validator', thinkingLevel: 'max' },
+      source: { kind: 'flag', flag: 'tower-validator-model' },
+    });
+    expect((await loadError({ env: { PI_TOWER_VALIDATOR_MODEL: 'nope' } })).issues[0]?.source).toBe(
+      'env PI_TOWER_VALIDATOR_MODEL',
+    );
+  });
+
   it('merges the model pool per alias with the project file winning', async () => {
     await writeJson(globalFile, {
       models: { fast: 'google/gemini-2.5-flash', deep: 'anthropic/claude-opus-4-5:high' },
@@ -148,6 +174,36 @@ describe('loadTowerConfig', () => {
     });
     expect(config.maxRunningAgents).toStrictEqual({ value: 2, source: projectSource() });
     expect(config.agentTimeoutMs).toStrictEqual({ value: 60_000, source: globalSource() });
+  });
+
+  it('keeps the objective sections in precedence order so the project overrides the global file per key', async () => {
+    await writeJson(globalFile, { objective: { maxValidationRounds: 5, autopilot: false, maxCostUsd: 20 } });
+    await writeJson(projectFile, { objective: { maxValidationRounds: 2, skipScrutiny: true } });
+    const config = await loadTowerConfig(input());
+    expect(config.objective).toStrictEqual([
+      { value: { maxValidationRounds: 2, skipScrutiny: true }, source: projectSource() },
+      { value: { maxValidationRounds: 5, autopilot: false, maxCostUsd: 20 }, source: globalSource() },
+    ]);
+    const settings = resolveObjectiveSettings(config);
+    expect(settings.maxValidationRounds).toStrictEqual({ value: 2, source: projectSource() });
+    expect(settings.autopilot).toStrictEqual({ value: false, source: globalSource() });
+    expect(settings.maxCostUsd).toStrictEqual({ value: 20, source: globalSource() });
+    expect(settings.skipScrutiny).toStrictEqual({ value: true, source: projectSource() });
+    expect(settings.maxFeatureAttempts).toStrictEqual({ value: 3, source: { kind: 'default' } });
+
+    const untrusted = await loadTowerConfig(input({ projectTrusted: false }));
+    expect(resolveObjectiveSettings(untrusted).maxValidationRounds).toStrictEqual({ value: 5, source: globalSource() });
+
+    await writeJson(projectFile, { objective: {} });
+    await writeJson(globalFile, {});
+    expect((await loadTowerConfig(input())).objective).toBeUndefined();
+  });
+
+  it('names the file and key of an invalid objective setting', async () => {
+    await writeJson(projectFile, { objective: { maxFeatureAttempts: 0 } });
+    expect((await loadError()).issues).toEqual([
+      { source: `${projectFile} (project)`, key: 'objective.maxFeatureAttempts', message: 'expected a positive integer, got 0' },
+    ]);
   });
 
   it('ignores the project file when the project is not trusted', async () => {
@@ -274,6 +330,10 @@ describe('readTowerModelFlags', () => {
       'tower-orchestrator-model',
       'tower-worker-model',
       'tower-reviewer-model',
+      'tower-validator-model',
     ]);
+    expect(readTowerModelFlags((name) => (name === 'tower-validator-model' ? 'a/b:high' : undefined))).toStrictEqual({
+      validator: 'a/b:high',
+    });
   });
 });

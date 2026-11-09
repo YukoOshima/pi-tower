@@ -4,7 +4,7 @@ import { MODEL_REF_FORMAT, TowerConfigError } from '../config/index.ts';
 import type { TowerCommandUi } from './command.ts';
 import type { TowerController } from './controller.ts';
 
-export const TOWER_MODELS_USAGE = `Usage: /tower models — show the orchestrator, worker and reviewer models; /tower models <orchestrator|primary|worker|reviewer|alias> <${MODEL_REF_FORMAT}> [--project] — set one; /tower models <role|alias> --clear [--project] — remove it (the global tower.json is written unless --project is given)`;
+export const TOWER_MODELS_USAGE = `Usage: /tower models — show the orchestrator, worker, reviewer and validator models and the objective settings; /tower models <orchestrator|primary|worker|reviewer|validator|alias> <${MODEL_REF_FORMAT}> [--project] — set one; /tower models <role|alias> --clear [--project] — remove it (the global tower.json is written unless --project is given)`;
 
 export async function handleTowerModelsCommand(
   controller: TowerController,

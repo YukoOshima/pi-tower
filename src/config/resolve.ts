@@ -38,16 +38,24 @@ export function resolveTowerModels(
   config: TowerConfig,
   primary: TowerPrimaryModel | undefined,
 ): TowerResolvedModels {
-  const { orchestrator, worker, reviewer } = config.roles;
+  const { orchestrator, worker, reviewer, validator } = config.roles;
   const effectiveOrchestrator =
     orchestrator === undefined ? sessionModel(primary) : configuredModel(orchestrator);
-  const orFallback = (value: TowerConfigValue<TowerModelSpec> | undefined): TowerResolvedModel =>
-    value === undefined ? inheritOrchestrator(effectiveOrchestrator) : configuredModel(value);
+  const orFallback = (
+    value: TowerConfigValue<TowerModelSpec> | undefined,
+    fallback: TowerResolvedModel,
+  ): TowerResolvedModel => (value === undefined ? fallback : configuredModel(value));
+  const fromOrchestrator = inherit('orchestrator', effectiveOrchestrator);
+  const effectiveReviewer = orFallback(reviewer, fromOrchestrator);
   return {
     roles: {
       orchestrator: effectiveOrchestrator,
-      worker: orFallback(worker),
-      reviewer: orFallback(reviewer),
+      worker: orFallback(worker, fromOrchestrator),
+      reviewer: effectiveReviewer,
+      validator: orFallback(
+        validator,
+        reviewer === undefined ? fromOrchestrator : inherit('reviewer', effectiveReviewer),
+      ),
     },
     pool: Object.fromEntries(
       Object.entries(config.models).map(([alias, value]) => [alias, configuredModel(value)]),
@@ -57,7 +65,14 @@ export function resolveTowerModels(
 }
 
 export function spawnModelChoices(models: TowerResolvedModels): readonly string[] {
-  return ['orchestrator', PRIMARY_MODEL_CHOICE, 'worker', 'reviewer', ...Object.keys(models.pool)];
+  return [
+    'orchestrator',
+    PRIMARY_MODEL_CHOICE,
+    'worker',
+    'reviewer',
+    'validator',
+    ...Object.keys(models.pool),
+  ];
 }
 
 export function resolveSpawnModel(
@@ -95,11 +110,13 @@ export function unresolvedModelHint(role: TowerRole): string {
   const via =
     role === 'orchestrator'
       ? `"orchestrator" in tower.json, ${TOWER_MODEL_ENV.orchestrator} or --${TOWER_MODEL_FLAGS.orchestrator}`
-      : `"${role}" or "orchestrator" in tower.json, ${TOWER_MODEL_ENV[role]} or --${TOWER_MODEL_FLAGS[role]}`;
+      : `${role === 'validator' ? '"validator", "reviewer"' : `"${role}"`} or "orchestrator" in tower.json, ${TOWER_MODEL_ENV[role]} or --${TOWER_MODEL_FLAGS[role]}`;
   const why =
     role === 'orchestrator'
       ? 'none is configured and the session has no model'
-      : 'it falls back to the orchestrator, but no orchestrator is configured and the session has no model';
+      : role === 'validator'
+        ? 'it falls back to the reviewer and then the orchestrator, but neither is configured and the session has no model'
+        : 'it falls back to the orchestrator, but no orchestrator is configured and the session has no model';
   return `${why}; select a session model with /model or set ${via}`;
 }
 
@@ -118,11 +135,12 @@ function sessionModel(primary: TowerPrimaryModel | undefined): TowerResolvedMode
   return { binding: toBinding(primary.provider, primary.modelId, primary.thinkingLevel), origin };
 }
 
-function inheritOrchestrator(orchestrator: TowerResolvedModel): TowerResolvedModel {
-  const origin = { kind: 'inherited', from: 'orchestrator' } as const;
-  return orchestrator.binding === undefined
-    ? { origin }
-    : { binding: orchestrator.binding, origin };
+function inherit(
+  from: 'orchestrator' | 'reviewer',
+  resolved: TowerResolvedModel,
+): TowerResolvedModel {
+  const origin = { kind: 'inherited', from } as const;
+  return resolved.binding === undefined ? { origin } : { binding: resolved.binding, origin };
 }
 
 function toBinding(

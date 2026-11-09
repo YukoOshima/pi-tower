@@ -173,7 +173,7 @@ describe('tower extension factory', () => {
     for (const tool of pi.tools.values()) expect(tool.defaultActive).toBe(false);
     expect(pi.tools.has('TowerComplete')).toBe(false);
     expect([...pi.flags.keys()].sort()).toEqual(
-      ['tower-orchestrator-model', 'tower-reviewer-model', 'tower-worker-model'],
+      ['tower-orchestrator-model', 'tower-reviewer-model', 'tower-validator-model', 'tower-worker-model'],
     );
     expect(Object.values(TOWER_MODEL_FLAGS).sort()).toEqual([...pi.flags.keys()].sort());
     for (const flag of pi.flags.values()) expect(flag).toMatchObject({ type: 'string' });

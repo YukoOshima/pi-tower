@@ -10,6 +10,12 @@ export type {
   TowerModelOrigin,
   TowerModelRef,
   TowerModelSpec,
+  TowerObjectiveConfigFile,
+  TowerObjectiveSetting,
+  TowerObjectiveSettingKey,
+  TowerObjectiveSettingSource,
+  TowerObjectiveSettingValues,
+  TowerObjectiveSettings,
   TowerPrimaryModel,
   TowerResolvedModel,
   TowerResolvedModels,
@@ -64,8 +70,18 @@ export {
   TowerSpawnModelError,
 } from './resolve.ts';
 export type { TowerSpawnModel } from './resolve.ts';
+export {
+  resolveObjectiveSettings,
+  TOWER_OBJECTIVE_DEFAULTS,
+  TOWER_OBJECTIVE_KEYS,
+} from './objective.ts';
 export { formatConfigSource, formatModelOrigin } from './source.ts';
-export { describeSpawnModels, describeThinking, formatModelTable } from './describe.ts';
+export {
+  describeSpawnModels,
+  describeThinking,
+  formatModelTable,
+  formatObjectiveSettings,
+} from './describe.ts';
 export { validateModelBindings } from './validate.ts';
 export type { TowerModelProblem, TowerModelProblemKind, TowerModelRegistry } from './validate.ts';
 export { updateTowerConfigModel } from './persist.ts';

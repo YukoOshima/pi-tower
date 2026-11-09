@@ -58,14 +58,14 @@ describe('parseTowerConfig', () => {
   it('rejects unknown top-level keys naming the file and key', () => {
     const error = configError({ orchestrater: 'anthropic/claude-opus-4-5' });
     expect(error.message).toBe(
-      'Invalid tower config — /home/u/.pi/agent/tower.json (global): orchestrater: unknown key — allowed keys: orchestrator, worker, reviewer, models, maxRunningAgents, agentTimeoutMs',
+      'Invalid tower config — /home/u/.pi/agent/tower.json (global): orchestrater: unknown key — allowed keys: orchestrator, worker, reviewer, validator, models, maxRunningAgents, agentTimeoutMs, objective',
     );
     expect(error.issues).toEqual([
       {
         source: SOURCE,
         key: 'orchestrater',
         message:
-          'unknown key — allowed keys: orchestrator, worker, reviewer, models, maxRunningAgents, agentTimeoutMs',
+          'unknown key — allowed keys: orchestrator, worker, reviewer, validator, models, maxRunningAgents, agentTimeoutMs, objective',
       },
     ]);
   });
@@ -130,11 +130,28 @@ describe('parseTowerConfig', () => {
         {
           source: SOURCE,
           key: `models.${alias}`,
-          message: `"${alias}" is reserved for the role models (primary, orchestrator, worker, reviewer) — rename the alias`,
+          message: `"${alias}" is reserved for the role models (primary, orchestrator, worker, reviewer, validator) — rename the alias`,
         },
       ]);
     },
   );
+
+  it('accepts a validator model spec and reserves the validator alias', () => {
+    expect(
+      parseTowerConfig({ validator: { model: 'openai/gpt-5.1', thinkingLevel: 'high', description: 'QA' } }, SOURCE),
+    ).toStrictEqual({
+      validator: { provider: 'openai', modelId: 'gpt-5.1', thinkingLevel: 'high', description: 'QA' },
+    });
+    expect(configError({ validator: 'nope' }).issues[0]?.key).toBe('validator');
+    expect(configError({ models: { Validator: 'a/b' } }).issues).toEqual([
+      {
+        source: SOURCE,
+        key: 'models.Validator',
+        message:
+          '"Validator" is reserved for the role models (primary, orchestrator, worker, reviewer, validator) — rename the alias',
+      },
+    ]);
+  });
 
   it.each(['', 'my alias', 'kimi/k3', 'a:b', '-fast', 'x'.repeat(65)])(
     'rejects the malformed pool alias %j',
@@ -208,10 +225,131 @@ describe('parseTowerConfig', () => {
     expect(error.message.split('\n')).toEqual([
       'Invalid tower config:',
       `- ${SOURCE}: worker: "nope" has no provider — expected provider/modelId[:thinkingLevel] (e.g. anthropic/claude-sonnet-4-5:high)`,
-      `- ${SOURCE}: models.primary: "primary" is reserved for the role models (primary, orchestrator, worker, reviewer) — rename the alias`,
+      `- ${SOURCE}: models.primary: "primary" is reserved for the role models (primary, orchestrator, worker, reviewer, validator) — rename the alias`,
       `- ${SOURCE}: models.fast.thinkingLevel: "turbo" is not a thinking level — use off, minimal, low, medium, high, xhigh, max`,
       `- ${SOURCE}: maxRunningAgents: expected a positive integer, got 0`,
     ]);
     expect(error.name).toBe('TowerConfigError');
+  });
+});
+
+describe('parseTowerConfig objective section', () => {
+  const full = {
+    autopilot: false,
+    autoApprove: true,
+    maxValidationRounds: 5,
+    maxFeatureAttempts: 2,
+    watchdogIntervalMs: 30_000,
+    stallTimeoutMs: 600_000,
+    maxStallWakes: 1,
+    maxWallTimeMs: 14_400_000,
+    maxCostUsd: 12.5,
+    skipScrutiny: true,
+    skipUserTesting: true,
+    autoTeardown: true,
+  };
+
+  it('accepts every objective setting and an empty section', () => {
+    expect(parseTowerConfig({ objective: full }, SOURCE)).toStrictEqual({ objective: full });
+    expect(parseTowerConfig({ objective: {} }, SOURCE)).toStrictEqual({ objective: {} });
+  });
+
+  it('rejects unknown objective keys naming the allowed ones', () => {
+    expect(configError({ objective: { autoPilot: true } }).issues).toEqual([
+      {
+        source: SOURCE,
+        key: 'objective.autoPilot',
+        message:
+          'unknown key — allowed keys: autopilot, autoApprove, maxValidationRounds, maxFeatureAttempts, watchdogIntervalMs, stallTimeoutMs, maxStallWakes, maxWallTimeMs, maxCostUsd, skipScrutiny, skipUserTesting, autoTeardown',
+      },
+    ]);
+  });
+
+  it('rejects an objective value that is not an object', () => {
+    for (const [raw, shown] of [
+      [[], 'an array'],
+      [null, 'null'],
+      [true, 'true'],
+    ] as const) {
+      expect(configError({ objective: raw }).issues).toEqual([
+        { source: SOURCE, key: 'objective', message: `expected an object of objective settings, got ${shown}` },
+      ]);
+    }
+  });
+
+  it('requires booleans for the switches', () => {
+    expect(
+      configError({ objective: { autopilot: 'yes', autoApprove: 1, skipScrutiny: null, skipUserTesting: {}, autoTeardown: [] } })
+        .issues,
+    ).toEqual([
+      { source: SOURCE, key: 'objective.autopilot', message: 'expected true or false, got "yes"' },
+      { source: SOURCE, key: 'objective.autoApprove', message: 'expected true or false, got 1' },
+      { source: SOURCE, key: 'objective.skipScrutiny', message: 'expected true or false, got null' },
+      { source: SOURCE, key: 'objective.skipUserTesting', message: 'expected true or false, got an object' },
+      { source: SOURCE, key: 'objective.autoTeardown', message: 'expected true or false, got an array' },
+    ]);
+  });
+
+  it.each([
+    [0, '0'],
+    [-1, '-1'],
+    [2.5, '2.5'],
+    ['3', '"3"'],
+    [Number.NaN, 'NaN'],
+  ])('rejects counts and milliseconds = %j', (value, shown) => {
+    const keys = [
+      'maxValidationRounds',
+      'maxFeatureAttempts',
+      'maxStallWakes',
+      'watchdogIntervalMs',
+      'stallTimeoutMs',
+      'maxWallTimeMs',
+    ];
+    expect(configError({ objective: Object.fromEntries(keys.map((key) => [key, value])) }).issues).toEqual(
+      keys.map((key) => ({
+        source: SOURCE,
+        key: `objective.${key}`,
+        message: `expected a positive integer, got ${shown}`,
+      })),
+    );
+  });
+
+  it("caps the millisecond settings at Node's timer limit but not the counts", () => {
+    const tooLong = 2_592_000_000;
+    expect(
+      configError({ objective: { watchdogIntervalMs: tooLong, stallTimeoutMs: tooLong, maxWallTimeMs: tooLong } }).issues.map(
+        (issue) => [issue.key, issue.message],
+      ),
+    ).toEqual(
+      ['watchdogIntervalMs', 'stallTimeoutMs', 'maxWallTimeMs'].map((key) => [
+        `objective.${key}`,
+        "expected at most 2147483647 (Node's timer limit, about 24.8 days), got 2592000000",
+      ]),
+    );
+    expect(parseTowerConfig({ objective: { maxWallTimeMs: 2_147_483_647, maxValidationRounds: tooLong } }, SOURCE)).toStrictEqual({
+      objective: { maxWallTimeMs: 2_147_483_647, maxValidationRounds: tooLong },
+    });
+  });
+
+  it('requires a positive finite number for maxCostUsd', () => {
+    expect(parseTowerConfig({ objective: { maxCostUsd: 0.25 } }, SOURCE)).toStrictEqual({
+      objective: { maxCostUsd: 0.25 },
+    });
+    for (const [value, shown] of [
+      [0, '0'],
+      [-5, '-5'],
+      ['10', '"10"'],
+      [Number.POSITIVE_INFINITY, 'Infinity'],
+      [null, 'null'],
+    ] as const) {
+      expect(configError({ objective: { maxCostUsd: value } }).issues).toEqual([
+        { source: SOURCE, key: 'objective.maxCostUsd', message: `expected a positive number, got ${shown}` },
+      ]);
+    }
+  });
+
+  it('reports objective problems together with the rest of the file', () => {
+    const error = configError({ worker: 'nope', objective: { maxCostUsd: -1, extra: 1 } });
+    expect(error.issues.map((issue) => issue.key)).toEqual(['worker', 'objective.maxCostUsd', 'objective.extra']);
   });
 });
