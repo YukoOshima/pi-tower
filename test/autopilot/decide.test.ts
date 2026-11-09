@@ -6,6 +6,7 @@ import {
   digest,
   runningAgents,
   type AutopilotAction,
+  type AutopilotDecision,
   type AutopilotObjective,
   type AutopilotObjectiveStatus,
   type AutopilotSnapshot,
@@ -715,8 +716,19 @@ const QUIET = snapshot({ missions: [working('M1', { worker: IDLE })] });
 const QUIET_KEY = computeProgressKey(QUIET);
 const MANUAL_PENDING = snapshot({ settings: { autopilot: false }, missions: [working('M1', { worker: IDLE }), feature('M2')] });
 
+const DUE = snapshot({ missions: [working('M1', { worker: IDLE }), feature('M2')] });
+const DUE_KEY = computeProgressKey(DUE);
+
+function stallRevision(key: string, n: number, since: number): string {
+  return `${key}#${String(n)}@${String(since)}`;
+}
+
 table('stall watchdog', [
-  { name: 'a quiet, unchanged objective wakes after stallTimeoutMs', snap: settled(QUIET, 180_000), actions: [wakeOf('stalled', 'O1', `${QUIET_KEY}#1`)] },
+  {
+    name: 'a quiet, unchanged objective wakes after stallTimeoutMs',
+    snap: settled(QUIET, 180_000),
+    actions: [wakeOf('stalled', 'O1', stallRevision(QUIET_KEY, 1, NOW - 180_000))],
+  },
   { name: 'quiet for less than stallTimeoutMs is not a stall', snap: settled(QUIET, 179_999), actions: [] },
   { name: 'a live agent is not a stall', snap: settled(snapshot({ missions: [working('M1')] }), 999_999), actions: [] },
   { name: 'a busy orchestrator is not a stall', snap: settled({ ...QUIET, orchestratorBusy: true }, 999_999), actions: [] },
@@ -725,18 +737,36 @@ table('stall watchdog', [
     snap: settled({ ...QUIET, validators: [{ milestone: 'MS1', kind: 'commands', commit: BASE }] }, 999_999),
     actions: [],
   },
+  { name: 'a due action under stallTimeoutMs is simply emitted', snap: settled(DUE, 179_999), actions: [spawn('M2')] },
   {
-    name: 'a due action is not a stall',
-    snap: settled(snapshot({ missions: [working('M1', { worker: IDLE }), feature('M2')] }), 999_999),
-    actions: [spawn('M2')],
+    name: 'a due action that never takes effect does not hold the watchdog: the stall wake joins it',
+    snap: settled(DUE, 999_999),
+    actions: [spawn('M2'), wakeOf('stalled', 'O1', stallRevision(DUE_KEY, 1, NOW - 999_999))],
   },
-  { name: 'each stall wake has its own key', snap: settled(QUIET, 180_000, { stallWakes: 2 }), actions: [wakeOf('stalled', 'O1', `${QUIET_KEY}#3`)] },
+  {
+    name: 'each stall wake has its own key',
+    snap: settled(QUIET, 180_000, { stallWakes: 2 }),
+    actions: [wakeOf('stalled', 'O1', stallRevision(QUIET_KEY, 3, NOW - 180_000))],
+  },
   { name: 'maxStallWakes stall wakes without progress block the objective', snap: settled(QUIET, 180_000, { stallWakes: 3 }), actions: [blockOf('stalled')] },
-  { name: 'a stall wake already sent is not resent', snap: settled(QUIET, 180_000, { wakeKeys: [`stalled:O1:${QUIET_KEY}#1`] }), actions: [] },
+  { name: 'the stalled block replaces the due actions', snap: settled(DUE, 180_000, { stallWakes: 3 }), actions: [blockOf('stalled')] },
+  {
+    name: 'a stall wake already sent is not resent',
+    snap: settled(QUIET, 180_000, { wakeKeys: [`stalled:O1:${stallRevision(QUIET_KEY, 1, NOW - 180_000)}`] }),
+    actions: [],
+  },
+  {
+    name: 'resuming from a stalled block re-arms the stall wakes',
+    snap: settled(QUIET, 180_000, {
+      stallWakes: 0,
+      wakeKeys: [1, 2, 3].map((n) => `stalled:O1:${stallRevision(QUIET_KEY, n, NOW - 1_000_000 + n * 180_000)}`),
+    }),
+    actions: [wakeOf('stalled', 'O1', stallRevision(QUIET_KEY, 1, NOW - 180_000))],
+  },
   {
     name: 'manual mode stalls when the orchestrator leaves feature execution undone',
     snap: settled(MANUAL_PENDING, 180_000),
-    actions: [wakeOf('stalled', 'O1', `${computeProgressKey(MANUAL_PENDING)}#1`)],
+    actions: [wakeOf('stalled', 'O1', stallRevision(computeProgressKey(MANUAL_PENDING), 1, NOW - 180_000))],
   },
 ]);
 
@@ -753,9 +783,10 @@ describe('stall bookkeeping', () => {
     { name: 'a stall wake restarts the clock and counts', snap: settled(QUIET, 200_000), stall: { progressAt: NOW, idleMs: 200_000, stalled: true, stallWakes: 1 } },
     {
       name: 'a suppressed stall wake still counts as sent',
-      snap: settled(QUIET, 200_000, { wakeKeys: [`stalled:O1:${QUIET_KEY}#1`] }),
+      snap: settled(QUIET, 200_000, { wakeKeys: [`stalled:O1:${stallRevision(QUIET_KEY, 1, NOW - 200_000)}`] }),
       stall: { progressAt: NOW, idleMs: 200_000, stalled: true, stallWakes: 1 },
     },
+    { name: 'a due action does not restart the clock', snap: settled(DUE, 100_000), stall: { progressAt: NOW - 100_000, idleMs: 100_000, stalled: false, stallWakes: 0 } },
     { name: 'the stall block keeps the count', snap: settled(QUIET, 200_000, { stallWakes: 3 }), stall: { progressAt: NOW - 200_000, idleMs: 200_000, stalled: true, stallWakes: 3 } },
     {
       name: 'a non-executing objective rests the clock',
@@ -768,6 +799,55 @@ describe('stall bookkeeping', () => {
 
   it('returns the progress key of the snapshot', () => {
     expect(decideAutopilot(QUIET).progressKey).toBe(QUIET_KEY);
+  });
+});
+
+function refuseEveryAction(start: AutopilotSnapshot, ticks: number): AutopilotDecision[] {
+  const decisions: AutopilotDecision[] = [];
+  let snap = start;
+  for (let tick = 0; tick < ticks; tick += 1) {
+    const decision = decideAutopilot(snap);
+    decisions.push(decision);
+    const sent = decision.actions.flatMap((action) =>
+      action.type === 'wake-orchestrator' || action.type === 'resume-worker' ? [action.key] : [],
+    );
+    snap = {
+      ...start,
+      now: snap.now + 60_000,
+      memory: {
+        progressKey: decision.progressKey,
+        progressAt: decision.stall.progressAt,
+        stallWakes: decision.stall.stallWakes,
+        wakeKeys: [...snap.memory.wakeKeys, ...sent],
+      },
+    };
+  }
+  return decisions;
+}
+
+describe('stall watchdog with an executor that refuses every action', () => {
+  it.each([
+    { action: 'rebase', snap: snapshot({ missions: [STALE] }) },
+    { action: 'spawn-worker', snap: snapshot({ missions: PLANNED }) },
+    { action: 'start-validation', snap: snapshot({ missions: DONE_MS1 }) },
+    { action: 'complete-objective', snap: snapshot({ objective: { milestones: [PASSED_MS1, FINAL_PASSED] }, missions: ALL_MERGED }) },
+  ])('a refused $action keeps being emitted, stall wakes #1..#3 join it, then block-objective alone', ({ action, snap }) => {
+    const decisions = refuseEveryAction(snap, 13);
+    const ticks = decisions.map((decision) =>
+      decision.actions.map((next) => (next.type === 'wake-orchestrator' ? `wake:${next.reason}` : next.type)).join(' '),
+    );
+    const due = action;
+    const stalled = `${action} wake:stalled`;
+    expect(ticks).toEqual([due, due, due, stalled, due, due, stalled, due, due, stalled, due, due, 'block-objective']);
+    const key = decisions[0]!.progressKey;
+    const revisions = decisions.flatMap((decision) =>
+      decision.actions.flatMap((next) => (next.type === 'wake-orchestrator' ? [next.revision] : [])),
+    );
+    expect(revisions).toEqual([
+      stallRevision(key, 1, NOW),
+      stallRevision(key, 2, NOW + 180_000),
+      stallRevision(key, 3, NOW + 360_000),
+    ]);
   });
 });
 

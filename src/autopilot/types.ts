@@ -315,7 +315,8 @@ export type AutopilotActionType = AutopilotAction['type'];
 export interface AutopilotStall {
   /**
    * Start of the current quiet period, to persist as the memory's progressAt: now when the
-   * progress key changed, while anything is live, busy or due, and after a stall wake.
+   * progress key changed, while an agent, a validator run or the orchestrator is live, and after a
+   * stall wake. Due actions do not restart it: an action that never takes effect still stalls.
    */
   readonly progressAt: number;
   /** How long the system had been quiet at this tick. */

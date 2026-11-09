@@ -108,7 +108,9 @@ export function decideAutopilot(snapshot: AutopilotSnapshot): AutopilotDecision 
   for (const feature of eligibleFeatures(draft)) planFeature(draft, feature);
   allocateAgentSlots(draft);
   planMilestone(draft);
-  return withStall(draft, progressKey, assemble(draft));
+  const { stall, block: stalledBlock } = watchdog(draft, progressKey);
+  if (stalledBlock !== undefined) return { actions: [stalledBlock], progressKey, stall };
+  return { actions: assemble(draft), progressKey, stall };
 }
 
 function restingStall(snapshot: AutopilotSnapshot): AutopilotStall {
@@ -474,43 +476,34 @@ function assemble(draft: Draft): AutopilotAction[] {
   ];
 }
 
-function withStall(draft: Draft, progressKey: string, actions: AutopilotAction[]): AutopilotDecision {
+function watchdog(
+  draft: Draft,
+  progressKey: string,
+): { readonly stall: AutopilotStall; readonly block?: AutopilotBlockObjective } {
   const { snapshot, objective } = draft;
   const { memory, settings, now } = snapshot;
   const progressed = memory.progressKey !== progressKey;
   const live =
     runningAgents(snapshot) > 0 || snapshot.validators.length > 0 || snapshot.orchestratorBusy;
-  const busy = live || actions.length > 0;
-  const clock = progressed || busy ? now : (memory.progressAt ?? now);
+  const clock = progressed || live ? now : (memory.progressAt ?? now);
   const stallWakes = progressed ? 0 : memory.stallWakes;
   const idleMs = now - clock;
-  const stalled = !progressed && !busy && idleMs >= settings.stallTimeoutMs;
-  if (!stalled) {
-    return { actions, progressKey, stall: { progressAt: clock, idleMs, stalled, stallWakes } };
-  }
+  const stalled = !progressed && !live && idleMs >= settings.stallTimeoutMs;
+  if (!stalled) return { stall: { progressAt: clock, idleMs, stalled, stallWakes } };
   if (stallWakes >= settings.maxStallWakes) {
+    const detail = `no progress after ${String(stallWakes)} stall wake(s); quiet for ${String(idleMs)}ms`;
     return {
-      actions: [
-        blockAction(
-          objective,
-          'stalled',
-          `no progress after ${String(stallWakes)} stall wake(s); quiet for ${String(idleMs)}ms`,
-        ),
-      ],
-      progressKey,
       stall: { progressAt: clock, idleMs, stalled, stallWakes },
+      block: blockAction(objective, 'stalled', detail),
     };
   }
+  const due = assemble(draft).length;
   wake(
     draft,
     'stalled',
     objective.id,
-    `${progressKey}#${String(stallWakes + 1)}`,
-    `no progress for ${String(idleMs)}ms with no live agent (stall wake ${String(stallWakes + 1)} of ${String(settings.maxStallWakes)})`,
+    `${progressKey}#${String(stallWakes + 1)}@${String(clock)}`,
+    `no progress for ${String(idleMs)}ms with no live agent; ${String(due)} due action(s) are not taking effect (stall wake ${String(stallWakes + 1)} of ${String(settings.maxStallWakes)})`,
   );
-  return {
-    actions: [...draft.wakes],
-    progressKey,
-    stall: { progressAt: now, idleMs, stalled, stallWakes: stallWakes + 1 },
-  };
+  return { stall: { progressAt: now, idleMs, stalled, stallWakes: stallWakes + 1 } };
 }
