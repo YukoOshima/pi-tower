@@ -100,18 +100,21 @@ export const s16Headless: ScenarioDefinition = {
       );
       const entries = logEntries(repo);
       const approve = entries.find((entry) => entry.action === 'objective.approve');
+      const drafted = entries.find((entry) => entry.action === 'objective.draft' && entry.fields.id === objective?.id);
+      const released = entries.find((entry) => entry.action === 'objective.mode' && entry.fields.objective === objective?.id && entry.fields.mode === 'none');
       const final = objective?.milestones.at(-1);
       const mainTip = git(repo, ['rev-parse', 'main']);
       report.check(
-        'state.json: the objective completed, approved automatically in headless mode, its final milestone passed on the base tip',
+        'the objective completed, approved automatically, in headless mode from draft to completion, its final milestone passed on the base tip',
         objective?.status === 'completed' &&
           objective.approvedBy === 'auto' &&
           approve?.fields.by === 'auto' &&
-          state?.objectiveMode === 'headless' &&
+          drafted?.fields.mode === 'headless' &&
+          released?.fields.from === 'headless' &&
           objective.milestones.every((milestone) => milestone.status === 'passed') &&
           final?.validationCommit === mainTip &&
           (final?.rounds.some((round) => round.verdict === 'pass') ?? false),
-        describeObjective(state),
+        [...describeObjective(state), drafted?.line ?? '(no objective.draft line)', released?.line ?? '(no objective.mode release line)'],
       );
       const merged = (state?.missions ?? []).filter((mission) => mission.milestone !== undefined);
       report.check(
