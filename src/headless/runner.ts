@@ -150,7 +150,7 @@ class HeadlessRun {
   private leftover: HeadlessObjective | undefined;
   private current: HeadlessObjective | undefined;
   private lastKey: string | undefined;
-  private approvalSent = false;
+  private approval: { readonly approvedAt: string | undefined } | undefined;
   private waitingNoted = false;
   private stateError: string | undefined;
   private commandsInFlight = 0;
@@ -355,6 +355,7 @@ class HeadlessRun {
           this.line(progressLine(objective, snapshot?.features ?? []));
         }
         const verdict = await this.react(pi, objective, snapshot?.features ?? []);
+        if (verdict === 'approved') continue;
         if (verdict !== undefined) return verdict;
       } else if (!this.waitingNoted) {
         this.waitingNoted = true;
@@ -369,7 +370,7 @@ class HeadlessRun {
     }
   }
 
-  private async react(pi: HeadlessPi, objective: HeadlessObjective, features: readonly HeadlessFeature[]): Promise<HeadlessExit | undefined> {
+  private async react(pi: HeadlessPi, objective: HeadlessObjective, features: readonly HeadlessFeature[]): Promise<HeadlessExit | 'approved' | undefined> {
     switch (objective.status) {
       case 'completed':
         return new HeadlessExit(HEADLESS_EXIT.completed, `objective ${objective.id} "${objective.title}" completed`);
@@ -381,7 +382,7 @@ class HeadlessRun {
           `objective ${objective.id} is paused: ${objective.pausedReason ?? 'no reason recorded'} — resume it with /tower resume in pi, then re-run pi-tower run to follow it`,
         );
       case 'awaiting-approval':
-        if (this.approvalSent) return undefined;
+        if (this.approval !== undefined && this.approval.approvedAt === objective.approvedAt) return undefined;
         this.deps.output.info(renderPlan(objective, features));
         if (!this.options.autoApprove) {
           throw new HeadlessExit(
@@ -390,16 +391,16 @@ class HeadlessRun {
           );
         }
         await this.approve(pi, objective);
-        return undefined;
+        return 'approved';
       default:
-        this.approvalSent = false;
+        this.approval = undefined;
         return undefined;
     }
   }
 
   private async approve(pi: HeadlessPi, objective: HeadlessObjective): Promise<void> {
     await this.towerCommand(pi, '/tower approve', HEADLESS_EXIT.stopped);
-    this.approvalSent = true;
+    this.approval = { approvedAt: objective.approvedAt };
     this.line(`auto-approved the plan of ${objective.id} (--auto-approve)`);
   }
 }

@@ -144,6 +144,70 @@ describe('runHeadless', () => {
     expect(run.info.some((line) => line.includes('approval reason: contract-changed'))).toBe(true);
   });
 
+  it('re-reads the state right after approving, so a plan sent back before the next poll is approved again', async () => {
+    let flipAt: number | undefined;
+    const run = stubRun((pi, state) => {
+      towerOn(pi, state);
+      drafts(pi, state);
+      let approvals = 0;
+      pi.reactions['/tower approve'] = {
+        effect: () => {
+          approvals += 1;
+          if (approvals > 1) {
+            state.set(snapshot(stage('completed', 'passed', 'passed')));
+            return;
+          }
+          state.set(snapshot(stage('executing', 'active', 'pending')));
+          flipAt = run.clock.now();
+        },
+      };
+      state.onRead = () => {
+        if (flipAt === undefined || run.clock.now() <= flipAt) return;
+        flipAt = undefined;
+        state.set(snapshot(stage('awaiting-approval', 'active', 'pending', { approvalReason: 'contract-changed' })));
+      };
+    });
+    expect(await runHeadless(runOptions({ autoApprove: true, timeoutMs: 60_000 }), run.deps)).toBe(HEADLESS_EXIT.completed);
+    expect(run.pi().commands.filter((command) => command.startsWith('/tower approve'))).toHaveLength(2);
+    expect(plain(run.info)).toContain('O1 executing — MS1 active · MS2 pending');
+  });
+
+  it('approves again when the plan is back for approval with a new approvedAt before any other status was seen', async () => {
+    const run = stubRun((pi, state) => {
+      towerOn(pi, state);
+      drafts(pi, state);
+      let approvals = 0;
+      pi.reactions['/tower approve'] = {
+        effect: () => {
+          approvals += 1;
+          state.set(
+            approvals === 1
+              ? snapshot(stage('awaiting-approval', 'active', 'pending', { approvalReason: 'contract-changed', approvedAt: '2026-11-09T01:00:00.000Z' }))
+              : snapshot(stage('completed', 'passed', 'passed')),
+          );
+        },
+      };
+    });
+    expect(await runHeadless(runOptions({ autoApprove: true, timeoutMs: 60_000 }), run.deps)).toBe(HEADLESS_EXIT.completed);
+    expect(run.pi().commands.filter((command) => command.startsWith('/tower approve'))).toHaveLength(2);
+  });
+
+  it('does not approve twice while its approval has not taken effect yet', async () => {
+    const run = stubRun((pi, state) => {
+      towerOn(pi, state);
+      drafts(pi, state);
+      pi.reactions['/tower approve'] = {
+        effect: () => {
+          const waiting = snapshot(stage('awaiting-approval', 'pending', 'pending'), FEATURES);
+          state.push(waiting, waiting, waiting, snapshot(stage('executing', 'active', 'pending')), snapshot(stage('completed', 'passed', 'passed')));
+        },
+      };
+    });
+    expect(await runHeadless(runOptions({ autoApprove: true, timeoutMs: 60_000 }), run.deps)).toBe(HEADLESS_EXIT.completed);
+    expect(run.pi().commands.filter((command) => command.startsWith('/tower approve'))).toHaveLength(1);
+    expect(run.info.filter((line) => line.startsWith('Plan for O1'))).toHaveLength(1);
+  });
+
   it('exits 1 when the objective is blocked', async () => {
     const run = stubRun((pi, state) => {
       towerOn(pi, state);
