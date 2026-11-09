@@ -617,7 +617,8 @@ describe('autopilot effects', () => {
     const h = await effectsHarness();
 
     const spawned = await h.effects.spawnWorker('M1', 'ap-w-M1-1');
-    expect(spawned).toMatchObject({ ok: true });
+    expect(spawned).toMatchObject({ ok: true, detail: expect.stringMatching(/^name: ap-w-M1-1 kind: worker agent_id: agent-1 /) });
+    expect(spawned.ok ? (spawned.detail ?? '') : '').not.toContain('\n');
     h.runtime.finish('agent-1', 'timed_out', { stopReason: 'timed out after 2h' });
     const respawned = await h.effects.respawnWorker('M1', 'ap-w-M1-2', 'the previous worker timed out');
 

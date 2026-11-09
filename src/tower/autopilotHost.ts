@@ -6,6 +6,8 @@ import { createTowerSpawnTool } from '../tools/spawn/spawnTool.ts';
 import { ORCHESTRATOR_CALLER, type TowerToolCall, type TowerToolResult } from '../tools/support.ts';
 import type { TowerController } from './controller.ts';
 
+const DETAIL_MAX_CHARS = 300;
+
 export type TowerEffectResult =
   | { readonly ok: true; readonly detail?: string }
   | { readonly ok: false; readonly error: string };
@@ -47,10 +49,15 @@ export function towerAutopilotEffects(controller: TowerController) {
 async function effect(execute: () => Promise<TowerToolResult>): Promise<TowerEffectResult> {
   try {
     const result = await execute();
-    return result.isError === true ? { ok: false, error: result.output } : { ok: true, detail: result.output };
+    return result.isError === true ? { ok: false, error: result.output } : { ok: true, detail: summary(result.output) };
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) };
   }
+}
+
+function summary(output: string): string {
+  const line = (output.trim().split(/\n\s*\n/, 1)[0] ?? '').replaceAll(/\s+/g, ' ');
+  return line.length > DETAIL_MAX_CHARS ? `${line.slice(0, DETAIL_MAX_CHARS - 1)}…` : line;
 }
 
 async function missionBranch(controller: TowerController, missionId: string): Promise<string> {
