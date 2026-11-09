@@ -1681,9 +1681,9 @@ export class TowerStore {
     await this.withStateLock(async () => {
       const state = await this.load();
       const objective = state.objective;
-      if (!canPlanObjective(objective)) {
+      if (objective !== undefined && !canPlanObjective(objective)) {
         throw new TowerProtocolError(
-          `objective ${objective!.id} is ${objective!.status} — the objective mode is chosen while an objective is planned, so it changes only when no objective is open or the open one is still planning`,
+          `objective ${objective.id} is ${objective.status} — the objective mode is chosen while an objective is planned, so it changes only when no objective is open or the open one is still planning`,
         );
       }
       if (state.objectiveMode === mode) return;
