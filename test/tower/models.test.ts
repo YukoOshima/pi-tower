@@ -438,6 +438,33 @@ describe('/tower models', () => {
     expect(body).toContain('- worker: model "prov/missing-model"');
   });
 
+  it('shows the objective settings with their sources after the models', async () => {
+    const h = await harness({
+      global: { objective: { maxCostUsd: 25, autopilot: true } },
+      project: { objective: { autopilot: false } },
+    });
+
+    const shown = await runModels(h, []);
+
+    expect(shown.errors).toEqual([]);
+    const rows = (shown.notices[0]?.body ?? '').split('\n').map((line) => line.split(/\s{2,}/));
+    const header = rows.findIndex((cells) => cells.join('|') === 'objective|value|source');
+    expect(header).toBeGreaterThan(rows.findIndex((cells) => cells[0] === 'validator'));
+    expect(rows[header - 1]).toEqual(['']);
+    expect(rows.slice(header + 1)).toHaveLength(12);
+    expect(rows).toContainEqual(['autopilot', 'false', `${h.projectPath} (project)`]);
+    expect(rows).toContainEqual(['maxCostUsd', '25', `${h.globalPath} (global)`]);
+    expect(rows).toContainEqual(['maxValidationRounds', '3', 'default']);
+    expect(h.models.objectiveSettings?.autopilot).toStrictEqual({
+      value: false,
+      source: { kind: 'file', scope: 'project', path: h.projectPath },
+    });
+
+    const broken = await harness({ global: { objective: { autopilot: 'yes' } } });
+    expect(broken.models.objectiveSettings).toBeUndefined();
+    expect(broken.models.loadError).toContain('objective.autopilot: expected true or false, got "yes"');
+  });
+
   it('writes the global tower.json by default and --project writes the project file', async () => {
     const h = await harness();
 

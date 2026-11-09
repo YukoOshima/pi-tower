@@ -5,9 +5,11 @@ import {
   formatConfigSource,
   formatModelRef,
   formatModelTable,
+  formatObjectiveSettings,
   isTowerRole,
   loadTowerConfig,
   readTowerModelFlags,
+  resolveObjectiveSettings,
   resolveSpawnModel,
   resolveTowerModels,
   towerConfigPaths,
@@ -18,6 +20,7 @@ import {
   type TowerEnv,
   type TowerModelBinding,
   type TowerModelRegistry,
+  type TowerObjectiveSettings,
   type TowerPrimaryModel,
   type TowerResolvedModels,
   type TowerSpawnKind,
@@ -68,6 +71,10 @@ export class TowerModels {
 
   get agentTimeoutMs(): number | undefined {
     return this.loaded?.agentTimeoutMs?.value;
+  }
+
+  get objectiveSettings(): TowerObjectiveSettings | undefined {
+    return this.loaded === undefined ? undefined : resolveObjectiveSettings(this.loaded);
   }
 
   async load(context: TowerModelsContext): Promise<void> {
@@ -152,13 +159,18 @@ export class TowerModels {
       return `The tower model configuration could not be loaded:\n${this.failure}`;
     }
     const resolved = this.resolve(primary);
-    if (resolved === undefined) return 'The tower model configuration is not loaded yet.';
+    const objective = this.objectiveSettings;
+    if (resolved === undefined || objective === undefined) {
+      return 'The tower model configuration is not loaded yet.';
+    }
     const problems = registry === undefined ? [] : validateModelBindings(resolved, registry);
     return [
       formatModelTable(resolved),
       ...(problems.length > 0
         ? ['', 'Problems:', ...problems.map((problem) => `- ${problem.message}`)]
         : []),
+      '',
+      formatObjectiveSettings(objective),
     ].join('\n');
   }
 

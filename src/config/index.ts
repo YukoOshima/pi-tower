@@ -76,7 +76,12 @@ export {
   TOWER_OBJECTIVE_KEYS,
 } from './objective.ts';
 export { formatConfigSource, formatModelOrigin } from './source.ts';
-export { describeSpawnModels, describeThinking, formatModelTable } from './describe.ts';
+export {
+  describeSpawnModels,
+  describeThinking,
+  formatModelTable,
+  formatObjectiveSettings,
+} from './describe.ts';
 export { validateModelBindings } from './validate.ts';
 export type { TowerModelProblem, TowerModelProblemKind, TowerModelRegistry } from './validate.ts';
 export { updateTowerConfigModel } from './persist.ts';
