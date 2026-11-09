@@ -235,7 +235,8 @@ function planReviewer(draft: Draft, feature: AutopilotMission): void {
     );
     return;
   }
-  if (draft.snapshot.settings.autopilot) draft.reviewers.push({ type: 'spawn-reviewer', mission: feature.id });
+  if (!draft.snapshot.settings.autopilot) return;
+  draft.reviewers.push({ type: 'spawn-reviewer', mission: feature.id });
 }
 
 function rebaseReady(feature: AutopilotMission): boolean {

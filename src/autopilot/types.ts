@@ -116,7 +116,10 @@ export interface AutopilotMission {
   readonly id: string;
   readonly kind: AutopilotMissionKind;
   readonly status: AutopilotMissionStatus;
-  /** Milestone id; missions without one are not objective features and autopilot leaves them alone. */
+  /**
+   * Milestone id. Only missions on one of the objective's milestones are its features; autopilot
+   * leaves every other mission (no milestone, or an earlier objective's milestone) alone.
+   */
   readonly milestone?: string;
   readonly deps: readonly string[];
   /** Number of worker spawns so far. */

@@ -906,6 +906,30 @@ table('manual mode (autopilot=false)', [
   },
 ]);
 
+const SECOND_OBJECTIVE = [milestone('MS3', 1, { status: 'active' }), milestone('MS4', 2)];
+const EARLIER_OBJECTIVE_MISSIONS = [merged('M1'), working('M2', { milestone: 'MS2', worker: DEAD })];
+
+table('features attached to the objective', [
+  {
+    name: "missions on an earlier objective's milestones are not features",
+    snap: snapshot({ objective: { milestones: SECOND_OBJECTIVE }, missions: [...EARLIER_OBJECTIVE_MISSIONS, feature('M5', { milestone: 'MS3' })] }),
+    actions: [spawn('M5')],
+  },
+  {
+    name: "an earlier objective's merged missions do not make a milestone non-empty",
+    snap: snapshot({ objective: { milestones: SECOND_OBJECTIVE }, missions: EARLIER_OBJECTIVE_MISSIONS }),
+    actions: [wakeOf('plan-milestone', 'MS3', BASE)],
+  },
+  {
+    name: 'an open mission of an earlier objective does not hold the completion',
+    snap: snapshot({
+      objective: { milestones: [milestone('MS3', 1, { status: 'passed' }), milestone('MS4', 2, { status: 'passed', rounds: FINAL_PASSED.rounds })] },
+      missions: [...EARLIER_OBJECTIVE_MISSIONS, merged('M5', { milestone: 'MS3' }), merged('M6', { milestone: 'MS4' })],
+    }),
+    actions: [{ type: 'complete-objective', objective: 'O1' }],
+  },
+]);
+
 const silentValidators = (ms: string, kind: Kind, commit: string, attempts: number) => [{ milestone: ms, kind, commit, attempts }];
 
 table('loop guard for agents that end without submitting', [
