@@ -22,6 +22,7 @@ import {
   TOWER_NAME,
   TowerProtocolError,
   WORKTREES_DIR,
+  contractRevisionOf,
   isReservedTowerAgentName,
   missionFileName,
   parseFrontmatter,
@@ -33,8 +34,11 @@ import {
   type TowerState,
   type TowerStore,
 } from '../../protocol/index.ts';
+import type { TowerAgentInfo } from '../../tower/runtimeTypes.ts';
 import {
   isMainAgent,
+  objectiveSettingsOf,
+  validationSettingsOf,
   type TowerCaller,
   type TowerSpawnBinding,
   type TowerTool,
@@ -46,6 +50,7 @@ import {
   towerSpawnInputProblem,
   type TowerSpawnToolInput,
 } from './spawn.ts';
+import { buildValidatorPrompt, resolveValidationTarget } from './validator.ts';
 
 export function createTowerSpawnTool(
   host: TowerToolHost,
@@ -95,6 +100,7 @@ async function spawn(host: TowerToolHost, args: TowerSpawnToolInput): Promise<To
   if (existing !== undefined) {
     return { output: duplicateRefusal(host, args.name, existing), isError: true };
   }
+  if (args.kind === 'validator') return spawnValidator(host, store, state, args);
 
   let mission: TowerMission | undefined;
   let reviewTarget: string | undefined;
@@ -201,15 +207,7 @@ async function spawn(host: TowerToolHost, args: TowerSpawnToolInput): Promise<To
     }
     host.agentRegistered(launched.agentId);
 
-    const settled = host.agentInfo(launched.agentId);
-    if (settled !== undefined && settled.status !== 'running' && settled.status !== 'idle') {
-      await store.markAgentDied(
-        launched.agentId,
-        settled.status,
-        settled.stopReason,
-        host.sessionId,
-      );
-    }
+    const settled = await recordEarlyDeath(host, store, launched.agentId);
     const thinkingLevel = settled?.thinkingLevel ?? binding?.thinkingLevel;
     await store.appendLog(
       TOWER_NAME,
@@ -247,6 +245,129 @@ async function spawn(host: TowerToolHost, args: TowerSpawnToolInput): Promise<To
       }),
     };
   });
+}
+
+async function spawnValidator(
+  host: TowerToolHost,
+  store: TowerStore,
+  state: TowerState,
+  args: TowerSpawnToolInput,
+): Promise<TowerToolResult> {
+  const kind = args.validation_kind;
+  if (kind === undefined) {
+    return { output: 'validator spawns require milestone and validation_kind', isError: true };
+  }
+  const target = resolveValidationTarget(
+    state,
+    (args.milestone ?? '').trim(),
+    kind,
+    validationSettingsOf(objectiveSettingsOf(host)),
+    host.activeAgentIds(),
+  );
+  if (!target.ok) return { output: target.error, isError: true };
+  const { objective, milestone } = target;
+
+  const resolution = await host.resolveSpawnModel('validator', args.model);
+  if (!resolution.ok) return { output: resolution.error, isError: true };
+  const binding = resolution.binding;
+
+  const prepared = await store.prepareValidationWorktree(milestone.id, kind);
+  let launched: { readonly agentId: string; readonly taskId: string };
+  let model: string | undefined;
+  try {
+    if (prepared.commit !== milestone.validationCommit) {
+      throw new TowerProtocolError(
+        `milestone ${milestone.id} restarted its validation on ${prepared.commit.slice(0, 7)} while this validator was being prepared for ${milestone.validationCommit?.slice(0, 7) ?? 'no commit'} — no agent was started; spawn the validator again`,
+      );
+    }
+    const prompt = await buildValidatorPrompt(store, state, target, prepared, {
+      name: args.name,
+      kind,
+      ...(args.instructions === undefined ? {} : { instructions: args.instructions }),
+    });
+    const started = await host.launchAgent({
+      name: args.name,
+      kind: 'validator',
+      description: spawnTaskDescription({
+        name: args.name,
+        validation: { milestoneId: milestone.id, validationKind: kind, round: prepared.round },
+      }),
+      cwd: prepared.path,
+      prompt,
+      ...(binding === undefined ? {} : { binding }),
+    });
+    if (!started.ok) throw new TowerProtocolError(started.reason);
+    launched = started;
+    model = binding?.model ?? host.agentInfo(started.agentId)?.model;
+    try {
+      await store.registerSpawnedAgent({
+        name: args.name,
+        agentId: started.agentId,
+        sessionId: host.sessionId,
+        kind: 'validator',
+        milestoneId: milestone.id,
+        validationKind: kind,
+        validationRound: prepared.round,
+        validatedCommit: prepared.commit,
+        worktree: prepared.worktree,
+        contractRevision: contractRevisionOf(objective),
+        ...(model === undefined ? {} : { model }),
+        cwd: prepared.path,
+        spawnedAt: new Date().toISOString(),
+      });
+    } catch (error) {
+      await host.abortAgent(started.agentId);
+      throw error;
+    }
+  } catch (error) {
+    await store.removeValidationWorktree(prepared.worktree).catch(() => false);
+    throw error;
+  }
+  host.agentRegistered(launched.agentId);
+
+  const settled = await recordEarlyDeath(host, store, launched.agentId);
+  const thinkingLevel = settled?.thinkingLevel ?? binding?.thinkingLevel;
+  await store.appendLog(TOWER_NAME, 'spawn', {
+    name: args.name,
+    kind: 'validator',
+    agent: launched.agentId,
+    milestone: milestone.id,
+    validation: kind,
+    round: prepared.round,
+    worktree: prepared.worktree,
+    commit: prepared.commit.slice(0, 7),
+    model,
+    thinking: thinkingLevel,
+  });
+
+  return {
+    output: renderSpawnResult({
+      name: args.name,
+      kind: 'validator',
+      agentId: launched.agentId,
+      taskId: launched.taskId,
+      ...(model === undefined ? {} : { model: describeModel(model, thinkingLevel) }),
+      validation: {
+        milestoneId: milestone.id,
+        validationKind: kind,
+        round: prepared.round,
+        validatedCommit: prepared.commit,
+        worktreePath: prepared.path,
+      },
+    }),
+  };
+}
+
+async function recordEarlyDeath(
+  host: TowerToolHost,
+  store: TowerStore,
+  agentId: string,
+): Promise<TowerAgentInfo | undefined> {
+  const settled = host.agentInfo(agentId);
+  if (settled !== undefined && settled.status !== 'running' && settled.status !== 'idle') {
+    await store.markAgentDied(agentId, settled.status, settled.stopReason, host.sessionId);
+  }
+  return settled;
 }
 
 function duplicateRefusal(host: TowerToolHost, name: string, existing: TowerRosterEntry): string {
