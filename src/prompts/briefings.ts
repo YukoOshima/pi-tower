@@ -1,5 +1,6 @@
 import { REVIEWS_DIR } from '../protocol/paths.ts';
 import type { TowerInboxItem, TowerMissionKind } from '../protocol/types.ts';
+import { buildValidatorBriefing, type ValidatorBriefingInput } from './validatorBriefing.ts';
 
 export const REVIEW_REQUEST_SCAN_LIMIT = 50;
 export const REVIEW_HISTORY_ROUNDS = 5;
@@ -48,7 +49,8 @@ export interface ReviewerBriefingInput {
 
 export type SpawnBriefingInput =
   | ({ readonly kind: 'worker' } & WorkerBriefingInput)
-  | ({ readonly kind: 'reviewer' } & ReviewerBriefingInput);
+  | ({ readonly kind: 'reviewer' } & ReviewerBriefingInput)
+  | ({ readonly kind: 'validator' } & ValidatorBriefingInput);
 
 export type WorkerHistoryInput = Pick<
   WorkerBriefingInput,
@@ -70,6 +72,7 @@ export function findReviewRequest(
 }
 
 export function buildSpawnBriefing(input: SpawnBriefingInput): string {
+  if (input.kind === 'validator') return buildValidatorBriefing(input);
   return input.kind === 'worker' ? buildWorkerBriefing(input) : buildReviewerBriefing(input);
 }
 

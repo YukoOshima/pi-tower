@@ -7,6 +7,7 @@ import {
   TOWER_INIT_DESCRIPTION,
   TOWER_MERGE_DESCRIPTION,
   TOWER_MISSION_DESCRIPTION,
+  TOWER_OBJECTIVE_DESCRIPTION,
   TOWER_PARAMETER_DESCRIPTIONS,
   TOWER_PLAN_DESCRIPTION,
   TOWER_REBASE_DESCRIPTION,
@@ -20,6 +21,7 @@ import {
   TOWER_TASKS_DESCRIPTION,
   TOWER_TEARDOWN_DESCRIPTION,
   TOWER_TOOL_DESCRIPTIONS,
+  TOWER_VALIDATE_DESCRIPTION,
   towerSpawnDescription,
 } from '../../src/prompts/index.ts';
 
@@ -41,10 +43,12 @@ const TOOL_NAMES = [
   'TowerTasks',
   'TowerTaskOutput',
   'TowerTaskStop',
+  'TowerObjective',
+  'TowerValidate',
 ];
 
 describe('TOWER_TOOL_DESCRIPTIONS', () => {
-  it('describes exactly the seventeen tower tools by their registered names', () => {
+  it('describes exactly the nineteen tower tools by their registered names', () => {
     expect(Object.keys(TOWER_TOOL_DESCRIPTIONS)).toEqual(TOOL_NAMES);
   });
 
@@ -67,6 +71,8 @@ describe('TOWER_TOOL_DESCRIPTIONS', () => {
       TowerTasks: TOWER_TASKS_DESCRIPTION,
       TowerTaskOutput: TOWER_TASK_OUTPUT_DESCRIPTION,
       TowerTaskStop: TOWER_TASK_STOP_DESCRIPTION,
+      TowerObjective: TOWER_OBJECTIVE_DESCRIPTION,
+      TowerValidate: TOWER_VALIDATE_DESCRIPTION,
     });
   });
 
@@ -109,7 +115,7 @@ describe('upstream tower tool descriptions', () => {
       'TowerSpawn',
       TOWER_SPAWN_DESCRIPTION,
       [
-        'Spawn a tower worker or reviewer as a background subagent and register it in the tower roster.',
+        'Spawn a tower worker, reviewer, or validator as a background subagent and register it in the tower roster.',
         'the agent must submit its verdict via TowerReview',
         'pass model only when the user explicitly requests a model for this spawn; do not infer a selection from mission text or instructions',
         'A choice applies only to this new spawn: it does not change running or resumed agents and is not persisted on the mission.',
@@ -221,12 +227,12 @@ describe('upstream tower tool descriptions', () => {
 });
 
 describe('pi adaptations of upstream descriptions', () => {
-  it('describes three configurable spawn roles instead of the secondary pool', () => {
+  it('describes four configurable spawn roles instead of the secondary pool', () => {
     expect(TOWER_SPAWN_DESCRIPTION).toContain(
-      "The allowed choices are the three configurable roles — orchestrator (also accepted as primary: the tower's own model), worker, and reviewer — plus any optional pool aliases configured for the tower, not arbitrary provider/model ids.",
+      "The allowed choices are the four configurable roles — orchestrator (also accepted as primary: the tower's own model), worker, reviewer, and validator — plus any optional pool aliases configured for the tower, not arbitrary provider/model ids.",
     );
     expect(TOWER_SPAWN_DESCRIPTION).toContain(
-      'When model is omitted, workers use the worker model and reviewers use the reviewer model, each falling back to the orchestrator model when unset; the role models come from tower.json, environment variables, or CLI flags.',
+      'When model is omitted, workers use the worker model and reviewers use the reviewer model, each falling back to the orchestrator model when unset, and validators use the validator model, falling back to the reviewer model and then the orchestrator model; the role models come from tower.json, environment variables, or CLI flags.',
     );
     expect(TOWER_SPAWN_DESCRIPTION).not.toContain('[default]');
   });
@@ -333,11 +339,11 @@ describe('TOWER_PARAMETER_DESCRIPTIONS', () => {
     );
   });
 
-  it('describes the spawn model choice in terms of the three roles', () => {
+  it('describes the spawn model choice in terms of the four roles', () => {
     const model = TOWER_PARAMETER_DESCRIPTIONS.TowerSpawn.model;
     expect(model).toContain('"Available models"');
     expect(model).toContain('"orchestrator" (or "primary")');
-    expect(model).toContain('"worker", "reviewer", or a configured pool alias');
+    expect(model).toContain('"worker", "reviewer", "validator", or a configured pool alias');
     expect(model).toContain('Pass this only when the user explicitly requests a model');
     expect(model).toContain('each falling back to the orchestrator model when unset');
   });

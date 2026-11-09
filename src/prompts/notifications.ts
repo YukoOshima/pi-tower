@@ -1,4 +1,4 @@
-import type { TowerAgentKind } from '../protocol/types.ts';
+import type { PromptAgentKind, PromptValidationKind } from './objectiveTypes.ts';
 
 export const WAKE_SUBJECT_PREVIEW_MAX = 120;
 export const WAKE_BATCH_LIMIT = 6;
@@ -11,6 +11,9 @@ export const TOWER_TEARDOWN_PROMPT =
 
 export const REVIEWER_SPAWN_GUIDANCE =
   'The reviewer runs detached in the background; its completion arrives as a notification. If it dies, diagnose first: check the death status/reason and task state. A reviewer is one-shot — do not resume it or another roster agent; after diagnosis, spawn a fresh reviewer only if the mission still needs one. A user-stopped reviewer is never replaced.';
+
+export const VALIDATOR_SPAWN_GUIDANCE =
+  'The validator runs detached in the background in its read-only validation worktree; its verdict arrives as a validation-result message from TowerValidate, and its completion as a notification. If it dies without a verdict, diagnose first: check the death status/reason and task state. A validator is one-shot — never resume it; the tower re-runs the round with a fresh validator under a new name and wakes you with validation-stuck if validators keep ending without a verdict. A user-stopped validator is never replaced.';
 
 export interface InboxWakeItem {
   readonly from: string;
@@ -53,7 +56,7 @@ export interface TowerAgentNotificationInput {
   readonly name: string;
   readonly agentId: string;
   readonly taskId?: string;
-  readonly kind: TowerAgentKind;
+  readonly kind: PromptAgentKind;
   readonly description: string;
   readonly status: TowerAgentEndStatus;
   readonly stopReason?: string;
@@ -69,11 +72,20 @@ export interface SpawnTaskDescriptionInput {
   readonly mission?: { readonly id: string; readonly title: string };
   readonly reviewTarget?: string;
   readonly reviewMissionId?: string;
+  readonly validation?: SpawnValidationTarget;
+}
+
+export interface SpawnValidationTarget {
+  readonly milestoneId: string;
+  readonly validationKind: PromptValidationKind;
+  readonly round?: number;
+  readonly validatedCommit?: string;
+  readonly worktreePath?: string;
 }
 
 export interface SpawnResultInput {
   readonly name: string;
-  readonly kind: TowerAgentKind;
+  readonly kind: PromptAgentKind;
   readonly agentId: string;
   readonly taskId?: string;
   readonly model?: string;
@@ -84,6 +96,7 @@ export interface SpawnResultInput {
     readonly worktreePath: string;
   };
   readonly reviewTarget?: string;
+  readonly validation?: SpawnValidationTarget;
   readonly notes?: readonly string[];
 }
 
@@ -147,7 +160,10 @@ export function sendSteeredNote(to: string): string {
   return `note: ${to} is mid-turn — the message was steered into its running turn; it sees the directive at its next step boundary.`;
 }
 
-export function sendUndeliveredNote(to: string, kind: TowerAgentKind): string {
+export function sendUndeliveredNote(to: string, kind: PromptAgentKind): string {
+  if (kind === 'validator') {
+    return `note: ${to} has no running task in this session — the message sits in its inbox; a validator is one-shot and is never resumed, so this input does not reach its round — a later validation round sees only what its briefing carries (the objective, the milestone and its features' tasks, earlier failures)`;
+  }
   return kind === 'worker'
     ? `note: ${to} has no running task in this session — the message sits in its inbox until you deliver it with TowerResume(agent="${to}", prompt="...")`
     : `note: ${to} has no running task in this session — the message sits in its inbox; a reviewer is one-shot and is never resumed, so spawn a fresh reviewer if the review still needs this input`;
@@ -163,7 +179,7 @@ export function sendHandledNote(to: string): string {
   return `note: ${to}'s session intercepted or refused the steered message — it sits only in ${to}'s inbox until ${to} reads it with TowerInbox`;
 }
 
-export function sendUnreachableNote(to: string, kind: TowerAgentKind): string {
+export function sendUnreachableNote(to: string, kind: PromptAgentKind): string {
   return kind === 'worker'
     ? `note: ${to} is not running in this process (the tower restarted, or its session was disposed) — the message sits in its inbox; TowerResume cannot reach it, so spawn a fresh worker under a new name if the work must continue`
     : sendUndeliveredNote(to, kind);
@@ -210,6 +226,10 @@ export function spawnTaskDescription(input: SpawnTaskDescriptionInput): string {
   if (input.mission !== undefined) {
     return `${input.mission.id} ${input.name}: ${input.mission.title}`;
   }
+  if (input.validation !== undefined) {
+    const { milestoneId, validationKind, round } = input.validation;
+    return `${milestoneId} ${validationKind} validation${round !== undefined ? ` r${String(round)}` : ''}: ${input.name}`;
+  }
   return input.reviewMissionId !== undefined
     ? `${input.reviewMissionId} review: ${input.reviewTarget ?? ''}`
     : `review ${input.name}: ${input.reviewTarget ?? ''}`;
@@ -241,16 +261,38 @@ export function renderSpawnResult(input: SpawnResultInput): string {
           `branch: ${input.mission.branch}`,
           `worktree: ${input.mission.worktreePath}`,
         ]
-      : [`review_target: ${input.reviewTarget ?? ''}`]),
+      : input.validation !== undefined
+        ? spawnValidationLines(input.validation)
+        : input.kind === 'validator'
+          ? []
+          : [`review_target: ${input.reviewTarget ?? ''}`]),
     ...(input.notes ?? []),
     '',
-    input.kind === 'worker' ? workerSpawnGuidance(input.name) : REVIEWER_SPAWN_GUIDANCE,
+    input.kind === 'worker'
+      ? workerSpawnGuidance(input.name)
+      : input.kind === 'validator'
+        ? VALIDATOR_SPAWN_GUIDANCE
+        : REVIEWER_SPAWN_GUIDANCE,
   ].join('\n');
+}
+
+function spawnValidationLines(validation: SpawnValidationTarget): string[] {
+  return [
+    `milestone: ${validation.milestoneId}`,
+    `validation: ${validation.validationKind}${validation.round !== undefined ? ` r${String(validation.round)}` : ''}`,
+    ...(validation.validatedCommit !== undefined ? [`validated_commit: ${validation.validatedCommit}`] : []),
+    ...(validation.worktreePath !== undefined ? [`worktree: ${validation.worktreePath}`] : []),
+  ];
 }
 
 function agentRecoveryGuidance(input: TowerAgentNotificationInput): string {
   if (input.stoppedByHuman === true) {
     return `The human stopped this ${input.kind}, so it is dead by intent: never resume, reassign, or replace it unless the human says otherwise.`;
+  }
+  if (input.kind === 'validator') {
+    return input.stoppedByTower === true
+      ? 'The tower stopped this validator on purpose with TowerTaskStop. A validator is one-shot — do not resume it; its round produced no verdict, so a fresh validator re-runs the round only if the milestone still needs that verdict.'
+      : 'Diagnose first: check the death status/reason and task state (TowerTaskOutput). A validator is one-shot — do not resume it. Its round produced no verdict, so the milestone still needs one: fix or escalate a systematic cause first; the tower re-runs the round with a fresh validator and wakes you with validation-stuck if validators keep ending without a verdict.';
   }
   if (input.stoppedByTower === true) {
     return input.kind === 'reviewer'
@@ -285,7 +327,9 @@ export function undeliveredSteersSection(
     ...steers.map((steer) => `- ${previewSubject(steer.replaceAll(/\s+/g, ' ').trim(), WAKE_SUBJECT_PREVIEW_MAX * 2)}`),
     input.kind === 'worker'
       ? `Deliver them with TowerResume(agent="${input.name}", prompt="Read TowerInbox and act on the unread messages.") when the worker should continue.`
-      : 'A reviewer is one-shot and is never resumed: spawn a fresh reviewer if the review still needs this input.',
+      : input.kind === 'validator'
+        ? "A validator is one-shot and is never resumed, so these messages do not reach its round — a later validation round sees only what its briefing carries (the objective, the milestone and its features' tasks, earlier failures)."
+        : 'A reviewer is one-shot and is never resumed: spawn a fresh reviewer if the review still needs this input.',
   ].join('\n');
 }
 
