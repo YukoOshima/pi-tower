@@ -829,6 +829,9 @@ export class TowerController implements TowerToolHost {
   }
 
   private async releaseTowerOwnership(): Promise<void> {
+    await this.autopilot?.whenIdle().catch((error: unknown) => {
+      this.log.warn('tower: the autopilot did not settle before the workspace was released', { error: errorText(error) });
+    });
     const sessionId = this.boundSessionId;
     if (sessionId === undefined || this.boundRepoRoot === undefined) return;
     await this.store()
