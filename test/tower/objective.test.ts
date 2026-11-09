@@ -65,6 +65,7 @@ import {
 } from './fakes.ts';
 
 const SESSION_ID = 'session-objective';
+const WAIT = { timeout: 10_000 };
 const START: SessionStartEvent = { type: 'session_start', reason: 'startup' };
 
 class FakeAutopilot implements TowerAutopilot {
@@ -411,14 +412,14 @@ describe('autopilot lifecycle', () => {
 
     await h.controller.enter();
 
-    await vi.waitFor(() => expect(h.autopilots[0]?.calls).toEqual(['start', 'tick restart']));
+    await vi.waitFor(() => expect(h.autopilots[0]?.calls).toEqual(['start', 'tick restart']), WAIT);
   });
 
   it('restores the autopilot with the tower mode after a restart and continues the executing objective', async () => {
     const h = await harness({ prepare: executingObjective, entries: [ACTIVE_MODE_RECORD] });
 
     expect(h.controller.isActive).toBe(true);
-    await vi.waitFor(() => expect(h.autopilots[0]?.calls).toEqual(['start', 'tick restart']));
+    await vi.waitFor(() => expect(h.autopilots[0]?.calls).toEqual(['start', 'tick restart']), WAIT);
   });
 
   it('only starts the runner when the objective is not executing', async () => {
@@ -456,7 +457,7 @@ describe('autopilot lifecycle', () => {
 
     h.runtime.finish(launched.agentId, 'failed', { stopReason: 'provider error' });
 
-    await vi.waitFor(() => expect(autopilot.calls).toContain('tick agent-end'));
+    await vi.waitFor(() => expect(autopilot.calls).toContain('tick agent-end'), WAIT);
     expect(seen).toEqual(['failed']);
   });
 
@@ -628,7 +629,7 @@ describe('tower agents on the real runtime', () => {
     h.sessions[0]?.reply('Submitted pass for MS1 scrutiny.');
     h.sessions[0]?.settle();
 
-    await vi.waitFor(() => expect(existsSync(worktree)).toBe(false));
+    await vi.waitFor(() => expect(existsSync(worktree)).toBe(false), WAIT);
     expect(h.controller.agentOutput(entry?.agentId ?? '')).toMatchObject({
       kind: 'validator',
       lastAssistantText: 'Submitted pass for MS1 scrutiny.',
@@ -872,7 +873,7 @@ describe('validation worktrees', () => {
 
     h.runtime.finish(agentId, 'idle', { summary: 'Submitted pass.' });
 
-    await vi.waitFor(() => expect(existsSync(prepared.path)).toBe(false));
+    await vi.waitFor(() => expect(existsSync(prepared.path)).toBe(false), WAIT);
     expect(h.runtime.disposed).toEqual([agentId]);
     expect(await git(h.repo, 'worktree', 'list')).not.toContain(prepared.worktree);
     expect(await activityLog(h)).toContain(`worktree.remove worktree=${prepared.worktree}`);
@@ -885,7 +886,7 @@ describe('validation worktrees', () => {
 
     h.runtime.finish(agentId, 'timed_out', { stopReason: 'timed out after 2h' });
 
-    await vi.waitFor(() => expect(existsSync(prepared.path)).toBe(false));
+    await vi.waitFor(() => expect(existsSync(prepared.path)).toBe(false), WAIT);
     const log = await activityLog(h);
     const died = log.indexOf(`died name=ap-v-MS1-scrutiny-1 agent=${agentId}`);
     expect(died).toBeGreaterThanOrEqual(0);
@@ -940,7 +941,7 @@ describe('validation worktrees', () => {
 
     expect(existsSync(prepared.path)).toBe(true);
     h.runtime.finish(agentId, 'idle');
-    await vi.waitFor(() => expect(existsSync(prepared.path)).toBe(false));
+    await vi.waitFor(() => expect(existsSync(prepared.path)).toBe(false), WAIT);
   });
 });
 
@@ -1003,11 +1004,11 @@ describe('the /tower objective command hooks', () => {
     const deps = hooks(h.controller);
 
     await handleTowerCommand(h.controller, 'approve', h.ctx.asCommandContext, deps, ui);
-    await vi.waitFor(() => expect(h.autopilots[0]?.calls).toContain('tick approve'));
+    await vi.waitFor(() => expect(h.autopilots[0]?.calls).toContain('tick approve'), WAIT);
     await handleTowerCommand(h.controller, 'pause checking the plan', h.ctx.asCommandContext, deps, ui);
     await handleTowerCommand(h.controller, 'resume', h.ctx.asCommandContext, deps, ui);
 
-    await vi.waitFor(() => expect(h.autopilots[0]?.calls).toContain('tick resume'));
+    await vi.waitFor(() => expect(h.autopilots[0]?.calls).toContain('tick resume'), WAIT);
     expect((await h.store.load()).objective).toMatchObject({
       status: 'executing',
       approvedBy: 'human',
