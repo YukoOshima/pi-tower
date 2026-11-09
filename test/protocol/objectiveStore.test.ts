@@ -550,6 +550,33 @@ describe('roster with objectives', () => {
     expect(state.missions.find((mission) => mission.id === core!.id)?.attempts).toBe(2);
     expect(state.missions.find((mission) => mission.id === plain!.id)?.attempts).toBeUndefined();
   });
+
+  it('registers a validator only with a real commit, the validating one while the milestone validates', async () => {
+    const tip = await validatingMilestone();
+    await commitFile(repo, 'next.txt', 'next\n', 'base moved');
+    const next = await git(repo, 'rev-parse', 'main');
+    const validator = {
+      name: 'val-ms1-scrutiny-r1',
+      agentId: 'agent-val-1',
+      kind: 'validator' as const,
+      milestoneId: 'MS1',
+      validationKind: 'scrutiny' as const,
+      spawnedAt,
+    };
+    const before = await readFile(store.abs(STATE_FILE), 'utf8');
+    await expect(store.registerAgent(validator)).rejects.toThrow(/needs a validatedCommit/);
+    await expect(store.registerAgent({ ...validator, validatedCommit: 'deadbeef' })).rejects.toThrow(
+      /validatedCommit "deadbeef" does not name a commit/,
+    );
+    await expect(
+      store.registerSpawnedAgent({ ...validator, validatedCommit: next }),
+    ).rejects.toThrow(
+      new RegExp(`checked out at ${next.slice(0, 7)}, but milestone MS1 is validating ${tip.slice(0, 7)}`),
+    );
+    expect(await readFile(store.abs(STATE_FILE), 'utf8')).toBe(before);
+    await store.registerAgent({ ...validator, validatedCommit: tip.slice(0, 9) });
+    expect((await readState()).roster.agents.at(-1)?.validatedCommit).toBe(tip);
+  });
 });
 
 async function validatingMilestone(): Promise<string> {
@@ -617,6 +644,7 @@ describe('validation worktrees', () => {
       kind: 'validator',
       milestoneId: 'MS1',
       validationKind: 'scrutiny',
+      validatedCommit: live.commit,
       worktree: live.worktree,
       spawnedAt: '2026-04-04T00:00:00.000Z',
     });
@@ -676,7 +704,12 @@ describe('submitValidation', () => {
     await expect(store.submitValidation('tower', pass)).rejects.toThrow(/tower records only the mechanical commands/);
     await expect(store.submitValidation('tower', { ...pass, kind: 'commands' })).rejects.toThrow(/must state the commit/);
     await expect(store.submitValidation('val-scrutiny', { ...pass, validatedCommit: 'f'.repeat(40) })).rejects.toThrow(
-      /was checked out at/,
+      /does not name a commit/,
+    );
+    await commitFile(repo, 'other.txt', 'other\n', 'another commit');
+    const other = await git(repo, 'rev-parse', 'main');
+    await expect(store.submitValidation('val-scrutiny', { ...pass, validatedCommit: other })).rejects.toThrow(
+      new RegExp(`was checked out at ${tip.slice(0, 7)}, not ${other}`),
     );
     await expect(store.submitValidation('val-scrutiny', { ...pass, milestone: 'MS9' })).rejects.toThrow(/no milestone "MS9"/);
     await expect(store.submitValidation('val-scrutiny', { ...pass, verdict: 'meh' as 'pass' })).rejects.toThrow(
@@ -702,6 +735,7 @@ describe('submitValidation', () => {
       verdict: 'pass',
       checks: ['npm test green', ' '],
       evidence: 'diff reviewed against the tasks',
+      validatedCommit: tip.slice(0, 10),
     });
     expect(first.round).toEqual({
       round: 1,
@@ -810,23 +844,27 @@ describe('submitValidation', () => {
     expect(result.message?.item).toMatchObject({ from: 'tower', to: 'tower', action: 'validation-result' });
   });
 
-  it('records a round stamped on another commit without letting it decide the milestone', async () => {
+  it('stamps a stale validator on its own commit after the milestone restarted, so its pass neither counts nor completes', async () => {
     const tip = await validatingMilestone();
-    await commitFile(repo, 'next.txt', 'next\n', 'next');
+    await mutateState((state) => {
+      state.objective!.milestones[0]!.validation.userTesting = false;
+    });
+    await registerValidator('val-old', 'scrutiny', tip);
+    await commitFile(repo, 'next.txt', 'next\n', 'base moved during the validation');
     const next = await git(repo, 'rev-parse', 'main');
     await store.startMilestoneValidation('MS1', next);
-    await registerValidator('val-old', 'scrutiny', tip);
-    const result = await store.submitValidation('val-old', {
-      milestone: 'MS1',
-      kind: 'scrutiny',
-      verdict: 'fail',
-      failures: ['old failure'],
-    });
+    const result = await store.submitValidation('val-old', { milestone: 'MS1', kind: 'scrutiny', verdict: 'pass' });
     expect(result.round.validatedCommit).toBe(tip);
-    expect(result.milestone.status).toBe('validating');
+    expect(result.milestone).toMatchObject({ status: 'validating', validationCommit: next });
     expect(result.message?.item.body).toContain(
       `This round was recorded but does not decide the milestone: it was validating and validates ${next.slice(0, 7)}.`,
     );
+    const refused = await store.completeObjective().catch((caught: unknown) => caught);
+    expect(refused).toBeInstanceOf(TowerObjectiveCompletionError);
+    expect((refused as TowerObjectiveCompletionError).blocks.map((block) => block.code)).toContain(
+      'milestone-not-passed',
+    );
+    expect((await readState()).objective!.status).toBe('executing');
   });
 
   it('refuses validations for a pending milestone or a completed objective', async () => {

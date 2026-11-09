@@ -1090,7 +1090,7 @@ export class TowerStore {
   async registerAgent(entry: TowerRosterEntry): Promise<void> {
     await this.withStateLock(async () => {
       const state = await this.load();
-      const attempted = this.registerAgentLocked(entry, state);
+      const attempted = this.registerAgentLocked(await this.resolveValidatorEntry(entry), state);
       await this.save(state);
       if (attempted !== undefined) await this.renderMissionFile(attempted);
     });
@@ -1102,7 +1102,7 @@ export class TowerStore {
   ): Promise<void> {
     await this.withStateLock(async () => {
       const state = await this.load();
-      const attempted = this.registerAgentLocked(entry, state);
+      const attempted = this.registerAgentLocked(await this.resolveValidatorEntry(entry), state);
       if (mission === undefined) {
         await this.save(state);
         if (attempted !== undefined) await this.renderMissionFile(attempted);
@@ -1184,11 +1184,35 @@ export class TowerStore {
         `validator "${entry.name}" cannot be registered — there is no open objective${objective === undefined ? '' : ` (objective ${objective.id} is ${objective.status})`}`,
       );
     }
-    if (findMilestone(objective, entry.milestoneId) === undefined) {
+    const milestone = findMilestone(objective, entry.milestoneId);
+    if (milestone === undefined) {
       throw new TowerProtocolError(
         `validator "${entry.name}" names milestone "${entry.milestoneId}", which objective ${objective.id} does not have`,
       );
     }
+    if (entry.validatedCommit === undefined) {
+      throw new TowerProtocolError(
+        `validator "${entry.name}" needs a validatedCommit — the commit its validation worktree was checked out at, which stamps its round`,
+      );
+    }
+    if (milestone.status === 'validating' && entry.validatedCommit !== milestone.validationCommit) {
+      throw new TowerProtocolError(
+        `validator "${entry.name}" was checked out at ${entry.validatedCommit.slice(0, 7)}, but milestone ${milestone.id} is validating ${milestone.validationCommit?.slice(0, 7) ?? 'no commit'} — prepare a validation worktree for the current validation commit`,
+      );
+    }
+  }
+
+  private async resolveValidatorEntry(entry: TowerRosterEntry): Promise<TowerRosterEntry> {
+    if (entry.kind !== 'validator' || entry.validatedCommit === undefined) return entry;
+    let validatedCommit: string;
+    try {
+      validatedCommit = await this.resolveCommit(entry.validatedCommit);
+    } catch {
+      throw new TowerProtocolError(
+        `validator "${entry.name}" validatedCommit "${entry.validatedCommit}" does not name a commit in this repository — register the commit its validation worktree was checked out at`,
+      );
+    }
+    return { ...entry, validatedCommit };
   }
 
   async markAgentDied(
@@ -3485,9 +3509,7 @@ export class TowerStore {
       if (milestone.status === 'pending') {
         throw new TowerProtocolError(`milestone ${milestone.id} is pending — its validation has not started`);
       }
-      const validatedCommit = await this.resolveCommit(
-        this.validationCommitFor(state, callerName, input, milestone),
-      );
+      const validatedCommit = await this.validationCommitFor(state, callerName, input, milestone);
       const round = nextValidationRound(milestone, input.kind);
       const date = new Date().toISOString();
       await mkdir(this.abs(VALIDATIONS_DIR), { recursive: true });
@@ -3570,12 +3592,12 @@ export class TowerStore {
     });
   }
 
-  private validationCommitFor(
+  private async validationCommitFor(
     state: TowerState,
     callerName: string,
     input: TowerValidationInput,
     milestone: TowerMilestone,
-  ): string {
+  ): Promise<string> {
     if (callerName === TOWER_NAME) {
       if (input.kind !== 'commands') {
         throw new TowerProtocolError(
@@ -3587,7 +3609,7 @@ export class TowerStore {
           'the tower must state the commit it ran the validation commands on (validatedCommit)',
         );
       }
-      return input.validatedCommit;
+      return this.resolveCommit(input.validatedCommit);
     }
     const entry = this.findAgent(state, callerName);
     if (
@@ -3604,22 +3626,21 @@ export class TowerStore {
         `validator "${callerName}" already reported its ${milestone.id} ${input.kind} round — a validator reports exactly once`,
       );
     }
+    if (entry.validatedCommit === undefined) {
+      throw new TowerProtocolError(
+        `validator "${callerName}" has no validatedCommit on its roster entry, so its round cannot be stamped — spawn a validator for the current validation commit`,
+      );
+    }
+    const stamped = await this.resolveCommit(entry.validatedCommit);
     if (
       input.validatedCommit !== undefined &&
-      entry.validatedCommit !== undefined &&
-      input.validatedCommit !== entry.validatedCommit
+      (await this.resolveCommit(input.validatedCommit)) !== stamped
     ) {
       throw new TowerProtocolError(
-        `validator "${callerName}" was checked out at ${entry.validatedCommit.slice(0, 7)}, not ${input.validatedCommit} — a round is stamped on the commit its worktree validated`,
+        `validator "${callerName}" was checked out at ${stamped.slice(0, 7)}, not ${input.validatedCommit} — a round is stamped on the commit its worktree validated`,
       );
     }
-    const commit = entry.validatedCommit ?? input.validatedCommit ?? milestone.validationCommit;
-    if (commit === undefined) {
-      throw new TowerProtocolError(
-        `validator "${callerName}" has no validated commit and milestone ${milestone.id} has no validation commit`,
-      );
-    }
-    return commit;
+    return stamped;
   }
 
   async prepareValidationWorktree(
