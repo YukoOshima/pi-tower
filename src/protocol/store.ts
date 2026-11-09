@@ -238,6 +238,7 @@ export interface TowerValidationInput {
   readonly checks?: readonly string[];
   readonly evidence?: string;
   readonly validatedCommit?: string;
+  readonly contractRevision?: number;
 }
 
 export interface TowerValidationResult {
@@ -1170,10 +1171,15 @@ export class TowerStore {
     if (this.findAgent(state, entry.name) !== undefined) {
       throw new TowerProtocolError(`tower agent name "${entry.name}" is already registered`);
     }
-    state.roster.agents.push({
+    const stored: TowerRosterEntry = {
       ...entry,
       lastInboxReadAt: entry.lastInboxReadAt ?? entry.spawnedAt,
-    });
+    };
+    state.roster.agents.push(
+      entry.kind === 'validator' && state.objective !== undefined
+        ? withContractRevision(stored, contractRevisionOf(state.objective))
+        : stored,
+    );
     if (entry.kind !== 'worker' || state.objective === undefined) return undefined;
     const mission = state.missions.find((candidate) => candidate.id === entry.missionId);
     if (mission === undefined) return undefined;
@@ -1212,6 +1218,11 @@ export class TowerStore {
     if (entry.validatedCommit === undefined) {
       throw new TowerProtocolError(
         `validator "${entry.name}" needs a validatedCommit — the commit its validation worktree was checked out at, which stamps its round`,
+      );
+    }
+    if (entry.contractRevision !== undefined && entry.contractRevision !== contractRevisionOf(objective)) {
+      throw new TowerProtocolError(
+        `validator "${entry.name}" was briefed under contract revision ${String(entry.contractRevision)}, but objective ${objective.id} is at revision ${String(contractRevisionOf(objective))} — brief a new validator on the current contract`,
       );
     }
     if (entry.validatedCommit !== milestone.validationCommit) {
@@ -3573,7 +3584,8 @@ export class TowerStore {
       if (milestone.status === 'pending') {
         throw new TowerProtocolError(`milestone ${milestone.id} is pending — its validation has not started`);
       }
-      const validatedCommit = await this.validationCommitFor(state, callerName, input, milestone);
+      const stamp = await this.validationStampFor(state, callerName, input, objective, milestone);
+      const validatedCommit = stamp.commit;
       const baseTip = await branchTip(this.repoRoot, state.base);
       const round = nextValidationRound(milestone, input.kind);
       const date = new Date().toISOString();
@@ -3603,7 +3615,7 @@ export class TowerStore {
         failures,
         file,
         date,
-        ...(contractRevisionOf(objective) > 0 ? { contractRevision: contractRevisionOf(objective) } : {}),
+        ...(stamp.contractRevision > 0 ? { contractRevision: stamp.contractRevision } : {}),
       };
       const outcome = applyValidationRound(objective, milestone, record, settings);
       await this.save(state);
@@ -3666,12 +3678,14 @@ export class TowerStore {
     });
   }
 
-  private async validationCommitFor(
+  private async validationStampFor(
     state: TowerState,
     callerName: string,
     input: TowerValidationInput,
+    objective: TowerObjective,
     milestone: TowerMilestone,
-  ): Promise<string> {
+  ): Promise<{ readonly commit: string; readonly contractRevision: number }> {
+    const current = contractRevisionOf(objective);
     if (callerName === TOWER_NAME) {
       if (input.kind !== 'commands') {
         throw new TowerProtocolError(
@@ -3683,7 +3697,18 @@ export class TowerStore {
           'the tower must state the commit it ran the validation commands on (validatedCommit)',
         );
       }
-      return this.resolveCommit(input.validatedCommit);
+      const given = input.contractRevision;
+      if (given === undefined && current > 0) {
+        throw new TowerProtocolError(
+          `the tower must state the contract revision whose command list it ran (contractRevision) — objective ${objective.id} is at revision ${String(current)}`,
+        );
+      }
+      if (given !== undefined && (!Number.isSafeInteger(given) || given < 0 || given > current)) {
+        throw new TowerProtocolError(
+          `contractRevision ${String(given)} is not a revision of objective ${objective.id} up to its current ${String(current)} — stamp the revision whose command list was run`,
+        );
+      }
+      return { commit: await this.resolveCommit(input.validatedCommit), contractRevision: given ?? 0 };
     }
     if (input.kind === 'commands') {
       throw new TowerProtocolError(
@@ -3719,7 +3744,13 @@ export class TowerStore {
         `validator "${callerName}" was checked out at ${stamped.slice(0, 7)}, not ${input.validatedCommit} — a round is stamped on the commit its worktree validated`,
       );
     }
-    return stamped;
+    const briefed = entry.contractRevision ?? 0;
+    if (input.contractRevision !== undefined && input.contractRevision !== briefed) {
+      throw new TowerProtocolError(
+        `validator "${callerName}" was briefed under contract revision ${String(briefed)}, not ${String(input.contractRevision)} — a round is stamped with the contract its validator checked`,
+      );
+    }
+    return { commit: stamped, contractRevision: briefed };
   }
 
   async prepareValidationWorktree(
@@ -4072,6 +4103,11 @@ function objectiveSection(state: TowerState, objective: TowerObjective): string[
     ...(rows.length > 0 ? rows : ['| — | (no milestones yet) | — | — | — |']),
     '',
   ];
+}
+
+function withContractRevision(entry: TowerRosterEntry, revision: number): TowerRosterEntry {
+  const { contractRevision: _given, ...rest } = entry;
+  return revision > 0 ? { ...rest, contractRevision: revision } : rest;
 }
 
 function validationDocumentBody(

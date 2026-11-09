@@ -549,6 +549,7 @@ describe('roster with objectives', () => {
         validatedCommit: tip,
         worktree: 'val-ms1-scrutiny-r1',
         lastInboxReadAt: spawnedAt,
+        contractRevision: 1,
       },
     ]);
     await store.blockObjective('stop');
@@ -1589,13 +1590,14 @@ describe('contract revisions', () => {
     return tip;
   }
 
-  async function commands(verdict: 'pass' | 'fail', commit: string) {
+  async function commands(verdict: 'pass' | 'fail', commit: string, contractRevision?: number) {
     return store.submitValidation('tower', {
       milestone: 'MS1',
       kind: 'commands',
       verdict,
       ...(verdict === 'fail' ? { failures: ['npm tst: command not found'] } : {}),
       validatedCommit: commit,
+      ...(contractRevision === undefined ? {} : { contractRevision }),
     });
   }
 
@@ -1615,7 +1617,7 @@ describe('contract revisions', () => {
     await store.approveObjective('human');
     const restarted = await store.startMilestoneValidation('MS1', tip);
     expect(restarted.milestone).toMatchObject({ status: 'validating', validationCommit: tip });
-    const passed = await commands('pass', tip);
+    const passed = await commands('pass', tip, 1);
     expect(passed.round).toMatchObject({ round: 2, verdict: 'pass', contractRevision: 1 });
     expect(passed.milestone.status).toBe('passed');
     expect((await store.completeObjective()).status).toBe('completed');
@@ -1638,7 +1640,7 @@ describe('contract revisions', () => {
     });
     const scrutiny = await store.submitValidation('val-scrutiny', { milestone: 'MS1', kind: 'scrutiny', verdict: 'pass' });
     expect(scrutiny.milestone.status).toBe('validating');
-    const corrected = await commands('pass', tip);
+    const corrected = await commands('pass', tip, 1);
     expect(corrected.milestone.status).toBe('passed');
     expect((await store.completeObjective()).status).toBe('completed');
   });
@@ -1653,12 +1655,97 @@ describe('contract revisions', () => {
       'final-validation-stale',
     ]);
     await store.startMilestoneValidation('MS1', tip);
-    expect((await commands('pass', tip)).round.contractRevision).toBe(1);
+    expect((await commands('pass', tip, 1)).round.contractRevision).toBe(1);
+    expect((await store.completeObjective()).status).toBe('completed');
+  });
+
+  async function registerValidator(name: string, commit: string, contractRevision?: number): Promise<void> {
+    await store.registerAgent({
+      name,
+      agentId: `agent-${name}`,
+      kind: 'validator',
+      milestoneId: 'MS1',
+      validationKind: 'scrutiny',
+      validatedCommit: commit,
+      ...(contractRevision === undefined ? {} : { contractRevision }),
+      spawnedAt: '2026-04-04T00:00:00.000Z',
+    });
+  }
+
+  it('stamps a validator round with the revision it was briefed under, so a round across a change decides nothing (RV1)', async () => {
+    const tip = await finalOnly({ userTesting: false });
+    await registerValidator('v1', tip);
+    await store.updateObjective({ definitionOfDone: ['works', 'X must work'] });
+    expect((await readState()).objective!.milestones[0]!.status).toBe('validating');
+    const stale = await store.submitValidation('v1', { milestone: 'MS1', kind: 'scrutiny', verdict: 'pass' });
+    expect('contractRevision' in stale.round).toBe(false);
+    expect(stale.milestone.status).toBe('validating');
+    await store.approveObjective('human');
+    const refused = await store.completeObjective().catch((caught: unknown) => caught);
+    expect((refused as TowerObjectiveCompletionError).blocks.map((block) => block.code)).toEqual([
+      'milestone-not-passed',
+    ]);
+    const before = await readFile(store.abs(STATE_FILE), 'utf8');
+    await expect(registerValidator('v-old', tip, 0)).rejects.toThrow(
+      /briefed under contract revision 0, but objective O1 is at revision 1/,
+    );
+    expect(await readFile(store.abs(STATE_FILE), 'utf8')).toBe(before);
+    await registerValidator('v2', tip);
+    expect((await readState()).roster.agents.find((agent) => agent.name === 'v2')?.contractRevision).toBe(1);
+    await expect(
+      store.submitValidation('v2', { milestone: 'MS1', kind: 'scrutiny', verdict: 'pass', contractRevision: 0 }),
+    ).rejects.toThrow(/briefed under contract revision 1, not 0/);
+    const decisive = await store.submitValidation('v2', { milestone: 'MS1', kind: 'scrutiny', verdict: 'pass' });
+    expect(decisive.round.contractRevision).toBe(1);
+    expect(decisive.milestone.status).toBe('passed');
+    expect((await store.completeObjective()).status).toBe('completed');
+  });
+
+  it('stamps the tower commands round with the revision whose command list it ran (RV2)', async () => {
+    const tip = await finalOnly({ userTesting: false, commands: ['npm test'] });
+    await store.updateObjective({ acceptanceCommands: ['npm run e2e'] });
+    expect((await readState()).objective!.milestones[0]!.status).toBe('active');
+    const before = await readFile(store.abs(STATE_FILE), 'utf8');
+    await expect(commands('pass', tip)).rejects.toThrow(
+      /must state the contract revision whose command list it ran \(contractRevision\) — objective O1 is at revision 1/,
+    );
+    await expect(commands('pass', tip, 2)).rejects.toThrow(/contractRevision 2 is not a revision of objective O1 up to its current 1/);
+    await expect(commands('pass', tip, 0.5)).rejects.toThrow(/contractRevision 0.5 is not a revision/);
+    expect(await readFile(store.abs(STATE_FILE), 'utf8')).toBe(before);
+    const stale = await commands('pass', tip, 0);
+    expect('contractRevision' in stale.round).toBe(false);
+    expect(stale.milestone.status).toBe('active');
+    await store.approveObjective('human');
+    await store.startMilestoneValidation('MS1', tip);
+    await registerValidator('v-scrutiny', tip);
+    const scrutiny = await store.submitValidation('v-scrutiny', { milestone: 'MS1', kind: 'scrutiny', verdict: 'pass' });
+    expect(scrutiny.milestone.status).toBe('validating');
+    expect((await store.objectiveEvaluation()).completion.ready).toBe(false);
+    const ran = await commands('pass', tip, 1);
+    expect(ran.round.contractRevision).toBe(1);
+    expect(ran.milestone.status).toBe('passed');
+    expect((await store.completeObjective()).status).toBe('completed');
+  });
+
+  it('does not let a late fail from the old command list block the same-tip re-run (RV3)', async () => {
+    const tip = await finalOnly({ scrutiny: false, userTesting: false, commands: ['npm tst'] });
+    await store.updateObjective({ milestones: [{ id: 'MS1', validation: { commands: ['npm test'] } }] });
+    const late = await commands('fail', tip, 0);
+    expect('contractRevision' in late.round).toBe(false);
+    expect(late.milestone.status).toBe('active');
+    await store.approveObjective('human');
+    expect((await store.objectiveEvaluation()).milestones[0]).toMatchObject({
+      failedOnTip: [],
+      readyForValidation: true,
+    });
+    expect((await store.startMilestoneValidation('MS1', tip)).milestone.status).toBe('validating');
+    expect((await commands('pass', tip, 1)).milestone.status).toBe('passed');
     expect((await store.completeObjective()).status).toBe('completed');
   });
 
   it('writes no revision at all while the contract never changes', async () => {
     const tip = await finalOnly({ scrutiny: false, userTesting: false, commands: ['npm test'] });
+    await registerValidator('v-plain', tip);
     const passed = await commands('pass', tip);
     expect('contractRevision' in passed.round).toBe(false);
     expect(await readFile(store.abs(STATE_FILE), 'utf8')).not.toContain('contractRevision');

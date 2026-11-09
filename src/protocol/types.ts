@@ -104,6 +104,7 @@ export interface TowerRosterEntry {
   readonly validationKind?: TowerValidationKind;
   readonly validationRound?: number;
   readonly validatedCommit?: string;
+  readonly contractRevision?: number;
 }
 
 export interface TowerRoster {
