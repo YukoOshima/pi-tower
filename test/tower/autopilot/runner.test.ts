@@ -787,6 +787,39 @@ describe('agents the human stopped', () => {
     return harness;
   }
 
+  it('a worker the human stopped is never resumed or replaced: the orchestrator is woken once per stopped worker', async () => {
+    await draft();
+    await store.approveObjective('human');
+    const { runner, tower } = setup();
+    await settle(runner);
+    Object.assign(tower.agents.get('agent-ap-w-M1-1')!, { status: 'stopped', stopReason: 'user' });
+    await settle(runner);
+    await settle(runner);
+    const workers = (): string[] => tower.calls.filter((call) => /^(spawn|respawn|resume)Worker /.test(call));
+    expect(workers()).toEqual(['spawnWorker M1 ap-w-M1-1']);
+    expect(tower.wakes).toHaveLength(1);
+    expect(tower.wakes[0]).toMatch(
+      /^worker-stopped: the human stopped worker ap-w-M1-1 on feature M1 "Core A" \(milestone MS1, branch feat\/core-a\)\. The feature waits: the autopilot never resumes, reassigns or replaces an agent the human stopped\.\n/,
+    );
+    expect(tower.wakes[0]).toContain('TowerSpawn(kind="worker", mission_id="M1")');
+    expect(tower.wakes[0]).toContain('Never replace the stopped worker on your own.');
+    tower.agents.set('agent-core-a-fresh', { agentId: 'agent-core-a-fresh', name: 'core-a-fresh', kind: 'worker', mission: 'M1', status: 'running', turns: 0 });
+    await store.registerSpawnedAgent(
+      { name: 'core-a-fresh', agentId: 'agent-core-a-fresh', kind: 'worker', missionId: 'M1', spawnedAt: new Date().toISOString() },
+      { id: 'M1', owner: 'core-a-fresh' },
+    );
+    await settle(runner);
+    expect(tower.wakes).toHaveLength(1);
+    Object.assign(tower.agents.get('agent-core-a-fresh')!, { status: 'stopped', stopReason: 'user' });
+    await settle(runner);
+    expect(workers()).toEqual(['spawnWorker M1 ap-w-M1-1']);
+    expect(tower.wakes).toHaveLength(2);
+    expect(tower.wakes[1]).toMatch(/^worker-stopped: the human stopped worker core-a-fresh on feature M1 /);
+    expect((await objectiveOf()).autopilot?.wakeKeys).toEqual(
+      expect.arrayContaining(['worker-stopped:M1:ap-w-M1-1', 'worker-stopped:M1:core-a-fresh']),
+    );
+  });
+
   it('a reviewer the human stopped is never replaced: the orchestrator is woken once instead', async () => {
     const { runner, tower } = await reviewing();
     Object.assign(tower.agents.get('agent-ap-r-M1-1')!, { status: 'stopped', stopReason: 'user' });

@@ -99,7 +99,7 @@ export interface AutopilotSettings {
 export interface AutopilotWorker {
   readonly state: AutopilotWorkerState;
   readonly name?: string;
-  /** The human stopped this worker: autopilot never resumes or respawns it. */
+  /** The human stopped this worker: autopilot never resumes or respawns it and wakes the orchestrator once instead. */
   readonly humanStopped: boolean;
   /** The worker has unread review findings (a non-clean review-result) in its inbox. */
   readonly unreadFindings: boolean;
@@ -220,7 +220,8 @@ export type AutopilotWakeReason =
   | 'review-stuck'
   | 'validation-stuck'
   | 'stalled'
-  | 'worker-idle';
+  | 'worker-idle'
+  | 'worker-stopped';
 
 /**
  * `continue`: the worker of an active feature is idle without TowerComplete, a blocker or an

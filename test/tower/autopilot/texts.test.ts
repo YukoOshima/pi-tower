@@ -5,6 +5,7 @@ import {
   reviewerStoppedWake,
   validatorStoppedWake,
   workerIdleWake,
+  workerStoppedWake,
 } from '../../../src/tower/autopilot/texts.ts';
 
 const BUILD = { id: 'M3', title: 'Core A', branch: 'feat/core-a', milestone: 'MS1', kind: 'build' as const };
@@ -28,6 +29,32 @@ describe('continue resume prompt', () => {
     expect(prompt).toContain('1. The investigation is done → finish with TowerComplete(report=the full result).');
     expect(prompt).toContain('3. The mission leaves substantive doubt about what to investigate →');
     expect(prompt).not.toContain('reviewer');
+  });
+});
+
+describe('worker-stopped wake', () => {
+  it('the feature waits for the human, who alone decides how it continues', () => {
+    const [first, options, last] = workerStoppedWake({ mission: { ...BUILD, blockers: [] }, worker: 'ap-w-M3-1' }).split('\n\n');
+    expect(first).toBe(
+      'worker-stopped: the human stopped worker ap-w-M3-1 on feature M3 "Core A" (milestone MS1, branch feat/core-a). The feature waits: the autopilot never resumes, reassigns or replaces an agent the human stopped.',
+    );
+    expect(options!.split('\n')).toEqual([
+      'Ask the human how to continue, then act only on the answer:',
+      '- continue it → spawn a fresh worker with TowerSpawn(kind="worker", mission_id="M3") and instructions that carry the human\'s direction;',
+      '- change or drop it → abandon it with TowerMission(id="M3", status="abandoned") and re-plan the work with TowerPlan;',
+      '- stop here → block the objective with TowerObjective(action="block", reason).',
+    ]);
+    expect(last).toBe(
+      'Never replace the stopped worker on your own. In a headless run nobody can answer: block the objective and name the stopped worker.',
+    );
+  });
+
+  it('names the files of an unresolved rebase conflict', () => {
+    const blocker = 'tower rebase onto main conflicted in: src/a.ts, src/b.ts — the rebase was aborted';
+    const text = workerStoppedWake({ mission: { ...BUILD, blockers: [blocker] }, worker: 'ap-w-M3-1' });
+    expect(text.split('\n')[0]).toMatch(
+      / It also has an unresolved rebase conflict onto the base in src\/a\.ts, src\/b\.ts, which whoever continues it resolves first\.$/,
+    );
   });
 });
 

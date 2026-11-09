@@ -200,6 +200,27 @@ export function workerIdleWake(input: {
   ].join('\n\n');
 }
 
+export function workerStoppedWake(input: {
+  readonly mission: Pick<TowerMission, 'id' | 'title' | 'branch' | 'milestone' | 'blockers'>;
+  readonly worker: string;
+}): string {
+  const { mission, worker } = input;
+  const files = rebaseConflictFiles(mission);
+  const conflict = mission.blockers.some(isRebaseConflictBlocker)
+    ? ` It also has an unresolved rebase conflict onto the base${files.length > 0 ? ` in ${files.join(', ')}` : ''}, which whoever continues it resolves first.`
+    : '';
+  return [
+    `worker-stopped: the human stopped worker ${worker} on ${featureLabel(mission)}. The feature waits: the autopilot never resumes, reassigns or replaces an agent the human stopped.${conflict}`,
+    [
+      'Ask the human how to continue, then act only on the answer:',
+      `- continue it → spawn a fresh worker with TowerSpawn(kind="worker", mission_id="${mission.id}") and instructions that carry the human's direction;`,
+      `- change or drop it → abandon it with TowerMission(id="${mission.id}", status="abandoned") and re-plan the work with TowerPlan;`,
+      '- stop here → block the objective with TowerObjective(action="block", reason).',
+    ].join('\n'),
+    'Never replace the stopped worker on your own. In a headless run nobody can answer: block the objective and name the stopped worker.',
+  ].join('\n\n');
+}
+
 export function reviewerStoppedWake(input: {
   readonly mission: Pick<TowerMission, 'id' | 'title' | 'branch' | 'milestone'>;
   readonly reviewer: string;
@@ -486,6 +507,9 @@ export function orchestratorWakeText(
         openFeatures: objectiveMissions(state).filter(isOpenMission),
       });
     }
+    case 'worker-stopped':
+      if (mission === undefined) return fallbackWake(wake);
+      return workerStoppedWake({ mission, worker: wake.revision });
     case 'worker-idle': {
       if (mission === undefined) return fallbackWake(wake);
       const worker = missionWorkerEntries(state, mission).at(-1);

@@ -260,7 +260,7 @@ function planWorker(draft: Draft, feature: AutopilotMission): void {
   if (!needsWorker(feature) || worker.state === 'running') return;
   const autopilot = draft.snapshot.settings.autopilot;
   if (worker.humanStopped) {
-    if (feature.rebaseConflict) wakeRebaseConflict(draft, feature);
+    wakeWorkerStopped(draft, feature);
     return;
   }
   if (worker.state === 'idle') {
@@ -333,6 +333,17 @@ function planContinue(draft: Draft, feature: AutopilotMission): void {
     feature.id,
     tip,
     `${feature.id}: worker ${worker ?? '-'} is idle on the active feature without TowerComplete, a blocker or an unanswered message${nudged ? ', and a worker of this feature was already resumed once on this tip' : ''}`,
+  );
+}
+
+function wakeWorkerStopped(draft: Draft, feature: AutopilotMission): void {
+  const name = feature.worker.name ?? '-';
+  wake(
+    draft,
+    'worker-stopped',
+    feature.id,
+    name,
+    `${feature.id}: the human stopped worker ${name}${feature.rebaseConflict ? ' and the feature has an unresolved rebase conflict' : ''}; the feature waits for the human, and autopilot never replaces the worker`,
   );
 }
 
