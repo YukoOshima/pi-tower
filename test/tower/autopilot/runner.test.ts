@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs';
-import { readFile, rm } from 'node:fs/promises';
+import { mkdir, readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -11,6 +11,10 @@ import {
   type TowerState,
   type TowerStore,
 } from '../../../src/protocol/index.ts';
+import type {
+  CommandsValidationOutcome,
+  CommandsValidationRequest,
+} from '../../../src/tower/autopilot/commandsRunner.ts';
 import {
   reviewerAgentName,
   validatorAgentName,
@@ -105,15 +109,16 @@ describe('AutopilotRunner lifecycle', () => {
     await settle(runner);
     expect(loads()).toBe(0);
     runner.start();
+    expect(loads()).toBe(1);
     expect(timers.intervalMs).toBe(12_345);
     timers.fire();
     await runner.whenIdle();
-    expect(loads()).toBe(1);
+    expect(loads()).toBe(2);
     runner.stop();
     expect(timers.cleared).toBe(1);
     timers.fire();
     await settle(runner);
-    expect(loads()).toBe(1);
+    expect(loads()).toBe(2);
   });
 
   it('serializes ticks and coalesces the ones that arrive while a tick runs', async () => {
@@ -600,6 +605,109 @@ describe('terminal objectives the runner did not end itself', () => {
     const { runner, tower } = setup({}, false);
     await settle(runner);
     expect(tower.notices).toEqual([]);
+  });
+});
+
+describe('orphan commands-validation worktrees', () => {
+  const worktree = (name: string): string => join(repo, '.tower', 'worktrees', name);
+  const registered = (): Promise<string> => git(repo, 'worktree', 'list', '--porcelain');
+
+  async function validating(options: { readonly scrutiny?: boolean } = {}): Promise<void> {
+    await draft({ commands: ['true'], ...options });
+    await store.approveObjective('human');
+    await store.updateMission('tower', 'M1', { status: 'abandoned' });
+    await store.startMilestoneValidation('MS1', await git(repo, 'rev-parse', 'main'), validationSettings(SIM_SETTINGS));
+  }
+
+  it('start() removes the registered commands worktrees a dead process left and keeps every other worktree', async () => {
+    await validating({ scrutiny: true });
+    await store.prepareValidationWorktree('MS1', 'commands');
+    await store.prepareValidationWorktree('MS1', 'scrutiny');
+    await mkdir(worktree('val-ms1-commands-r7'), { recursive: true });
+    const { runner, log } = setup();
+    await runner.whenIdle();
+    expect(await registered()).not.toContain('/val-ms1-commands-r1');
+    expect(existsSync(worktree('val-ms1-commands-r1'))).toBe(false);
+    expect(await registered()).toContain('/val-ms1-scrutiny-r1');
+    expect(existsSync(worktree('val-ms1-commands-r7'))).toBe(true);
+    expect(log.warnings).toEqual([]);
+    const activity = await readFile(store.abs(ACTIVITY_LOG), 'utf8');
+    expect(activity).toMatch(/ tower worktree\.remove worktree=val-ms1-commands-r1\n/);
+  });
+
+  it('a commands run decided right after start() waits for the sweep, so a run that died leaves nothing behind', async () => {
+    await validating();
+    await store.prepareValidationWorktree('MS1', 'commands');
+    const events: string[] = [];
+    let preparing: () => void = () => undefined;
+    const prepared = new Promise<void>((resolve) => {
+      preparing = resolve;
+    });
+    const remove = store.removeValidationWorktree.bind(store);
+    store.removeValidationWorktree = async (name) => {
+      await Promise.race([prepared, new Promise((resolve) => setTimeout(resolve, 300))]);
+      const removed = await remove(name);
+      events.push(`removed ${name}`);
+      return removed;
+    };
+    const prepare = store.prepareValidationWorktree.bind(store);
+    store.prepareValidationWorktree = async (milestoneId, kind) => {
+      events.push(`prepare ${kind}`);
+      preparing();
+      return prepare(milestoneId, kind);
+    };
+    const { runner, log } = setup();
+    await settle(runner, 'restart');
+    expect(events).toEqual(['removed val-ms1-commands-r1', 'prepare commands', 'removed val-ms1-commands-r1']);
+    const milestone = (await objectiveOf()).milestones[0]!;
+    expect(milestone.rounds.map((round) => `${round.kind}-r${String(round.round)}:${round.verdict}`)).toEqual(['commands-r1:pass']);
+    expect(await registered()).not.toContain('/val-');
+    expect(log.warnings).toEqual([]);
+  });
+
+  it('start() keeps the worktree of a commands run still live in this process', async () => {
+    await draft({ commands: ['true'] });
+    await store.approveObjective('human');
+    await store.updateMission('tower', 'M1', { status: 'abandoned' });
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const runCommands = async (target: TowerStore, request: CommandsValidationRequest): Promise<CommandsValidationOutcome> => {
+      const prepared = await target.prepareValidationWorktree(request.milestoneId, 'commands');
+      await held;
+      await target.removeValidationWorktree(prepared.worktree);
+      return { status: 'aborted', worktree: prepared.worktree, commit: prepared.commit };
+    };
+    const tower = new FakeTower(store, QUIET);
+    const runner = new AutopilotRunner({ observations: tower, effects: tower, timers: new FakeTimers(), log: new RecordingLog(), runCommands });
+    runner.start();
+    await runner.tick('validate');
+    expect(await waitUntil(() => existsSync(worktree('val-ms1-commands-r1')), 10_000)).toBe(true);
+    await git(repo, 'worktree', 'add', '--detach', worktree('val-ms9-commands-r1'), 'main');
+    runner.stop();
+    runner.start();
+    expect(await waitUntil(() => !existsSync(worktree('val-ms9-commands-r1')), 10_000)).toBe(true);
+    expect(existsSync(worktree('val-ms1-commands-r1'))).toBe(true);
+    release();
+    await runner.whenIdle();
+    expect(await registered()).not.toContain('/val-');
+    runner.stop();
+  });
+
+  it('start() survives a store it cannot open', () => {
+    const { runner, tower, log } = setup({}, false);
+    tower.store = () => {
+      throw new Error('no tower workspace');
+    };
+    expect(() => {
+      runner.start();
+    }).not.toThrow();
+    expect(runner.started).toBe(true);
+    expect(log.warnings).toEqual([
+      'tower autopilot could not look for orphan commands-validation worktrees {"error":"no tower workspace"}',
+    ]);
+    runner.stop();
   });
 });
 
