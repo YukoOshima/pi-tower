@@ -39,6 +39,7 @@ import {
   MISSION_GOAL_QUESTION_START,
   MISSION_HANDED_START,
   MISSION_HEADER_START,
+  MISSION_INTERVIEW_ANSWERS,
   MISSION_KEY,
   MISSION_OFF_START,
   MISSION_PLANNING_HEADING,
@@ -211,6 +212,9 @@ describe('the deterministic /mission output S18 expects', () => {
     const goal = missionGoal('/tmp/pi-tower-e2e-x/S18/accept-s18.mjs');
     expect(goal).not.toContain('\n');
     expect(goal).toContain('`node /tmp/pi-tower-e2e-x/S18/accept-s18.mjs`');
+    expect(goal).not.toContain('chars ab cd');
+    expect(MISSION_INTERVIEW_ANSWERS).toContain('`node src/cli.js chars ab cd` prints `5`');
+    expect(MISSION_INTERVIEW_ANSWERS).toContain('`node src/cli.js lower Hello WORLD` prints `hello world`');
     const prompt = buildObjectivePlanningPrompt({ mode: 'interactive', text: goal });
     expect(prompt.startsWith(MISSION_PLANNING_HEADING)).toBe(true);
     expect(prompt).toContain(`## Mission goal\n\n${goal}\n`);

@@ -124,15 +124,20 @@ export const MISSION_LIMITS: ObjectiveLimits = { maxCostUsd: 5, maxWallTimeMs: 3
 
 export function missionGoal(script: string): string {
   return [
-    'Add two commands to the textkit CLI in this repository (README.md explains how commands work).',
-    '`lower` prints its arguments joined by single spaces in lower case: `node src/cli.js lower Hello WORLD` prints `hello world`.',
-    '`chars` prints the number of characters of its arguments joined by single spaces: `node src/cli.js chars ab cd` prints `5`.',
-    'The two commands are independent of each other, and each one gets its own node:test test file.',
-    'It is small, so one milestone is enough. Leave src/cli.js, README.md and package.json unchanged.',
+    'Add two commands to the textkit CLI in this repository: `lower`, which prints its arguments in lower case, and `chars`, which prints how many characters its arguments have.',
     `The acceptance commands are exactly \`npm test\` and \`node ${script}\`.`,
-    'Ask me your questions first.',
+    'Before you plan, ask me what you need to know.',
   ].join(' ');
 }
+
+export const MISSION_INTERVIEW_ANSWERS = [
+  'My answers: both commands work on their arguments joined by single spaces.',
+  '`node src/cli.js lower Hello WORLD` prints `hello world`, and `chars` counts the characters of the joined text, spaces included, so `node src/cli.js chars ab cd` prints `5`.',
+  'The two commands are independent of each other, and each one gets its own node:test test file. It is small, so one milestone is enough.',
+  'Out of scope: any other command and any change to src/cli.js, README.md and package.json; no dependencies.',
+  'A user runs the commands from a shell exactly like my examples, and the acceptance commands stay exactly the two I gave.',
+  'No more questions from me — decide anything else yourself, then draft the mission, plan its features and request my approval.',
+].join(' ');
 
 export interface MissionSetup {
   readonly towerConfig: Record<string, unknown>;

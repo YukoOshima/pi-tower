@@ -13,6 +13,7 @@ import {
   MISSION_CONTROL_START,
   MISSION_HANDED_START,
   MISSION_HEADER_START,
+  MISSION_INTERVIEW_ANSWERS,
   MISSION_KEY,
   MISSION_LIMITS,
   MISSION_OFF_START,
@@ -55,14 +56,6 @@ import { git, readJsonFile, tryGit } from '../workspace.ts';
 
 const WORKTREE_WAIT_MS = 3 * 60_000;
 const TOWER_OFF = /^Tower (?:status —|mode:) OFF/m;
-
-const PLANNING_REPLY = [
-  'My answers: done means both commands print exactly what my examples show and `npm test` passes;',
-  'out of scope are any other command and any change to src/cli.js, README.md and package.json;',
-  'a user runs the commands from a shell exactly like my examples;',
-  'the acceptance commands are the two I gave, verbatim; plain Node.js ES modules, no dependencies.',
-  'No more questions from me — decide anything else yourself, then draft the mission, plan its features and request my approval.',
-].join(' ');
 
 const EXECUTION_REPLY = 'No more questions from me — decide any open point yourself and keep the mission going on your own.';
 
@@ -439,7 +432,7 @@ export const s18MissionMode: ScenarioDefinition = {
     const trace = new ObjectiveTrace(repo);
     try {
       await enterMissionMode(ctx, rpc, setup);
-      const intake = await handOverGoal(ctx, rpc, repo, goal, script, humanScript(PLANNING_REPLY));
+      const intake = await handOverGoal(ctx, rpc, repo, goal, script, humanScript(MISSION_INTERVIEW_ANSWERS));
       const dialog = await declineApproval(ctx, rpc, repo, intake);
       await approveMission(ctx, rpc, repo, dialog);
       await showMissionControl(ctx, rpc, repo, setup);
