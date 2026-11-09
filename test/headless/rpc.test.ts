@@ -45,6 +45,24 @@ describe('PiRpcClient', () => {
     expect(await pi.command('/tower nope')).toMatchObject({ success: true, disposition: 'started' });
   });
 
+  it('decodes multi-byte UTF-8 split across stdout and stderr chunks', async () => {
+    const { pi } = start({
+      commands: [
+        {
+          match: '/split',
+          before: [
+            { split: { stream: 'stdout', text: '目标已完成' } },
+            { split: { stream: 'stderr', text: '错误：验证失败\n' } },
+          ],
+        },
+      ],
+    });
+    expect((await pi.command('/split')).notices).toEqual([{ level: 'info', text: '目标已完成' }]);
+    const deadline = Date.now() + 5000;
+    while (!pi.stderr.endsWith('\n') && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(pi.stderrTail()).toBe('错误：验证失败');
+  });
+
   it('reports a rejected command', async () => {
     const { pi } = start({ commands: [{ match: '/x', error: 'No model selected' }] });
     expect(await pi.command('/x')).toEqual({ success: false, disposition: undefined, error: 'No model selected', notices: [] });

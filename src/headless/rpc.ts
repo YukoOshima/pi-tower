@@ -99,11 +99,13 @@ export class PiRpcClient {
     this.child.stdin.on('error', (error) => {
       this.markGone({ code: null, signal: null, reason: `stdin ${error.message}` });
     });
-    this.child.stderr.on('data', (chunk: Buffer) => {
-      this.stderr = `${this.stderr}${chunk.toString('utf8')}`.slice(-STDERR_LIMIT);
+    this.child.stderr.setEncoding('utf8');
+    this.child.stdout.setEncoding('utf8');
+    this.child.stderr.on('data', (chunk: string) => {
+      this.stderr = `${this.stderr}${chunk}`.slice(-STDERR_LIMIT);
     });
-    this.child.stdout.on('data', (chunk: Buffer) => {
-      this.buffer += chunk.toString('utf8');
+    this.child.stdout.on('data', (chunk: string) => {
+      this.buffer += chunk;
       let index: number;
       while ((index = this.buffer.indexOf('\n')) >= 0) {
         const line = this.buffer.slice(0, index).replace(/\r$/, '');

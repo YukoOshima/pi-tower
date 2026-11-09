@@ -10,6 +10,7 @@ export interface FakeAction {
   readonly notify?: { readonly level?: string; readonly text: string };
   readonly dialog?: { readonly method: string; readonly title: string };
   readonly stderr?: string;
+  readonly split?: { readonly stream: 'stdout' | 'stderr'; readonly text: string };
   readonly exit?: number;
 }
 
@@ -55,6 +56,16 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+async function writeSplit(stream: 'stdout' | 'stderr', text: string): Promise<void> {
+  const line = stream === 'stdout' ? `${JSON.stringify({ type: 'extension_ui_request', id: 'split', method: 'notify', message: text, notifyType: 'info' })}\n` : text;
+  const bytes = Buffer.from(line, 'utf8');
+  const cut = bytes.findIndex((byte) => byte >= 0x80) + 1;
+  const target = stream === 'stdout' ? process.stdout : process.stderr;
+  target.write(bytes.subarray(0, cut));
+  await sleep(50);
+  target.write(bytes.subarray(cut));
+}
+
 function writeState(patch: Json): void {
   mkdirSync(join(process.cwd(), '.tower', 'comms'), { recursive: true });
   const current = existsSync(statePath) ? (JSON.parse(readFileSync(statePath, 'utf8')) as Json) : { version: 1, base: 'main', missions: [] };
@@ -79,6 +90,7 @@ async function perform(actions: readonly FakeAction[] | undefined): Promise<void
       emit({ type: 'extension_ui_request', id: `dialog-${String(dialogs)}`, method: action.dialog.method, title: action.dialog.title });
     }
     if (action.stderr !== undefined) process.stderr.write(action.stderr);
+    if (action.split !== undefined) await writeSplit(action.split.stream, action.split.text);
     if (action.exit !== undefined) {
       log({ kind: 'exit', code: action.exit });
       process.exit(action.exit);
