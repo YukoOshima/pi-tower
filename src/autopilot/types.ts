@@ -32,6 +32,8 @@ export type AutopilotMissionKind = 'build' | 'survey';
 /**
  * `running`: mid-turn (takes an agent slot). `idle`: alive between turns, resumable.
  * `dead`: the session failed, timed out or was retired. `none`: no worker was ever registered.
+ * A runtime that cannot be observed (runtime 'unknown', gate 'worker-unknown') is never `running`:
+ * map it to `idle`, or `dead` once the agent is gone; a phantom `running` holds the stall watchdog forever.
  */
 export type AutopilotWorkerState = 'none' | 'running' | 'idle' | 'dead';
 
@@ -131,6 +133,7 @@ export interface AutopilotMission {
   readonly worker: AutopilotWorker;
   /** An unanswered review-request from the author covers the current tip (a tower rebase keeps it valid). */
   readonly reviewRequestOnTip: boolean;
+  /** A reviewer is observed mid-turn; like workers, an unobservable runtime is not running. */
   readonly reviewerRunning: boolean;
   /** Reviewers spawned for the current tip that ended without submitting a review. */
   readonly reviewerAttemptsOnTip: number;
@@ -187,7 +190,12 @@ export interface AutopilotSnapshot {
   readonly orchestratorBusy: boolean;
   /** Total number of review files, for the progress key. */
   readonly reviewCount: number;
-  /** Total number of inbox messages, for the progress key. */
+  /**
+   * Inbox messages from agents, for the progress key. Exclude what autopilot itself delivers (wakes,
+   * resume prompts; wakes go out through pi.sendMessage, not the inbox) and orchestrator-originated
+   * chatter: if a wake counted as progress, every stall wake would reset the stall count and
+   * block-objective('stalled') could never fire.
+   */
   readonly inboxCount: number;
   readonly memory: AutopilotMemory;
 }
