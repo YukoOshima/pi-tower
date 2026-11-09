@@ -1153,6 +1153,11 @@ export class TowerStore {
         `tower agent name "${entry.name}" is reserved by the tower protocol — pick a different name`,
       );
     }
+    if (entry.validationKind === 'commands') {
+      throw new TowerProtocolError(
+        `agent "${entry.name}" cannot register for the commands validation — the tower runs the milestone and acceptance commands mechanically and records them itself`,
+      );
+    }
     if (entry.kind === 'validator') this.assertValidatorRegistration(entry, state);
     for (let index = state.roster.agents.length - 1; index >= 0; index -= 1) {
       if (state.roster.agents[index]!.agentId === entry.agentId) {
@@ -3650,6 +3655,11 @@ export class TowerStore {
         );
       }
       return this.resolveCommit(input.validatedCommit);
+    }
+    if (input.kind === 'commands') {
+      throw new TowerProtocolError(
+        `the commands validation is recorded only by the tower — agent "${callerName}" cannot report it`,
+      );
     }
     const entry = this.findAgent(state, callerName);
     if (

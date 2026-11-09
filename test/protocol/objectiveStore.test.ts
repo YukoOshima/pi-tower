@@ -1319,3 +1319,65 @@ describe('restarting a validation', () => {
     expect(missing).toMatchObject({ worktree: 'val-ms1-user-testing-r1', commit: tip });
   });
 });
+
+describe('the commands kind is reserved for the tower', () => {
+  const spawnedAt = '2026-04-04T00:00:00.000Z';
+
+  it('prepares a commands worktree for the tower but registers no agent for that kind', async () => {
+    const tip = await validatingMilestone();
+    const prepared = await store.prepareValidationWorktree('MS1', 'commands');
+    expect(prepared).toMatchObject({ worktree: 'val-ms1-commands-r1', commit: tip });
+    const before = await readFile(store.abs(STATE_FILE), 'utf8');
+    await expect(
+      store.registerAgent({
+        name: 'val-cmd',
+        agentId: 'agent-val-cmd',
+        kind: 'validator',
+        milestoneId: 'MS1',
+        validationKind: 'commands',
+        validatedCommit: tip,
+        worktree: prepared.worktree,
+        spawnedAt,
+      }),
+    ).rejects.toThrow(/agent "val-cmd" cannot register for the commands validation/);
+    await expect(
+      store.registerSpawnedAgent({
+        name: 'w-cmd',
+        agentId: 'agent-w-cmd',
+        kind: 'worker',
+        missionId: 'M1',
+        validationKind: 'commands',
+        spawnedAt,
+      }),
+    ).rejects.toThrow(/agent "w-cmd" cannot register for the commands validation/);
+    expect(await readFile(store.abs(STATE_FILE), 'utf8')).toBe(before);
+  });
+
+  it('refuses a commands report from any agent, even an old roster entry, while the tower keeps recording it', async () => {
+    const tip = await validatingMilestone();
+    await mutateState((state) => {
+      state.roster.agents.push({
+        name: 'val-legacy',
+        agentId: 'agent-legacy',
+        kind: 'validator',
+        milestoneId: 'MS1',
+        validationKind: 'commands',
+        validatedCommit: tip,
+        spawnedAt,
+      });
+      state.objective!.milestones[0]!.validation = { scrutiny: false, userTesting: false, commands: ['npm test'] };
+    });
+    const before = await readFile(store.abs(STATE_FILE), 'utf8');
+    await expect(
+      store.submitValidation('val-legacy', { milestone: 'MS1', kind: 'commands', verdict: 'pass' }),
+    ).rejects.toThrow(/commands validation is recorded only by the tower — agent "val-legacy" cannot report it/);
+    expect(await readFile(store.abs(STATE_FILE), 'utf8')).toBe(before);
+    const recorded = await store.submitValidation('tower', {
+      milestone: 'MS1',
+      kind: 'commands',
+      verdict: 'pass',
+      validatedCommit: tip,
+    });
+    expect(recorded.milestone.status).toBe('passed');
+  });
+});
