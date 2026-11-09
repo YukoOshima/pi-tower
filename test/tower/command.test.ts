@@ -1170,6 +1170,37 @@ describe('/tower approve, pause and resume', () => {
   });
 });
 
+describe('the headless runner command sequence', () => {
+  it('accepts exactly what pi-tower run sends, without error notices', async () => {
+    const h = await harness();
+    const dir = join(h.repo, 'objective specs');
+    await mkdir(dir);
+    const file = join(dir, 'ship csv.md');
+    await writeFile(file, 'Ship the CSV export.\n');
+    const hooks = fakeObjectiveHooks();
+    const deps = objectiveDeps(h, hooks);
+
+    const on = await h.run('on', deps);
+    const handed = await h.run(`objective --headless @${file}`, deps);
+    const store = new TowerStore(h.repo);
+    await store.draftObjective({ title: 'CSV', goal: 'Ship the CSV export.', definitionOfDone: ['csv works'], milestones: [{ title: 'Core' }] });
+    await store.plan([{ title: 'CSV writer', scope: ['src/csv/**'], milestone: 'MS1' }]);
+    await store.requestObjectiveApproval();
+    const approved = await h.run('approve --auto', deps);
+
+    for (const recorded of [on, handed, approved]) expect(recorded.errors).toEqual([]);
+    expect(h.pi.userMessages.map((message) => message.text)).toEqual([
+      buildObjectivePlanningPrompt({ mode: 'headless', text: 'Ship the CSV export.\n', file }),
+    ]);
+    expect(await readTowerState(h.repo)).toMatchObject({
+      objectiveMode: 'headless',
+      objective: { status: 'executing', approvedBy: 'auto' },
+    });
+    await settle();
+    expect(hooks.ticks).toEqual(['approve']);
+  });
+});
+
 describe('objective command completions and help', () => {
   it('completes the objective and approve arguments', () => {
     expect(towerCommandCompletions('objective ')).toEqual([
