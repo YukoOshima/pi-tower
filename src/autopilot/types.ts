@@ -150,7 +150,7 @@ export interface AutopilotMemory {
   readonly progressAt?: number;
   /** Consecutive stall wakes since the last progress. */
   readonly stallWakes: number;
-  /** Dedupe keys of wakes already sent. */
+  /** Dedupe keys of wakes (and resumes) already sent. */
   readonly wakeKeys: readonly string[];
 }
 
@@ -198,6 +198,8 @@ export interface AutopilotResumeWorker {
   readonly mission: string;
   readonly worker: string;
   readonly reason: AutopilotResumeReason;
+  /** Dedupe key `resume-${reason}:${mission}:${revision}`; record it with the sent wake keys. */
+  readonly key: string;
 }
 
 export interface AutopilotRespawnWorker {
