@@ -19,6 +19,14 @@ import type { TowerValidatorKind } from '../validate/validate.ts';
 
 const NOTHING_CREATED = 'no worktree or agent was created';
 
+export function validationSpawnLease(milestoneId: string, kind: TowerValidatorKind): string {
+  return `validation:${milestoneId}:${kind}`;
+}
+
+export function validationSpawnInProgress(milestoneId: string, kind: TowerValidatorKind): string {
+  return `another TowerSpawn is already starting the ${milestoneId} ${kind} validator — one validator per milestone and kind at a time; check TowerTasks once it finishes; ${NOTHING_CREATED}`;
+}
+
 export type TowerValidationTarget =
   | { readonly ok: true; readonly objective: TowerObjective; readonly milestone: TowerMilestone }
   | { readonly ok: false; readonly error: string };

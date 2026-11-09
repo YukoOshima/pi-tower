@@ -50,7 +50,13 @@ import {
   towerSpawnInputProblem,
   type TowerSpawnToolInput,
 } from './spawn.ts';
-import { buildValidatorPrompt, resolveValidationTarget } from './validator.ts';
+import type { TowerValidatorKind } from '../validate/validate.ts';
+import {
+  buildValidatorPrompt,
+  resolveValidationTarget,
+  validationSpawnInProgress,
+  validationSpawnLease,
+} from './validator.ts';
 
 export function createTowerSpawnTool(
   host: TowerToolHost,
@@ -100,7 +106,7 @@ async function spawn(host: TowerToolHost, args: TowerSpawnToolInput): Promise<To
   if (existing !== undefined) {
     return { output: duplicateRefusal(host, args.name, existing), isError: true };
   }
-  if (args.kind === 'validator') return spawnValidator(host, store, state, args);
+  if (args.kind === 'validator') return spawnValidator(host, store, args);
 
   let mission: TowerMission | undefined;
   let reviewTarget: string | undefined;
@@ -250,16 +256,33 @@ async function spawn(host: TowerToolHost, args: TowerSpawnToolInput): Promise<To
 async function spawnValidator(
   host: TowerToolHost,
   store: TowerStore,
-  state: TowerState,
   args: TowerSpawnToolInput,
 ): Promise<TowerToolResult> {
   const kind = args.validation_kind;
   if (kind === undefined) {
     return { output: 'validator spawns require milestone and validation_kind', isError: true };
   }
+  const milestoneId = (args.milestone ?? '').trim();
+  const lease = validationSpawnLease(milestoneId, kind);
+  if (host.isBranchLeased(lease)) {
+    return { output: validationSpawnInProgress(milestoneId, kind), isError: true };
+  }
+  return host.withBranchLease(lease, () =>
+    spawnLeasedValidator(host, store, args, milestoneId, kind),
+  );
+}
+
+async function spawnLeasedValidator(
+  host: TowerToolHost,
+  store: TowerStore,
+  args: TowerSpawnToolInput,
+  milestoneId: string,
+  kind: TowerValidatorKind,
+): Promise<TowerToolResult> {
+  const state = await store.load();
   const target = resolveValidationTarget(
     state,
-    (args.milestone ?? '').trim(),
+    milestoneId,
     kind,
     validationSettingsOf(objectiveSettingsOf(host)),
     host.activeAgentIds(),

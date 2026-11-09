@@ -256,6 +256,44 @@ describe('TowerSpawn kind="validator"', () => {
     expect(existsSync(worktreePath())).toBe(false);
   });
 
+  it('lets exactly one of two concurrent same-kind spawns launch; the other leaves no worktree', async () => {
+    await validatingMilestone(store);
+
+    const results = await Promise.all([spawn(SCRUTINY), spawn({ ...SCRUTINY, name: 'val-b' })]);
+
+    const launched = results.filter((result) => result.isError === undefined);
+    const refused = results.filter((result) => result.isError === true);
+    expect(launched).toHaveLength(1);
+    expect(refused).toEqual([
+      {
+        isError: true,
+        output:
+          'another TowerSpawn is already starting the MS1 scrutiny validator — one validator per milestone and kind at a time; check TowerTasks once it finishes; no worktree or agent was created',
+      },
+    ]);
+    expect(host.launches).toHaveLength(1);
+    expect(existsSync(worktreePath('val-ms1-scrutiny-r2'))).toBe(false);
+    expect(await git(repo, 'worktree', 'list')).not.toContain('val-ms1-scrutiny-r2');
+    const validators = (await store.load()).roster.agents.filter((agent) => agent.kind === 'validator');
+    expect(validators.map((agent) => agent.worktree)).toEqual(['val-ms1-scrutiny-r1']);
+    expect(host.isBranchLeased('validation:MS1:scrutiny')).toBe(false);
+  });
+
+  it('runs concurrent spawns of different kinds side by side', async () => {
+    await validatingMilestone(store);
+
+    const results = await Promise.all([
+      spawn(SCRUTINY),
+      spawn({ ...SCRUTINY, name: 'val-u', validation_kind: 'user-testing' }),
+    ]);
+
+    expect(results.map((result) => result.isError)).toEqual([undefined, undefined]);
+    expect(host.launches.map((launch) => launch.cwd).sort()).toEqual([
+      worktreePath('val-ms1-scrutiny-r1'),
+      worktreePath('val-ms1-user-testing-r1'),
+    ]);
+  });
+
   it('refuses a second validator while one is running or once the kind has a verdict', async () => {
     const tip = await validatingMilestone(store);
     expect((await spawn(SCRUTINY)).isError).toBeUndefined();
