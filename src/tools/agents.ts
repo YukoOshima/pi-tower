@@ -65,10 +65,22 @@ export function agentAssignment(
   info: Pick<TowerAgentInfo, 'kind'>,
   entry: TowerRosterEntry | undefined,
 ): string {
-  if (entry === undefined) return info.kind === 'reviewer' ? 'review' : 'mission ?';
+  if (entry === undefined) {
+    if (info.kind === 'validator') return 'validation ?';
+    return info.kind === 'reviewer' ? 'review' : 'mission ?';
+  }
+  if (entry.kind === 'validator') return validatorAssignment(entry);
   return entry.kind === 'worker'
     ? `mission ${entry.missionId ?? '?'}`
     : `reviewing ${entry.reviewTarget ?? '?'}`;
+}
+
+export function validatorAssignment(
+  entry: Pick<TowerRosterEntry, 'milestoneId' | 'validationKind' | 'validationRound' | 'validatedCommit'>,
+): string {
+  const round = entry.validationRound === undefined ? '' : ` r${String(entry.validationRound)}`;
+  const commit = entry.validatedCommit === undefined ? '' : ` on ${entry.validatedCommit.slice(0, 7)}`;
+  return `validating ${entry.milestoneId ?? '?'} ${entry.validationKind ?? '?'}${round}${commit}`;
 }
 
 export function agentLine(

@@ -3,11 +3,12 @@ import { describeValidation } from '../../prompts/objectiveFormat.ts';
 import { renderObjectiveStatus } from '../../prompts/objectiveStatus.ts';
 import {
   finalMilestone,
-  objectiveMissions,
   sortedMilestones,
   type TowerObjective,
   type TowerState,
 } from '../../protocol/index.ts';
+
+export type ObjectiveViewState = Pick<TowerState, 'missions' | 'roster'>;
 
 export interface ObjectiveDashboardOptions {
   readonly activeAgentIds: ReadonlySet<string>;
@@ -15,25 +16,28 @@ export interface ObjectiveDashboardOptions {
   readonly nowMs?: number;
 }
 
-export function objectiveFeatures(state: TowerState): PromptFeature[] {
-  return objectiveMissions(state);
+export function objectiveFeatures(state: ObjectiveViewState, objective: TowerObjective): PromptFeature[] {
+  const milestones = new Set(objective.milestones.map((milestone) => milestone.id));
+  return state.missions.filter(
+    (mission) => mission.milestone !== undefined && milestones.has(mission.milestone),
+  );
 }
 
 export function liveObjectiveAgents(
-  state: TowerState,
+  state: ObjectiveViewState,
   activeAgentIds: ReadonlySet<string>,
 ): PromptLiveAgent[] {
   return state.roster.agents.filter((agent) => activeAgentIds.has(agent.agentId));
 }
 
 export function renderObjectiveDashboard(
-  state: TowerState,
+  state: ObjectiveViewState,
   objective: TowerObjective,
   options: ObjectiveDashboardOptions,
 ): string {
   return renderObjectiveStatus({
     objective,
-    features: objectiveFeatures(state),
+    features: objectiveFeatures(state, objective),
     agents: liveObjectiveAgents(state, options.activeAgentIds),
     nowMs: options.nowMs ?? Date.now(),
     skipKinds: options.skipKinds,

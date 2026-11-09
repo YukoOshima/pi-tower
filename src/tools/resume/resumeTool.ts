@@ -9,6 +9,7 @@ import {
   unknownAgentRefusal,
   workerSpawnGuidance,
 } from '../../prompts/index.ts';
+import { resumeValidatorRefusal } from '../../prompts/validatorNotes.ts';
 import { isStoppedByUser } from '../status/statusTool.ts';
 import { describeAgentModel, isHumanStop, knownAgentNames, resolveAgentRef } from '../agents.ts';
 import {
@@ -55,6 +56,9 @@ export function createTowerResumeTool(
         }
         if (entry.kind === 'reviewer') {
           return { output: resumeReviewerRefusal(entry.name), isError: true };
+        }
+        if (entry.kind === 'validator') {
+          return { output: resumeValidatorRefusal(entry.name), isError: true };
         }
         if (entry.sessionId !== undefined && entry.sessionId !== host.sessionId) {
           return { output: resumeRetiredRefusal(entry.name), isError: true };

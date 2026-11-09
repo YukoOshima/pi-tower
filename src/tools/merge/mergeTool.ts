@@ -1,4 +1,5 @@
 import { TOWER_MAIN_AGENT_ONLY, TOWER_MERGE_DESCRIPTION } from '../../prompts/index.ts';
+import { isObjectiveOpen } from '../../protocol/index.ts';
 import {
   isMainAgent,
   runTowerTool,
@@ -48,7 +49,9 @@ export function createTowerMergeTool(
             (mission) => mission.status === 'merged' || mission.status === 'abandoned',
           );
         const teardownHint =
-          'Every mission is now merged or abandoned — ready for TowerTeardown (branches and .tower/comms/ are kept; dirty worktrees are protected).';
+          after.objective !== undefined && isObjectiveOpen(after.objective)
+            ? `Every mission is now merged or abandoned, but objective ${after.objective.id} is still ${after.objective.status} — validation, later milestones, or fix features follow; do not run TowerTeardown until the objective completes.`
+            : 'Every mission is now merged or abandoned — ready for TowerTeardown (branches and .tower/comms/ are kept; dirty worktrees are protected).';
         if (status === 'noop') {
           return {
             output: [

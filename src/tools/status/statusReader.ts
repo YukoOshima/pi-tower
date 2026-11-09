@@ -1,13 +1,16 @@
 import {
   MAIN_AGENT_ID,
+  currentMilestone,
   mapWithConcurrency,
   TOWER_GIT_CONCURRENCY,
   type TowerMissionGateBlock,
+  type TowerObjective,
   type TowerReviewBinding,
   type TowerState,
   type TowerStore,
 } from '../../protocol/index.ts';
 import type { TowerRateLimitSnapshot } from '../../tower/runtimeTypes.ts';
+import { validatorAssignment } from '../agents.ts';
 
 const INBOX_COUNT_LIMIT = 1000;
 const RECENT_LOG_LINES = 10;
@@ -20,6 +23,7 @@ export interface TowerStatusState {
   readonly recoveredAt?: string;
   readonly missions: TowerState['missions'];
   readonly roster: TowerState['roster'];
+  readonly objective?: TowerObjective;
 }
 
 export interface TowerStatusReview {
@@ -117,6 +121,7 @@ export async function readTowerStatus(input: ReadTowerStatusInput): Promise<Towe
       ...(state.recoveredAt === undefined ? {} : { recoveredAt: state.recoveredAt }),
       missions: state.missions,
       roster: state.roster,
+      ...(state.objective === undefined ? {} : { objective: state.objective }),
     },
     caller,
     gate,
@@ -140,6 +145,7 @@ export async function readTowerStatusSummary(input: ReadTowerStatusInput): Promi
     status.active ? 'Tower status — ON' : 'Tower mode: OFF',
     `Base: ${status.state.base} (mode: ${status.state.mode}) · You are: ${status.caller}`,
     ...summaryRecoveredAt(status.state),
+    ...summaryObjective(status.state),
     'Missions:',
     ...summaryMissions(status.state),
     'Roster:',
@@ -171,13 +177,25 @@ function summaryRecoveredAt(state: TowerStatusState): string[] {
   ];
 }
 
+function summaryObjective(state: TowerStatusState): string[] {
+  const objective = state.objective;
+  if (objective === undefined) return [];
+  const passed = objective.milestones.filter((milestone) => milestone.status === 'passed').length;
+  const current = currentMilestone(objective);
+  return [
+    `Objective: ${objective.id} ${objective.title} — ${objective.status} · milestones ${String(passed)}/${String(objective.milestones.length)} passed${current === undefined ? '' : ` · current ${current.id} ${current.status}`}`,
+  ];
+}
+
 function summaryRoster(state: TowerStatusState): string[] {
   if (state.roster.agents.length === 0) return ['  (none)'];
   return state.roster.agents.map((agent) => {
     const assignment =
       agent.kind === 'worker'
         ? `mission ${agent.missionId ?? '?'}`
-        : `reviewing ${agent.reviewTarget ?? '?'}`;
+        : agent.kind === 'validator'
+          ? validatorAssignment(agent)
+          : `reviewing ${agent.reviewTarget ?? '?'}`;
     const model = agent.model === undefined ? '' : ` · model ${agent.model}`;
     const death = agent.diedAt === undefined ? '' : ` · died ${agent.deathStatus ?? 'unknown'}`;
     return `  ${agent.name} (${agent.kind}) — ${assignment} · ${agent.agentId}${model}${death}`;

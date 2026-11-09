@@ -1,8 +1,24 @@
 import { TOWER_STATUS_DESCRIPTION } from '../../prompts/index.ts';
-import type { TowerMission, TowerRosterEntry } from '../../protocol/index.ts';
+import {
+  currentMilestone,
+  isObjectiveOpen,
+  type TowerMission,
+  type TowerObjective,
+  type TowerRosterEntry,
+} from '../../protocol/index.ts';
 import { HUMAN_STOP_REASON } from '../../tower/constants.ts';
 import type { TowerAgentInfo } from '../../tower/runtimeTypes.ts';
-import { runTowerTool, type TowerCaller, type TowerTool, type TowerToolHost } from '../support.ts';
+import { validatorAssignment } from '../agents.ts';
+import { renderObjectiveDashboard } from '../objective/views.ts';
+import {
+  objectiveSettingsOf,
+  runTowerTool,
+  skippedValidationKinds,
+  type TowerCaller,
+  type TowerObjectiveSettingsView,
+  type TowerTool,
+  type TowerToolHost,
+} from '../support.ts';
 import { TowerStatusToolInputSchema } from './status.ts';
 import {
   readTowerStatus,
@@ -53,6 +69,14 @@ export function createTowerStatusTool(
             concurrency: status.concurrency,
             recentActivity: status.recentActivity,
             runtimeAgent: (agentId) => host.agentInfo(agentId),
+            ...(status.state.objective === undefined
+              ? {}
+              : {
+                  objective: {
+                    activeAgentIds: host.activeAgentIds(),
+                    settings: objectiveSettingsOf(host),
+                  },
+                }),
           }),
         };
       }),
@@ -64,6 +88,12 @@ export interface TowerDashboardExtras {
   readonly concurrency: TowerStatusConcurrency;
   readonly recentActivity: readonly string[];
   readonly runtimeAgent?: RuntimeAgentLookup;
+  readonly objective?: TowerDashboardObjectiveExtras;
+}
+
+export interface TowerDashboardObjectiveExtras {
+  readonly activeAgentIds: ReadonlySet<string>;
+  readonly settings: TowerObjectiveSettingsView;
 }
 
 type RuntimeAgentLookup = (agentId: string) => Pick<TowerAgentInfo, 'windingDown'> | undefined;
@@ -78,10 +108,11 @@ export function renderTowerDashboard(
     `# Tower status — base: ${state.base} (mode: ${state.mode}), you are: ${caller}`,
     '',
     ...renderRecoveredAtWarning(state),
+    ...renderObjectiveBlock(state, extras.objective),
     '## Missions',
     '',
     ...renderMissions(state),
-    ...renderUnspawnedMissions(state),
+    ...renderUnspawnedMissions(state, extras.objective?.settings),
     ...renderDeathWarnings(state, extras.runtimeAgent),
     '',
     '## Roster',
@@ -100,7 +131,9 @@ export function renderTowerDashboard(
       '',
       '## Done',
       '',
-      'All missions are merged or abandoned. Free the worktree checkouts now: run TowerTeardown (branches and .tower/comms/ are kept; dirty worktrees are protected).',
+      isObjectiveOpen(state.objective)
+        ? `All missions are merged or abandoned, but objective ${state.objective?.id ?? '?'} is still ${state.objective?.status ?? 'open'} — validation, later milestones, or fix features follow; do not run TowerTeardown until the objective completes.`
+        : 'All missions are merged or abandoned. Free the worktree checkouts now: run TowerTeardown (branches and .tower/comms/ are kept; dirty worktrees are protected).',
     );
   }
   sections.push(
@@ -133,6 +166,19 @@ export function renderStateLostReport(): string {
     '- TowerMerge and TowerRebase refuse with an explicit state-lost error instead of silently running against an empty history.',
     '- Mission branches and worktrees under .tower/worktrees survive on disk; re-plan from that evidence only after the user decides how to proceed.',
   ].join('\n');
+}
+
+function renderObjectiveBlock(
+  state: TowerStatusState,
+  extras: TowerDashboardObjectiveExtras | undefined,
+): string[] {
+  const objective = state.objective;
+  if (objective === undefined) return [];
+  const dashboard = renderObjectiveDashboard(state, objective, {
+    activeAgentIds: extras?.activeAgentIds ?? new Set<string>(),
+    skipKinds: extras === undefined ? [] : skippedValidationKinds(extras.settings),
+  });
+  return [dashboard.replaceAll(/^(#+) /gm, '#$1 '), ''];
 }
 
 function renderRecoveredAtWarning(state: TowerStatusState): string[] {
@@ -210,14 +256,19 @@ function renderRoster(state: TowerStatusState): string[] {
     const assignment =
       a.kind === 'worker'
         ? `mission ${a.missionId ?? '?'} (branch ${a.branch ?? '?'}, worktree ${a.worktree ?? '?'})`
-        : `reviewing ${a.reviewTarget ?? '?'}`;
+        : a.kind === 'validator'
+          ? `${validatorAssignment(a)} (worktree ${a.worktree ?? '?'})`
+          : `reviewing ${a.reviewTarget ?? '?'}`;
     const model = a.model === undefined ? '' : `, model ${a.model}`;
     const death = a.diedAt === undefined ? '' : ` — 💀 ${a.deathStatus ?? 'died'}`;
     return `- ${a.name} (${a.kind}) — agent ${a.agentId}, ${assignment}${model}${death}`;
   });
 }
 
-function renderUnspawnedMissions(state: TowerStatusState): string[] {
+function renderUnspawnedMissions(
+  state: TowerStatusState,
+  settings: TowerObjectiveSettingsView | undefined,
+): string[] {
   const pending = state.missions.filter((m) => m.status === 'planned' && m.owner === undefined);
   if (pending.length === 0) return [];
   return [
@@ -226,9 +277,29 @@ function renderUnspawnedMissions(state: TowerStatusState): string[] {
     '',
     ...pending.map(
       (m) =>
+        featureSpawnHint(m, state.objective, settings) ??
         `- ${m.id} (${m.branch}) — planned but no worker spawned yet: launch one with TowerSpawn(kind="worker", mission_id="${m.id}", name="...")`,
     ),
   ];
+}
+
+function featureSpawnHint(
+  mission: TowerMission,
+  objective: TowerObjective | undefined,
+  settings: TowerObjectiveSettingsView | undefined,
+): string | undefined {
+  if (mission.milestone === undefined || objective === undefined || !isObjectiveOpen(objective)) {
+    return undefined;
+  }
+  const head = `- ${mission.id} (${mission.branch}) — feature of ${mission.milestone}`;
+  if (objective.status !== 'executing') {
+    return `${head}: nothing starts while objective ${objective.id} is ${objective.status}`;
+  }
+  if (currentMilestone(objective)?.id !== mission.milestone) {
+    return `${head}: it starts when ${mission.milestone} becomes the current milestone`;
+  }
+  if (settings?.autopilot === false) return undefined;
+  return `${head}, the current milestone: the autopilot spawns its worker once its deps are merged or abandoned`;
 }
 
 function renderDeathWarnings(
