@@ -2,11 +2,14 @@ import { stat } from 'node:fs/promises';
 import { resolve } from 'node:path';
 
 import type {
+  ExtensionAPI,
   ExtensionCommandContext,
   ExtensionContext,
   InputEvent,
   InputEventResult,
   TerminalInputHandler,
+  UIPromptEndEvent,
+  UIPromptStartEvent,
 } from '@earendil-works/pi-coding-agent';
 
 import {
@@ -44,6 +47,7 @@ import {
 } from '../tower/command.ts';
 import type { TowerChange, TowerController, TowerExtensionApi } from '../tower/controller.ts';
 import {
+  MISSION_APPROVAL_GRACE_MS,
   MISSION_APPROVAL_QUIET_MS,
   MISSION_MODE_ENTRY,
   MISSION_REFRESH_THROTTLE_MS,
@@ -51,7 +55,7 @@ import {
   MISSION_STATUS_KEY,
   MISSION_WIDGET_KEY,
 } from './constants.ts';
-import { typedInput, type TypedInput } from './keys.ts';
+import { selectionKey, typedInput, type TypedInput } from './keys.ts';
 import {
   missionPanelComponent,
   renderMissionPanel,
@@ -109,9 +113,11 @@ import {
 
 export type MissionPhase = 'idle' | 'armed' | 'planning';
 
+export type MissionPi = Pick<TowerExtensionApi, 'appendEntry' | 'sendUserMessage'> & Pick<ExtensionAPI, 'on'>;
+
 export interface MissionModeOptions {
   readonly controller: TowerController;
-  readonly pi: Pick<TowerExtensionApi, 'appendEntry' | 'sendUserMessage'>;
+  readonly pi: MissionPi;
   readonly objective?: TowerObjectiveCommandHooks;
   readonly timers?: MissionTimers;
   readonly throttleMs?: number;
@@ -132,8 +138,11 @@ interface ObservedObjective {
 interface ApprovalDialog {
   readonly objectiveId: string;
   readonly abort: AbortController;
+  readonly openedAt: number;
   unguard: (() => void) | undefined;
 }
+
+type UIPromptEvent = UIPromptStartEvent | UIPromptEndEvent;
 
 interface SessionEntryLike {
   readonly type: string;
@@ -148,10 +157,11 @@ const HANDLED: InputEventResult = { action: 'handled' };
 
 export class MissionMode {
   private readonly controller: TowerController;
-  private readonly pi: Pick<TowerExtensionApi, 'appendEntry' | 'sendUserMessage'>;
+  private readonly pi: MissionPi;
   private readonly hooks: TowerObjectiveCommandHooks;
   private readonly timers: MissionTimers;
   private readonly refresher: MissionRefresher;
+  private readonly ownPromptTitles = new Set<string>();
   private on = false;
   private phase: MissionPhase = 'idle';
   private goal: string | undefined;
@@ -161,7 +171,9 @@ export class MissionMode {
   private offerFor: string | undefined;
   private dialog: ApprovalDialog | undefined;
   private unwatchKeys: (() => void) | undefined;
+  private unwatchPrompts: (() => void) | undefined;
   private lastInputAt: number | undefined;
+  private otherPromptOpen = false;
   private shownLines: string | undefined;
   private shownStatus: string | undefined;
 
@@ -488,6 +500,7 @@ export class MissionMode {
     if (!ctx.hasUI) return;
     this.refresher.start();
     this.watchKeys(ctx);
+    this.watchPrompts(ctx);
   }
 
   private deactivate(): void {
@@ -509,7 +522,11 @@ export class MissionMode {
     this.refresher.stop();
     this.unwatchKeys?.();
     this.unwatchKeys = undefined;
+    this.unwatchPrompts?.();
+    this.unwatchPrompts = undefined;
     this.lastInputAt = undefined;
+    this.otherPromptOpen = false;
+    this.ownPromptTitles.clear();
   }
 
   private watchKeys(ctx: ExtensionContext): void {
@@ -518,6 +535,28 @@ export class MissionMode {
       this.lastInputAt = this.timers.now();
       return undefined;
     });
+  }
+
+  private watchPrompts(ctx: ExtensionContext): void {
+    if (this.unwatchPrompts !== undefined || ctx.mode !== 'tui') return;
+    this.unwatchPrompts = listenToPrompts(this.pi, (event) => {
+      this.onPrompt(event);
+    });
+  }
+
+  private onPrompt(event: UIPromptEvent): void {
+    if (!this.on) return;
+    if (event.type === 'ui_prompt_start') {
+      this.otherPromptOpen = !this.ownPrompt(event);
+      return;
+    }
+    if (!this.otherPromptOpen) return;
+    this.otherPromptOpen = false;
+    this.refresher.request();
+  }
+
+  private ownPrompt(event: UIPromptStartEvent): boolean {
+    return event.kind === 'select' && event.title !== undefined && this.ownPromptTitles.has(event.title);
   }
 
   private typedRecently(): boolean {
@@ -578,7 +617,7 @@ export class MissionMode {
       );
     } else {
       const input = this.panelInput(state, visible);
-      this.showWidget(ctx, renderMissionPanel(input));
+      this.showWidget(ctx, input);
       this.showStatus(ctx, renderMissionStatus(input));
     }
     this.observeApproval(ctx, state);
@@ -602,10 +641,14 @@ export class MissionMode {
       previous !== undefined &&
       (previous === null || previous.id !== objective.id || previous.status !== 'awaiting-approval');
     if ((entered || requested) && this.canOffer(ctx, state, objective)) this.offerFor = objective.id;
-    if (this.offerFor !== objective.id || !idle(ctx) || editorHoldsText(ctx) || this.typedRecently()) return;
+    if (this.offerFor !== objective.id || !this.readyToOffer(ctx)) return;
     this.offerFor = undefined;
     this.closeDialog();
     this.offer(ctx, state, objective);
+  }
+
+  private readyToOffer(ctx: ExtensionContext): boolean {
+    return idle(ctx) && !editorHoldsText(ctx) && !this.typedRecently() && !this.otherPromptOpen;
   }
 
   private canOffer(ctx: ExtensionContext, state: TowerState, objective: TowerObjective): boolean {
@@ -621,13 +664,19 @@ export class MissionMode {
   }
 
   private offer(ctx: ExtensionContext, state: TowerState, objective: TowerObjective): void {
-    const dialog: ApprovalDialog = { objectiveId: objective.id, abort: new AbortController(), unguard: undefined };
+    const dialog: ApprovalDialog = {
+      objectiveId: objective.id,
+      abort: new AbortController(),
+      openedAt: this.timers.now(),
+      unguard: undefined,
+    };
     this.dialog = dialog;
     if (ctx.mode === 'tui') {
       dialog.unguard = listenToTerminal(ctx, (data) => this.guardDialog(ctx, dialog, data));
     }
     const features = objectiveMissions(state).filter((mission) => mission.status !== 'abandoned').length;
     const question = missionApprovalDialog(objective, objective.milestones.length, features);
+    this.ownPromptTitles.add(question.title);
     void this.awaitApproval(ctx, dialog, question, objective);
   }
 
@@ -638,7 +687,10 @@ export class MissionMode {
   ): ReturnType<TerminalInputHandler> {
     if (this.dialog !== dialog) return undefined;
     const typed = typedInput(data);
-    if (typed === undefined) return undefined;
+    if (typed === undefined) {
+      const opening = this.timers.now() - dialog.openedAt < MISSION_APPROVAL_GRACE_MS;
+      return opening && selectionKey(data) ? { consume: true } : undefined;
+    }
     this.offerFor = dialog.objectiveId;
     this.closeDialog();
     this.appendToEditor(ctx, typed);
@@ -733,12 +785,13 @@ export class MissionMode {
     return this.controller.models?.maxRunningAgents ?? TOWER_DEFAULT_MAX_RUNNING_AGENTS;
   }
 
-  private showWidget(ctx: ExtensionContext, lines: string[] | undefined): void {
+  private showWidget(ctx: ExtensionContext, input: MissionPanelInput | undefined): void {
+    const lines = input === undefined ? undefined : renderMissionPanel(input);
     const key = lines === undefined ? undefined : JSON.stringify(lines);
     if (key === this.shownLines) return;
     try {
-      if (lines !== undefined && ctx.mode === 'tui') {
-        ctx.ui.setWidget(MISSION_WIDGET_KEY, () => missionPanelComponent(lines), { placement: 'aboveEditor' });
+      if (input !== undefined && ctx.mode === 'tui') {
+        ctx.ui.setWidget(MISSION_WIDGET_KEY, () => missionPanelComponent(input), { placement: 'aboveEditor' });
       } else {
         ctx.ui.setWidget(MISSION_WIDGET_KEY, lines, { placement: 'aboveEditor' });
       }
@@ -818,6 +871,26 @@ function listenToTerminal(ctx: ExtensionContext, handler: TerminalInputHandler):
   try {
     return ctx.ui.onTerminalInput(handler);
   } catch {
+    return undefined;
+  }
+}
+
+function listenToPrompts(
+  pi: Pick<ExtensionAPI, 'on'>,
+  handler: (event: UIPromptEvent) => void,
+): (() => void) | undefined {
+  const unsubscribers: unknown[] = [];
+  const unsubscribe = (): void => {
+    for (const off of unsubscribers.splice(0)) {
+      if (typeof off === 'function') off();
+    }
+  };
+  try {
+    unsubscribers.push(pi.on('ui_prompt_start', handler));
+    unsubscribers.push(pi.on('ui_prompt_end', handler));
+    return unsubscribe;
+  } catch {
+    unsubscribe();
     return undefined;
   }
 }
