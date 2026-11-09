@@ -1,4 +1,4 @@
-# CSV and JSON export for `shop report`
+# Mission: CSV and JSON export for `shop report`
 
 ## Goal
 
@@ -30,7 +30,7 @@
 
 Validation commands run in a fresh checkout without `node_modules` or `dist/`, so every command installs its dependencies first.
 
-- Acceptance command for the whole objective: `npm ci && npm run typecheck && npm test`
+- Acceptance command for the whole mission: `npm ci && npm run typecheck && npm test`
 - Behavioural QA: the steps under "How a user tries it".
 
 ## Suggested milestones
