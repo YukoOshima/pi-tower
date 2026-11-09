@@ -44,6 +44,16 @@ describe('objective formatting helpers', () => {
     ]);
   });
 
+  it('drops skipped kinds from the required kinds and the description', () => {
+    expect(requiredValidationKinds(FULL, [], ['user-testing'])).toEqual(['scrutiny', 'commands']);
+    expect(describeValidation(FULL, ['npm run e2e'], ['scrutiny', 'user-testing'])).toBe(
+      'commands `npm test`, `npm run e2e`',
+    );
+    expect(describeValidation({ scrutiny: true, userTesting: true, commands: [] }, [], ['scrutiny', 'user-testing'])).toBe(
+      'none (passes as soon as its features merge)',
+    );
+  });
+
   it('describes the validation in one line', () => {
     expect(describeValidation(FULL, ['npm run e2e'])).toBe(
       'scrutiny · user-testing · commands `npm test`, `npm run e2e`',

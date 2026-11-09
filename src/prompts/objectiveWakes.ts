@@ -5,6 +5,7 @@ import {
   formatUsd,
   latestRound,
   numberedList,
+  requiredValidationKinds,
   shortCommit,
 } from './objectiveFormat.ts';
 import type {
@@ -45,6 +46,7 @@ export interface PlanMilestoneRequestInput {
   readonly milestone: Pick<PromptMilestone, 'id' | 'title' | 'description' | 'validation'>;
   readonly finalMilestone: boolean;
   readonly previous?: MilestoneRef;
+  readonly skipKinds?: readonly PromptValidationKind[];
 }
 
 export interface StallReevaluationInput {
@@ -139,6 +141,7 @@ export interface ApprovalRequestInput {
   readonly features: readonly Pick<PromptFeature, 'id' | 'title' | 'milestone'>[];
   readonly approvalReason?: string;
   readonly notes?: readonly string[];
+  readonly skipKinds?: readonly PromptValidationKind[];
 }
 
 export function validationResultWake(input: ValidationResultWakeInput): string {
@@ -218,8 +221,12 @@ export function planMilestoneRequest(input: PlanMilestoneRequestInput): string {
   const about = [
     `## ${milestone.id}: ${milestone.title}`,
     ...(description !== undefined && description.length > 0 ? [description] : []),
-    `Validation: ${describeValidation(milestone.validation, acceptance)}`,
-    ...(qa !== undefined && qa.length > 0 ? [`QA instructions: ${qa}`] : []),
+    `Validation: ${describeValidation(milestone.validation, acceptance, input.skipKinds)}`,
+    ...(qa !== undefined &&
+    qa.length > 0 &&
+    requiredValidationKinds(milestone.validation, acceptance, input.skipKinds).includes('user-testing')
+      ? [`QA instructions: ${qa}`]
+      : []),
     ...(input.finalMilestone
       ? ['This is the final milestone: together with the earlier milestones it must deliver the whole definition of done.']
       : []),
@@ -459,6 +466,7 @@ export function approvalRequest(input: ApprovalRequestInput): string {
           index,
           features.filter((feature) => feature.milestone === milestone.id),
           milestone.id === finalId ? objective.acceptanceCommands : [],
+          input.skipKinds ?? [],
         ),
       ),
     ].join('\n'),
@@ -476,6 +484,7 @@ function milestonePlan(
   index: number,
   features: readonly Pick<PromptFeature, 'id' | 'title'>[],
   acceptanceCommands: readonly string[],
+  skipKinds: readonly PromptValidationKind[],
 ): string {
   const planned =
     features.length > 0
@@ -485,7 +494,7 @@ function milestonePlan(
   return [
     `${String(index + 1)}. ${milestone.id} "${milestone.title}" — ${planned}`,
     ...(description !== undefined && description.length > 0 ? [`   ${description}`] : []),
-    `   validation: ${describeValidation(milestone.validation, acceptanceCommands)}`,
+    `   validation: ${describeValidation(milestone.validation, acceptanceCommands, skipKinds)}`,
   ].join('\n');
 }
 

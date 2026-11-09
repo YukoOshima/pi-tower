@@ -166,6 +166,23 @@ describe('renderObjectiveStatus — milestones', () => {
     expect(text).toContain('## Next\nMS1 failed validation — the orchestrator plans fix features into it (TowerPlan with milestone="MS1", origin "fix").');
   });
 
+  it('honours skipped kinds for milestones whose validation has not started', () => {
+    const skipUserTesting = renderObjectiveStatus(input({ skipKinds: ['user-testing'] }));
+    expect(skipUserTesting).toContain(
+      '🔵 MS2 CLI polish — active · features 1/2 merged · validation: scrutiny · commands `npm test`\n',
+    );
+    const skipBoth = renderObjectiveStatus(input({ skipKinds: ['scrutiny', 'user-testing'] }));
+    expect(skipBoth).toContain('🔵 MS2 CLI polish — active · features 1/2 merged · validation: commands `npm test`\n');
+    expect(skipBoth).toContain('⚪ MS3 Docs — pending · features 0/1 merged · validation: commands `npm run e2e`');
+    const noCommands = objective({
+      acceptanceCommands: [],
+      milestones: [milestone({ id: 'MS1', order: 1, status: 'active', validation: { scrutiny: true, userTesting: true, commands: [] } })],
+    });
+    expect(renderObjectiveStatus(input({ objective: noCommands, skipKinds: ['scrutiny', 'user-testing'] }))).toContain(
+      '· validation: none\n',
+    );
+  });
+
   it('says when nothing is planned yet', () => {
     const text = renderObjectiveStatus(input({ objective: objective({ status: 'planning', milestones: [] }), features: [], agents: [] }));
     expect(text).toContain('## Milestones\nnone yet');

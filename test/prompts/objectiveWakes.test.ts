@@ -210,6 +210,22 @@ describe('planMilestoneRequest', () => {
     expect(text).toContain('(with the autopilot off, spawn them yourself with TowerSpawn) — then end your turn.');
   });
 
+  it('lists only the validators that will actually run', () => {
+    const text = planMilestoneRequest({
+      objective: OBJECTIVE,
+      milestone: {
+        id: 'MS2',
+        title: 'CLI polish',
+        validation: { scrutiny: true, userTesting: true, commands: ['npm test'], qaInstructions: 'Run report --help.' },
+      },
+      finalMilestone: false,
+      skipKinds: ['user-testing'],
+    });
+    expect(text).toContain('Validation: scrutiny · commands `npm test`\n');
+    expect(text).not.toContain('user-testing');
+    expect(text).not.toContain('QA instructions');
+  });
+
   it('leaves acceptance commands to the final milestone', () => {
     const text = planMilestoneRequest({
       objective: OBJECTIVE,
@@ -426,6 +442,17 @@ describe('approvalRequest', () => {
     expect(text).toContain('Estimated runs: ≈ 7 (3 features + 2 × 2 milestones). This is a floor, not a ceiling');
     expect(text).toContain('To approve, run: /tower approve\nOnly you can approve — the orchestrator cannot.');
     expect(text).not.toContain('Assumptions and notes');
+  });
+
+  it('lists only the validators that will actually run', () => {
+    const text = approvalRequest({ ...APPROVAL, skipKinds: ['user-testing'] });
+    expect(text).toContain('   validation: scrutiny · commands `npm test`\n');
+    expect(text).toContain('   validation: scrutiny · commands `npm run e2e`');
+    expect(text).not.toContain('user-testing');
+    const commandsOnly = approvalRequest({ ...APPROVAL, skipKinds: ['scrutiny', 'user-testing'] });
+    expect(commandsOnly).toContain('   validation: commands `npm test`\n');
+    expect(commandsOnly).toContain('   validation: commands `npm run e2e`');
+    expect(commandsOnly).not.toMatch(/scrutiny|user-testing/);
   });
 
   it('carries the re-approval reason and the recorded assumptions', () => {

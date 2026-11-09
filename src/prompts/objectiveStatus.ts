@@ -140,7 +140,9 @@ function validationText(input: ObjectiveStatusInput, milestone: PromptMilestone,
   const required = requiredKinds(input, milestone, final);
   const running = validatorsOf(input, milestone.id);
   if (milestone.rounds.length === 0 && running.length === 0 && milestone.status !== 'validating') {
-    return required.length === 0 ? 'validation: none' : `validation: ${describeValidation(milestone.validation, acceptance)}`;
+    return required.length === 0
+      ? 'validation: none'
+      : `validation: ${describeValidation(milestone.validation, acceptance, input.skipKinds)}`;
   }
   const kinds = VALIDATION_KINDS.filter(
     (kind) => required.includes(kind) || milestone.rounds.some((round) => round.kind === kind),
@@ -265,9 +267,10 @@ function requiredKinds(
   milestone: PromptMilestone,
   final: boolean,
 ): PromptValidationKind[] {
-  const skip = input.skipKinds ?? [];
-  return requiredValidationKinds(milestone.validation, final ? input.objective.acceptanceCommands : []).filter(
-    (kind) => !skip.includes(kind),
+  return requiredValidationKinds(
+    milestone.validation,
+    final ? input.objective.acceptanceCommands : [],
+    input.skipKinds,
   );
 }
 

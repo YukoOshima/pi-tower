@@ -27,21 +27,25 @@ export function shortCommit(commit: string): string {
 export function requiredValidationKinds(
   spec: PromptMilestoneValidationSpec,
   acceptanceCommands: readonly string[] = [],
+  skipKinds: readonly PromptValidationKind[] = [],
 ): PromptValidationKind[] {
-  return VALIDATION_KINDS.filter((kind) =>
-    kind === 'scrutiny'
-      ? spec.scrutiny
-      : kind === 'user-testing'
-        ? spec.userTesting
-        : spec.commands.length + acceptanceCommands.length > 0,
+  return VALIDATION_KINDS.filter(
+    (kind) =>
+      !skipKinds.includes(kind) &&
+      (kind === 'scrutiny'
+        ? spec.scrutiny
+        : kind === 'user-testing'
+          ? spec.userTesting
+          : spec.commands.length + acceptanceCommands.length > 0),
   );
 }
 
 export function describeValidation(
   spec: PromptMilestoneValidationSpec,
   acceptanceCommands: readonly string[] = [],
+  skipKinds: readonly PromptValidationKind[] = [],
 ): string {
-  const kinds = requiredValidationKinds(spec, acceptanceCommands);
+  const kinds = requiredValidationKinds(spec, acceptanceCommands, skipKinds);
   if (kinds.length === 0) return 'none (passes as soon as its features merge)';
   const commands = [...spec.commands, ...acceptanceCommands].map((command) => `\`${command}\``);
   return kinds
