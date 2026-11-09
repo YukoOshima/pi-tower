@@ -1,7 +1,8 @@
-import type {
-  AutopilotDecision,
-  AutopilotSnapshot,
-  AutopilotWakeOrchestrator,
+import {
+  digest,
+  type AutopilotDecision,
+  type AutopilotSnapshot,
+  type AutopilotWakeOrchestrator,
 } from '../../autopilot/index.ts';
 import {
   contractRevisionOf,
@@ -9,14 +10,18 @@ import {
   failedValidationRounds,
   findMilestone,
   isOpenMission,
+  latestValidationRound,
   milestoneMissions,
   objectiveMissions,
+  requiredValidationKinds,
   roundContractRevision,
   sortedMilestones,
   TOWER_VALIDATION_KINDS,
+  type TowerMilestone,
   type TowerMission,
   type TowerObjective,
   type TowerRosterEntry,
+  type TowerState,
   type TowerValidationKind,
   type TowerValidationRound,
 } from '../../protocol/index.ts';
@@ -26,6 +31,8 @@ import {
   featureAttemptsExhausted,
   fixRequest,
   mergeBlockedWake,
+  objectiveBlockedNotice,
+  objectiveCompletedNotice,
   planMilestoneRequest,
   rebaseConflictWake,
   reviewStuckWake,
@@ -37,11 +44,67 @@ import {
   isRebaseConflictBlocker,
   missionReviewerEntries,
   missionWorkerEntries,
+  validationSettings,
   type AutopilotWorld,
 } from './snapshot.ts';
 import type { AutopilotRuntimeSettings } from './types.ts';
 
 const RECENT_ATTEMPTS = 3;
+
+export function blockedNoticeKey(objective: Pick<TowerObjective, 'id' | 'blockedReason'>): string {
+  return `blocked-notice:${objective.id}:${digest(objective.blockedReason ?? '')}`;
+}
+
+export function completedNoticeKey(objective: Pick<TowerObjective, 'id'>): string {
+  return `completed-notice:${objective.id}`;
+}
+
+function blockedMilestoneFailures(
+  objective: TowerObjective,
+  milestone: TowerMilestone,
+  settings: Pick<AutopilotRuntimeSettings, 'skipScrutiny' | 'skipUserTesting'>,
+): string[] {
+  const revision = contractRevisionOf(objective);
+  return requiredValidationKinds(objective, milestone, validationSettings(settings)).flatMap((kind) => {
+    const round = latestValidationRound(milestone, kind, milestone.validationCommit, revision);
+    return round?.verdict === 'fail' ? round.failures : [];
+  });
+}
+
+export function blockedNoticeText(
+  objective: TowerObjective,
+  settings: Pick<AutopilotRuntimeSettings, 'skipScrutiny' | 'skipUserTesting'>,
+): string {
+  const milestone = objective.milestones.find((candidate) => candidate.status === 'blocked');
+  const failures = milestone === undefined ? [] : blockedMilestoneFailures(objective, milestone, settings);
+  return objectiveBlockedNotice({
+    objective,
+    reason: objective.blockedReason ?? `objective ${objective.id} is blocked`,
+    ...(milestone === undefined ? {} : { milestone }),
+    ...(failures.length === 0 ? {} : { failures }),
+  });
+}
+
+export function completedNoticeText(input: {
+  readonly objective: TowerObjective;
+  readonly state: TowerState;
+  readonly baseTip: string;
+  readonly now: number;
+}): string {
+  const { objective, state } = input;
+  const started = objective.startedAt === undefined ? Number.NaN : Date.parse(objective.startedAt);
+  const ended = objective.completedAt === undefined ? input.now : Date.parse(objective.completedAt);
+  const elapsedMs = Number.isNaN(started) || Number.isNaN(ended) ? undefined : Math.max(0, ended - started);
+  return objectiveCompletedNotice({
+    objective,
+    milestones: objective.milestones,
+    features: objectiveMissions({ ...state, objective }),
+    base: state.base,
+    baseTip: input.baseTip,
+    ...(elapsedMs === undefined ? {} : { elapsedMs }),
+    costUsd: objective.usage?.costUsd ?? 0,
+  });
+}
 
 export function skipKinds(
   settings: Pick<AutopilotRuntimeSettings, 'skipScrutiny' | 'skipUserTesting'>,

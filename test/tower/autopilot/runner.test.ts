@@ -4,6 +4,7 @@ import { join } from 'node:path';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
+import { digest } from '../../../src/autopilot/index.ts';
 import {
   ACTIVITY_LOG,
   type TowerObjectiveLimitsInput,
@@ -19,7 +20,7 @@ import { AutopilotRunner } from '../../../src/tower/autopilot/runner.ts';
 import { validationSettings } from '../../../src/tower/autopilot/snapshot.ts';
 import type { AutopilotRuntimeSettings, EffectResult } from '../../../src/tower/autopilot/types.ts';
 import { FakeTimers, FakeTower, RecordingLog, SIM_SETTINGS, T0, type SimScript } from './harness.ts';
-import { createRepo, createStore, isAlive, waitUntil } from './repo.ts';
+import { createRepo, createStore, git, isAlive, waitUntil } from './repo.ts';
 
 const QUIET: SimScript = {
   work: (title) => ({ file: `${title.toLowerCase().replaceAll(' ', '-')}/value.txt`, content: 'value\n' }),
@@ -412,6 +413,10 @@ describe('executing', () => {
     expect(objective.blockedReason).toMatch(/^the autopilot saw no progress after 3 stall wake\(s\)/);
     expect(tower.notices.at(-1)).toMatchObject({ level: 'error' });
     expect(tower.notices.at(-1)!.text).toMatch(/^Objective O1 "Ship" is blocked: the autopilot saw no progress/);
+    await settle(runner);
+    await settle(runner);
+    expect(tower.notices.filter((notice) => notice.level === 'error')).toHaveLength(1);
+    expect(objective.autopilot?.wakeKeys).toContain(`blocked-notice:O1:${digest(objective.blockedReason!)}`);
   });
 
   it('stop aborts an in-flight commands run, kills its process group and removes its worktree', async () => {
@@ -431,6 +436,67 @@ describe('executing', () => {
     expect(milestone).toMatchObject({ status: 'validating', rounds: [] });
     expect(existsSync(join(repo, '.tower', 'worktrees', 'val-ms1-commands-r1'))).toBe(false);
     expect(runner.pendingWork().validators).toEqual([]);
+  });
+});
+
+describe('terminal objectives the runner did not end itself', () => {
+  it('notifies the human once when the orchestrator blocks the objective', async () => {
+    await draft();
+    await store.approveObjective('human');
+    await store.blockObjective('the human must choose the database');
+    const { runner, tower } = setup();
+    await settle(runner);
+    await settle(runner);
+    expect(tower.notices).toHaveLength(1);
+    expect(tower.notices[0]).toMatchObject({ level: 'error' });
+    expect(tower.notices[0]!.text).toMatch(/^Objective O1 "Ship" is blocked: the human must choose the database\./);
+    expect((await objectiveOf()).autopilot?.wakeKeys).toEqual([expect.stringMatching(/^blocked-notice:O1:[0-9a-f]{16}$/)]);
+    const activity = await readFile(store.abs(ACTIVITY_LOG), 'utf8');
+    expect(activity).toMatch(/ autopilot notify-human objective=O1 reason=blocked\n/);
+  });
+
+  it('notifies the human once when a validation round blocks the objective in the store', async () => {
+    await draft({ commands: ['echo broken; exit 3'], limits: { maxValidationRounds: 1 } });
+    await store.approveObjective('human');
+    await store.updateMission('tower', 'M1', { status: 'abandoned' });
+    const { runner, tower } = setup();
+    await settle(runner);
+    const blocked = await objectiveOf();
+    expect(blocked.status).toBe('blocked');
+    expect(tower.notices).toEqual([]);
+    await settle(runner);
+    await settle(runner);
+    expect(tower.notices).toHaveLength(1);
+    const notice = tower.notices[0]!;
+    expect(notice.level).toBe('error');
+    expect(notice.text).toContain(`Objective O1 "Ship" is blocked: ${blocked.blockedReason!}`);
+    expect(notice.text).toContain('Milestone MS1 "Core" is blocked.');
+    expect(notice.text).toMatch(/Latest failures:\n1\. `echo broken; exit 3` failed: exit code 3/);
+  });
+
+  it('notifies a completion reached without the runner once', async () => {
+    await draft();
+    await store.approveObjective('human');
+    await store.updateMission('tower', 'M1', { status: 'abandoned' });
+    const settings = validationSettings(SIM_SETTINGS);
+    await store.startMilestoneValidation('MS1', await git(repo, 'rev-parse', 'main'), settings);
+    await store.completeObjective(settings);
+    const { runner, tower } = setup();
+    await settle(runner);
+    await settle(runner);
+    expect(tower.notices).toHaveLength(1);
+    expect(tower.notices[0]).toMatchObject({ level: 'info' });
+    expect(tower.notices[0]!.text).toMatch(/^Objective O1 "Ship" is complete: every milestone passed validation/);
+    expect((await objectiveOf()).autopilot?.wakeKeys).toEqual(['completed-notice:O1']);
+  });
+
+  it('a stopped runner sends no notice', async () => {
+    await draft();
+    await store.approveObjective('human');
+    await store.blockObjective('waiting on the human');
+    const { runner, tower } = setup({}, false);
+    await settle(runner);
+    expect(tower.notices).toEqual([]);
   });
 });
 

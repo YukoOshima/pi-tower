@@ -7,6 +7,7 @@ import {
   type AutopilotValidatorRun,
 } from '../../autopilot/index.ts';
 import {
+  branchTip,
   sortedMilestones,
   type TowerObjective,
   type TowerState,
@@ -33,7 +34,15 @@ import {
   type AutopilotPendingWork,
   type AutopilotWorld,
 } from './snapshot.ts';
-import { planningStallWake, refusedActionWake, skipKinds } from './texts.ts';
+import {
+  blockedNoticeKey,
+  blockedNoticeText,
+  completedNoticeKey,
+  completedNoticeText,
+  planningStallWake,
+  refusedActionWake,
+  skipKinds,
+} from './texts.ts';
 import type {
   AutopilotEffects,
   AutopilotLog,
@@ -149,6 +158,7 @@ export class AutopilotRunner {
   private readonly background = new Set<Promise<void>>();
   private readonly refusals = new Map<string, Refusal>();
   private readonly refusedWakeKeys = new Set<string>();
+  private readonly noticeKeys = new Set<string>();
   private cost: { readonly objectiveId: string; readonly total: number } | undefined;
   private planning: { readonly objectiveId: string; readonly key: string; readonly since: number } | undefined;
 
@@ -264,6 +274,25 @@ export class AutopilotRunner {
         case 'executing':
           await this.executingTick(store, state);
           return;
+        case 'blocked':
+          this.refusals.clear();
+          this.planning = undefined;
+          await this.noticeOnce(store, objective, blockedNoticeKey(objective), 'error', 'blocked', () =>
+            blockedNoticeText(objective, this.observations.settings()),
+          );
+          return;
+        case 'completed':
+          this.refusals.clear();
+          this.planning = undefined;
+          await this.noticeOnce(store, objective, completedNoticeKey(objective), 'info', 'completed', async () =>
+            completedNoticeText({
+              objective,
+              state,
+              baseTip: await branchTip(store.repoRoot, state.base),
+              now: this.observations.now(),
+            }),
+          );
+          return;
         default:
           this.refusals.clear();
           this.planning = undefined;
@@ -271,6 +300,25 @@ export class AutopilotRunner {
     } catch (error) {
       this.log?.warn('tower autopilot tick failed', { reasons: reasons.join(','), error: errorMessage(error) });
     }
+  }
+
+  private async noticeOnce(
+    store: TowerStore,
+    objective: TowerObjective,
+    key: string,
+    level: 'info' | 'error',
+    reason: string,
+    text: () => string | Promise<string>,
+  ): Promise<void> {
+    if (!this.active || this.noticeKeys.has(key) || (objective.autopilot?.wakeKeys ?? []).includes(key)) return;
+    this.noticeKeys.add(key);
+    this.effects.notifyHuman(await text(), level);
+    try {
+      await store.updateObjectiveAutopilot({ addWakeKeys: [key] });
+    } catch (error) {
+      this.log?.warn('tower autopilot could not record a human notice', { key, error: errorMessage(error) });
+    }
+    await this.activity(store, 'notify-human', { objective: objective.id, reason });
   }
 
   private async awaitingApproval(store: TowerStore, state: TowerState, objective: TowerObjective): Promise<void> {
@@ -411,7 +459,10 @@ export class AutopilotRunner {
       } else if (outcome.status === 'done' && launchedByCurrent.length === 0 && !commandsByCurrent) {
         this.refusals.delete(identity);
       }
-      if (outcome.status === 'done' && outcome.wakeKey !== undefined) wakeKeys.push(outcome.wakeKey);
+      if (outcome.status === 'done' && outcome.wakeKey !== undefined) {
+        wakeKeys.push(outcome.wakeKey);
+        this.noticeKeys.add(outcome.wakeKey);
+      }
       await this.activity(store, action.type, {
         ...actionDetails(action),
         result: outcome.status,

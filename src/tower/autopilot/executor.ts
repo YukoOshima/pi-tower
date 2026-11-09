@@ -7,11 +7,7 @@ import type {
   AutopilotValidatorRun,
 } from '../../autopilot/index.ts';
 import {
-  contractRevisionOf,
   findMilestone,
-  latestValidationRound,
-  objectiveMissions,
-  requiredValidationKinds,
   type TowerMilestone,
   type TowerMission,
   type TowerObjective,
@@ -19,13 +15,13 @@ import {
   type TowerState,
   type TowerStore,
 } from '../../protocol/index.ts';
-import {
-  budgetPausedNotice,
-  objectiveBlockedNotice,
-  objectiveCompletedNotice,
-} from '../../prompts/objectiveWakes.ts';
+import { budgetPausedNotice } from '../../prompts/objectiveWakes.ts';
 import { missionReviewerEntries, validationSettings, type AutopilotWorld } from './snapshot.ts';
 import {
+  blockedNoticeKey,
+  blockedNoticeText,
+  completedNoticeKey,
+  completedNoticeText,
   orchestratorWakeText,
   rebaseConflictResumePrompt,
   respawnReason,
@@ -320,20 +316,11 @@ async function completeObjective(execution: AutopilotExecution): Promise<Autopil
   const { store, effects, world } = execution;
   const completed = await store.completeObjective(validationSettings(world.settings));
   const state = await store.load();
-  const elapsedMs = elapsedSince(completed, world.now);
   effects.notifyHuman(
-    objectiveCompletedNotice({
-      objective: completed,
-      milestones: completed.milestones,
-      features: objectiveMissions({ ...state, objective: completed }),
-      base: state.base,
-      baseTip: world.baseTip,
-      ...(elapsedMs === undefined ? {} : { elapsedMs }),
-      costUsd: completed.usage?.costUsd ?? 0,
-    }),
+    completedNoticeText({ objective: completed, state, baseTip: world.baseTip, now: world.now }),
     'info',
   );
-  return { status: 'done', detail: `objective=${completed.id}` };
+  return { status: 'done', detail: `objective=${completed.id}`, wakeKey: completedNoticeKey(completed) };
 }
 
 function blockReason(world: AutopilotWorld, action: AutopilotBlockObjective): string {
@@ -342,36 +329,14 @@ function blockReason(world: AutopilotWorld, action: AutopilotBlockObjective): st
     : `${action.detail} — the autopilot cannot continue it`;
 }
 
-function blockedMilestoneFailures(objective: TowerObjective, milestone: TowerMilestone, world: AutopilotWorld): string[] {
-  const revision = contractRevisionOf(objective);
-  return requiredValidationKinds(objective, milestone, validationSettings(world.settings)).flatMap((kind) => {
-    const round = latestValidationRound(milestone, kind, milestone.validationCommit, revision);
-    return round?.verdict === 'fail' ? round.failures : [];
-  });
-}
-
 async function blockObjective(
   execution: AutopilotExecution,
   action: AutopilotBlockObjective,
 ): Promise<AutopilotActionOutcome> {
   const { store, effects, world } = execution;
-  const reason = blockReason(world, action);
-  const blocked = await store.blockObjective(reason);
-  const milestone =
-    action.reason === 'milestone-blocked'
-      ? blocked.milestones.find((candidate) => candidate.status === 'blocked')
-      : undefined;
-  const failures = milestone === undefined ? [] : blockedMilestoneFailures(blocked, milestone, world);
-  effects.notifyHuman(
-    objectiveBlockedNotice({
-      objective: blocked,
-      reason,
-      ...(milestone === undefined ? {} : { milestone }),
-      ...(failures.length === 0 ? {} : { failures }),
-    }),
-    'error',
-  );
-  return { status: 'done', detail: `reason=${action.reason}` };
+  const blocked = await store.blockObjective(blockReason(world, action));
+  effects.notifyHuman(blockedNoticeText(blocked, world.settings), 'error');
+  return { status: 'done', detail: `reason=${action.reason}`, wakeKey: blockedNoticeKey(blocked) };
 }
 
 async function pauseObjective(

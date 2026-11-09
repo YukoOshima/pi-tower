@@ -112,6 +112,10 @@ describe('a full simulated objective on a real repository', () => {
       await tower.actAll();
       tower.clock += 60_000;
     }
+    const noticesAtCompletion = tower.notices.length;
+    await runner.tick('after-completion');
+    await runner.whenIdle();
+    expect(tower.notices).toHaveLength(noticesAtCompletion);
     runner.stop();
     await runner.whenIdle();
 
@@ -178,7 +182,11 @@ describe('a full simulated objective on a real repository', () => {
     expect(activity).toMatch(/ autopilot commands milestone=MS1 commit=\w{7} result=submitted round=1 verdict=fail revision=0\n/);
     expect(activity).toMatch(/ autopilot complete-objective objective=O1 result=done detail=objective=O1\n/);
     expect(objective.autopilot?.wakeKeys).toEqual(
-      expect.arrayContaining(['validation-failed:MS1:commands-r1', expect.stringMatching(/^resume-review-findings:M2:/)]),
+      expect.arrayContaining([
+        'validation-failed:MS1:commands-r1',
+        expect.stringMatching(/^resume-review-findings:M2:/),
+        'completed-notice:O1',
+      ]),
     );
   }, 60_000);
 });
