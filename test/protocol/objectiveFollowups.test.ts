@@ -419,3 +419,30 @@ describe('contract revisions on roster entries and validation results', () => {
     expect(blocker).not.toContain('TowerSend');
   });
 });
+
+describe('refreshing objective limits', () => {
+  it('clears an optional limit given as null and keeps one left out', async () => {
+    await approvedObjective();
+    await store.updateObjective({ limits: { maxWallTimeMs: 60_000, maxCostUsd: 5 } });
+    const kept = await store.updateObjective({ limits: { maxValidationRounds: 4 } });
+    expect(kept.objective.limits).toEqual({
+      maxValidationRounds: 4,
+      maxFeatureAttempts: 3,
+      maxWallTimeMs: 60_000,
+      maxCostUsd: 5,
+    });
+
+    const cleared = await store.updateObjective({ limits: { maxWallTimeMs: null, maxCostUsd: null } });
+    expect(cleared.changes).toEqual(['limits']);
+    expect(cleared.objective.limits).toEqual({ maxValidationRounds: 4, maxFeatureAttempts: 3 });
+    expect(cleared.objective.status).toBe('executing');
+    expect((await readState()).objective!.limits).toEqual({ maxValidationRounds: 4, maxFeatureAttempts: 3 });
+
+    const before = await rawState();
+    expect((await store.updateObjective({ limits: { maxCostUsd: null } })).changes).toEqual([]);
+    expect(await rawState()).toBe(before);
+    await expect(store.updateObjective({ limits: { maxCostUsd: 0 } })).rejects.toThrow(
+      /maxCostUsd must be a positive number, got 0/,
+    );
+  });
+});

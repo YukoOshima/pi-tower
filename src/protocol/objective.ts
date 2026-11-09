@@ -460,8 +460,8 @@ export interface TowerMilestoneInput {
 export interface TowerObjectiveLimitsInput {
   readonly maxValidationRounds?: number;
   readonly maxFeatureAttempts?: number;
-  readonly maxWallTimeMs?: number;
-  readonly maxCostUsd?: number;
+  readonly maxWallTimeMs?: number | null;
+  readonly maxCostUsd?: number | null;
 }
 
 export interface TowerObjectiveDraftInput {
@@ -540,9 +540,14 @@ function buildLimits(
       base?.maxFeatureAttempts ??
       DEFAULT_MAX_FEATURE_ATTEMPTS,
   };
-  const wallTime = positiveInteger(input?.maxWallTimeMs, 'maxWallTimeMs') ?? base?.maxWallTimeMs;
+  const wallTimeInput = input?.maxWallTimeMs;
+  const wallTime =
+    wallTimeInput === null
+      ? undefined
+      : (positiveInteger(wallTimeInput, 'maxWallTimeMs') ?? base?.maxWallTimeMs);
   if (wallTime !== undefined) limits.maxWallTimeMs = wallTime;
-  const cost = positiveNumber(input?.maxCostUsd, 'maxCostUsd') ?? base?.maxCostUsd;
+  const costInput = input?.maxCostUsd;
+  const cost = costInput === null ? undefined : (positiveNumber(costInput, 'maxCostUsd') ?? base?.maxCostUsd);
   if (cost !== undefined) limits.maxCostUsd = cost;
   return limits;
 }
