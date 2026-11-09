@@ -1,6 +1,10 @@
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
 import { describe, expect, it } from 'vitest';
 
-import { parseLogLine } from './evidence.ts';
+import { parseLogLine, userMessages } from './evidence.ts';
 
 describe('parseLogLine', () => {
   it('takes everything after detail= as the detail, so commit=, kinds= and result= inside it never overwrite a real field', () => {
@@ -53,5 +57,29 @@ describe('parseLogLine', () => {
       verdict: 'pass',
       revision: '0',
     });
+  });
+});
+
+describe('userMessages', () => {
+  it('lists the user messages of a session transcript with their time and text, whatever the content shape', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'pi-tower-e2e-evidence-'));
+    try {
+      const path = join(dir, 'session.jsonl');
+      const lines = [
+        { type: 'session', timestamp: '2026-11-10T10:00:00.000Z', cwd: dir },
+        { type: 'message', timestamp: '2026-11-10T10:00:01.000Z', message: { role: 'user', content: [{ type: 'text', text: '# New mission — plan it with the human' }, { type: 'image', data: 'x' }] } },
+        { type: 'message', timestamp: '2026-11-10T10:00:02.000Z', message: { role: 'assistant', content: [{ type: 'text', text: 'Questions?' }] } },
+        { type: 'message', timestamp: '2026-11-10T10:00:03.000Z', message: { role: 'user', content: 'My answers' } },
+        { type: 'message', timestamp: '2026-11-10T10:00:04.000Z', message: { role: 'custom', customType: 'tower-agent-notification', content: 'done' } },
+      ];
+      writeFileSync(path, `${lines.map((line) => JSON.stringify(line)).join('\n')}\nnot json\n`);
+      expect(userMessages(path)).toEqual([
+        { at: Date.parse('2026-11-10T10:00:01.000Z'), text: '# New mission — plan it with the human' },
+        { at: Date.parse('2026-11-10T10:00:03.000Z'), text: 'My answers' },
+      ]);
+      expect(userMessages(join(dir, 'missing.jsonl'))).toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

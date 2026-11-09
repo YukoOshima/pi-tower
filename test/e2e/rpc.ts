@@ -44,6 +44,64 @@ export interface PiRpcOptions {
   readonly echo: boolean;
 }
 
+export type PiDialogAnswer = { readonly cancelled: true } | { readonly value: string } | { readonly confirmed: boolean };
+
+export interface PiDialogRequest {
+  readonly id: string;
+  readonly method: string;
+  readonly title: string;
+  readonly message: string | undefined;
+  readonly options: readonly string[];
+}
+
+export interface PiDialog extends PiDialogRequest {
+  readonly index: number;
+  readonly answer: PiDialogAnswer;
+}
+
+export type PiDialogResponder = (request: PiDialogRequest) => PiDialogAnswer | undefined;
+
+export interface PiStatusUpdate {
+  readonly index: number;
+  readonly text: string | undefined;
+}
+
+export interface PiWidgetUpdate {
+  readonly index: number;
+  readonly lines: readonly string[] | undefined;
+  readonly plain: boolean;
+  readonly placement: string | undefined;
+}
+
+const DIALOG_METHODS: readonly string[] = ['select', 'confirm', 'input', 'editor'];
+
+export const CANCEL_DIALOG: PiDialogAnswer = { cancelled: true };
+
+export function dialogRequestOf(event: PiEvent): PiDialogRequest | undefined {
+  if (event.type !== 'extension_ui_request' || !DIALOG_METHODS.includes(String(event.method))) return undefined;
+  return {
+    id: String(event.id),
+    method: String(event.method),
+    title: typeof event.title === 'string' ? event.title : '',
+    message: typeof event.message === 'string' ? event.message : undefined,
+    options: Array.isArray(event.options) ? event.options.map(String) : [],
+  };
+}
+
+export function describeDialogAnswer(answer: PiDialogAnswer): string {
+  if ('value' in answer) return `chose "${answer.value}"`;
+  if ('confirmed' in answer) return answer.confirmed ? 'confirmed' : 'declined';
+  return 'cancelled';
+}
+
+export function chooseOption(position: number, applies: (request: PiDialogRequest) => boolean = () => true): PiDialogResponder {
+  return (request) => {
+    if (request.method !== 'select' || !applies(request)) return undefined;
+    const option = request.options[position];
+    return option === undefined ? undefined : { value: option };
+  };
+}
+
 interface Waiter {
   readonly match: (event: PiEvent) => boolean;
   readonly resolve: (event: PiEvent) => void;
@@ -79,7 +137,9 @@ export function sleep(ms: number): Promise<void> {
 
 export class PiRpc {
   readonly events: PiEvent[] = [];
+  readonly dialogs: PiDialog[] = [];
   readonly options: PiRpcOptions;
+  dialogResponder: PiDialogResponder | undefined;
   stderr = '';
   running = false;
   lastEventAt = Date.now();
@@ -174,10 +234,8 @@ export class PiRpc {
     this.describe(event);
     if (event.type === 'agent_start') this.running = true;
     if (event.type === 'agent_settled') this.running = false;
-    if (event.type === 'extension_ui_request' && ['select', 'confirm', 'input', 'editor'].includes(String(event.method))) {
-      this.log(`auto-cancel dialog ${String(event.method)}: ${clip(String(event.title ?? event.message ?? ''))}`);
-      this.write({ type: 'extension_ui_response', id: event.id, cancelled: true });
-    }
+    const dialog = dialogRequestOf(event);
+    if (dialog !== undefined) this.answerDialog(dialog, this.events.length - 1);
     for (const waiter of [...this.waiters]) {
       if (waiter.match(event)) {
         this.waiters = this.waiters.filter((candidate) => candidate !== waiter);
@@ -186,11 +244,25 @@ export class PiRpc {
     }
   }
 
+  private answerDialog(request: PiDialogRequest, index: number): void {
+    let answer = CANCEL_DIALOG;
+    try {
+      answer = this.dialogResponder?.(request) ?? CANCEL_DIALOG;
+    } catch (error) {
+      this.log(`dialog responder failed (${error instanceof Error ? error.message : String(error)}) — cancelling`);
+    }
+    this.dialogs.push({ ...request, index, answer });
+    const options = request.options.length === 0 ? '' : ` options [${request.options.map((option) => `"${option}"`).join(', ')}]`;
+    this.log(`dialog ${request.method}: ${clip(request.title.length > 0 ? request.title : (request.message ?? ''))}${options} — ${describeDialogAnswer(answer)}`);
+    this.write({ type: 'extension_ui_response', id: request.id, ...answer });
+  }
+
   private describe(event: PiEvent): void {
     switch (event.type) {
       case 'extension_ui_request':
         if (event.method === 'notify') this.log(`[notify:${String(event.notifyType ?? 'info')}] ${clip(String(event.message), 1200)}`);
         else if (event.method === 'setStatus') this.log(`[status ${String(event.statusKey)}] ${String(event.statusText ?? '(cleared)')}`);
+        else if (event.method === 'setWidget') this.log(`[widget ${String(event.widgetKey)}] ${Array.isArray(event.widgetLines) ? clip(event.widgetLines.map(String).join(' ⏎ '), 900) : '(cleared)'}`);
         return;
       case 'tool_execution_start':
         this.log(`[tool ▶] ${String(event.toolName)} ${clip(JSON.stringify(event.args ?? {}), 400)}`);
@@ -382,9 +454,23 @@ export class PiRpc {
   }
 
   statusTexts(key: string): (string | undefined)[] {
-    return this.events
-      .filter((event) => event.type === 'extension_ui_request' && event.method === 'setStatus' && event.statusKey === key)
-      .map((event) => event.statusText as string | undefined);
+    return this.statusUpdates(key).map((update) => update.text);
+  }
+
+  statusUpdates(key: string, fromIndex = 0): PiStatusUpdate[] {
+    return this.events.flatMap((event, index): PiStatusUpdate[] => {
+      if (index < fromIndex || event.type !== 'extension_ui_request' || event.method !== 'setStatus' || event.statusKey !== key) return [];
+      return [{ index, text: typeof event.statusText === 'string' ? event.statusText : undefined }];
+    });
+  }
+
+  widgetUpdates(key: string, fromIndex = 0): PiWidgetUpdate[] {
+    return this.events.flatMap((event, index): PiWidgetUpdate[] => {
+      if (index < fromIndex || event.type !== 'extension_ui_request' || event.method !== 'setWidget' || event.widgetKey !== key) return [];
+      const raw: unknown = event.widgetLines;
+      const lines = Array.isArray(raw) && raw.every((line) => typeof line === 'string') ? (raw as string[]) : undefined;
+      return [{ index, lines, plain: raw === undefined || lines !== undefined, placement: typeof event.widgetPlacement === 'string' ? event.widgetPlacement : undefined }];
+    });
   }
 
   async close(graceMs = 20_000): Promise<void> {

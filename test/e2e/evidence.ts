@@ -54,6 +54,7 @@ export interface MilestoneRecord {
   readonly title: string;
   readonly order: number;
   readonly status: string;
+  readonly validation?: { readonly scrutiny: boolean; readonly userTesting: boolean; readonly commands: readonly string[] };
   readonly rounds: readonly ValidationRoundRecord[];
   readonly validationCommit?: string;
   readonly passedAt?: string;
@@ -265,6 +266,18 @@ export function summarizeTranscript(path: string): TranscriptSummary {
     }
   }
   return summary;
+}
+
+export interface TranscriptMessage {
+  readonly at: number;
+  readonly text: string;
+}
+
+export function userMessages(path: string): TranscriptMessage[] {
+  return readJsonl(path).flatMap((line): TranscriptMessage[] => {
+    if (line.type !== 'message' || line.message?.role !== 'user') return [];
+    return [{ at: Date.parse(String(line.timestamp ?? '')), text: contentText(line.message.content) }];
+  });
 }
 
 export function agentTranscriptPath(repo: string, agentId: string): string | undefined {

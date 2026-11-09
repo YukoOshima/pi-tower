@@ -3,10 +3,25 @@ import { createHash } from 'node:crypto';
 import { existsSync, readdirSync, readFileSync, readlinkSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 
-import { distinct, frontmatter, logEntries, readJsonl, summarizeTranscript, towerState, validationFiles, type LogEntry, type ObjectiveRecord, type RosterEntry, type TowerState } from './evidence.ts';
+import {
+  agentTranscriptPath,
+  distinct,
+  frontmatter,
+  logEntries,
+  readJsonl,
+  summarizeTranscript,
+  towerState,
+  validationFiles,
+  type LogEntry,
+  type MilestoneRecord,
+  type MissionRecord,
+  type ObjectiveRecord,
+  type RosterEntry,
+  type TowerState,
+} from './evidence.ts';
 import { clip, sleep, type PiRpc } from './rpc.ts';
 import { recordAgentUsage, roleConfig, type ScenarioContext } from './scenario.ts';
-import type { E2eSettings } from './settings.ts';
+import type { E2eSettings, RoleModel } from './settings.ts';
 import { createRepo, git, tryGit } from './workspace.ts';
 
 export const TEXTKIT_FILES: Readonly<Record<string, string>> = {
@@ -84,12 +99,17 @@ export interface ObjectiveLimits {
   readonly skipUserTesting?: boolean;
 }
 
-export function objectiveConfig(settings: E2eSettings, limits: ObjectiveLimits): Record<string, unknown> {
-  return roleConfig(settings, {
-    validator: settings.validator.spec,
-    maxRunningAgents: 4,
+export const OBJECTIVE_MAX_RUNNING_AGENTS = 4;
+
+export function objectiveSettingsConfig(limits: ObjectiveLimits): Record<string, unknown> {
+  return {
+    maxRunningAgents: OBJECTIVE_MAX_RUNNING_AGENTS,
     objective: { maxValidationRounds: 3, maxFeatureAttempts: 3, ...limits },
-  });
+  };
+}
+
+export function objectiveConfig(settings: E2eSettings, limits: ObjectiveLimits): Record<string, unknown> {
+  return roleConfig(settings, { validator: settings.validator.spec, ...objectiveSettingsConfig(limits) });
 }
 
 export function writeText(path: string, text: string): string {
@@ -237,6 +257,15 @@ export async function planToApproval(ctx: ScenarioContext, rpc: PiRpc, repo: str
 
 export function autopilotEntries(repo: string, action?: string): LogEntry[] {
   return logEntries(repo).filter((entry) => entry.actor === 'autopilot' && (action === undefined || entry.action === action));
+}
+
+export async function waitForAutopilotEntry(repo: string, action: string, timeoutMs: number, pollMs = 500): Promise<LogEntry | undefined> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const entry = autopilotEntries(repo, action)[0];
+    if (entry !== undefined || Date.now() > deadline) return entry;
+    await sleep(pollMs);
+  }
 }
 
 export const VALIDATION_START_LATENCY_LIMIT_MS = 15_000;
@@ -420,7 +449,7 @@ function lsofCwds(lsof: string): Map<number, string> | undefined {
   return cwds;
 }
 
-function realpathOr(path: string): string {
+export function realpathOr(path: string): string {
   try {
     return realpathSync(path);
   } catch {
@@ -466,6 +495,80 @@ export function killProcesses(processes: readonly ProcessInfo[]): void {
 export function toolCallCount(path: string | undefined): number {
   if (path === undefined) return 0;
   return readJsonl(path).filter((line) => line.type === 'message' && line.message?.role === 'assistant').flatMap((line) => (Array.isArray(line.message?.content) ? line.message.content : [])).filter((block: { type?: string }) => block?.type === 'toolCall').length;
+}
+
+export interface FeatureWindow {
+  readonly feature: string;
+  readonly milestone: string;
+  readonly worker: string;
+  readonly firstAt: number;
+  readonly lastAt: number;
+}
+
+export function featureWorkerWindows(repo: string, state: TowerState, features: readonly MissionRecord[]): FeatureWindow[] {
+  return features.flatMap((feature) =>
+    state.roster.agents
+      .filter((agent) => agent.kind === 'worker' && agent.missionId === feature.id)
+      .flatMap((agent): FeatureWindow[] => {
+        const path = agentTranscriptPath(repo, agent.agentId);
+        if (path === undefined) return [];
+        const summary = summarizeTranscript(path);
+        if (!Number.isFinite(summary.firstAt) || summary.lastAt <= summary.firstAt) return [];
+        return [{ feature: feature.id, milestone: feature.milestone ?? '', worker: agent.name, firstAt: summary.firstAt, lastAt: summary.lastAt }];
+      }),
+  );
+}
+
+export interface ConcurrentFeatures {
+  readonly a: FeatureWindow;
+  readonly b: FeatureWindow;
+  readonly overlapMs: number;
+}
+
+export function concurrentFeatures(windows: readonly FeatureWindow[]): ConcurrentFeatures[] {
+  const pairs: ConcurrentFeatures[] = [];
+  windows.forEach((a, index) => {
+    for (const b of windows.slice(index + 1)) {
+      if (a.feature === b.feature || a.milestone !== b.milestone) continue;
+      const overlapMs = Math.min(a.lastAt, b.lastAt) - Math.max(a.firstAt, b.firstAt);
+      if (overlapMs > 0) pairs.push({ a, b, overlapMs });
+    }
+  });
+  return pairs;
+}
+
+export function describeWindow(window: FeatureWindow): string {
+  return `${window.worker} (${window.feature}, ${window.milestone}): ${new Date(window.firstAt).toISOString()} → ${new Date(window.lastAt).toISOString()}`;
+}
+
+export interface ValidationSkips {
+  readonly skipScrutiny?: boolean;
+  readonly skipUserTesting?: boolean;
+}
+
+export function requiredValidationKinds(objective: ObjectiveRecord, milestone: MilestoneRecord, skips: ValidationSkips = {}): string[] {
+  const validation = milestone.validation;
+  const final = [...objective.milestones].sort((a, b) => a.order - b.order).at(-1)?.id === milestone.id;
+  const commands = [...(validation?.commands ?? []), ...(final ? objective.acceptanceCommands : [])];
+  return [
+    ...(validation?.scrutiny !== false && skips.skipScrutiny !== true ? ['scrutiny'] : []),
+    ...(validation?.userTesting !== false && skips.skipUserTesting !== true ? ['user-testing'] : []),
+    ...(commands.length > 0 ? ['commands'] : []),
+  ];
+}
+
+export type AgentKindModels = Readonly<Record<'worker' | 'reviewer' | 'validator', RoleModel>>;
+
+export function checkRosterModels(ctx: Pick<ScenarioContext, 'report'>, state: TowerState | undefined, expected: AgentKindModels, requireValidator: boolean): void {
+  const kinds = Object.keys(expected);
+  const agents = (state?.roster.agents ?? []).filter((agent) => kinds.includes(agent.kind));
+  const wrong = agents.filter((agent) => agent.model !== expected[agent.kind as keyof AgentKindModels].model);
+  const count = (kind: string): number => agents.filter((agent) => agent.kind === kind).length;
+  ctx.report.check(
+    `every spawned agent runs on its role model (workers ${expected.worker.model}, reviewers ${expected.reviewer.model}, validators ${expected.validator.model})`,
+    wrong.length === 0 && count('worker') > 0 && count('reviewer') > 0 && (!requireValidator || count('validator') > 0),
+    agents.length === 0 ? '(no worker, reviewer or validator in the roster)' : agents.map((agent) => `${agent.name} (${agent.kind}) model=${String(agent.model)}${wrong.includes(agent) ? ' — WRONG' : ''}`),
+  );
 }
 
 export function isAncestor(repo: string, ancestor: string, descendant: string): boolean {
