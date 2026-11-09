@@ -14,6 +14,7 @@ import {
   processesUnder,
   recordObjectiveUsage,
   writeText,
+  type ProcessScan,
 } from '../objective.ts';
 import { clip, sleep } from '../rpc.ts';
 import type { ScenarioDefinition } from '../scenario.ts';
@@ -83,6 +84,7 @@ export const s16Headless: ScenarioDefinition = {
       child.on('error', (error) => resolve({ code: null, signal: null, stdout, stderr: `${stderr}\n${error.message}` }));
     });
     report.note(`pi-tower run exited with ${String(result.code ?? result.signal)} after ${String(Math.round((Date.now() - started) / 1000))}s`);
+    let scan: ProcessScan | undefined;
     try {
       const state = towerState(repo);
       const objective = state?.objective;
@@ -134,14 +136,20 @@ export const s16Headless: ScenarioDefinition = {
       const agentDirAfter = hashTree(settings.agentDir);
       report.check(`${settings.agentDir} is unchanged (sha256 over every file before/after)`, agentDirBefore === agentDirAfter, `before ${agentDirBefore.slice(0, 16)}… after ${agentDirAfter.slice(0, 16)}…`);
       await sleep(3000);
-      const leftovers = processesUnder(dir);
-      report.check(
-        'no pi or agent process is left behind',
-        leftovers.length === 0,
-        leftovers.length === 0 ? `no process has its cwd or command line under ${dir}` : leftovers.map((info) => `pid ${String(info.pid)} cwd ${info.cwd}: ${clip(info.command, 200)}`),
-      );
-      killProcesses(leftovers);
+      scan = processesUnder(dir);
+      if (scan.applicable) {
+        report.check(
+          'no pi or agent process is left behind',
+          scan.processes.length === 0,
+          scan.processes.length === 0
+            ? `no process has its cwd or command line under ${dir} (checked ${scan.method})`
+            : [...scan.processes.map((info) => `pid ${String(info.pid)} cwd ${info.cwd}: ${clip(info.command, 200)}`), `(checked ${scan.method})`],
+        );
+      } else {
+        report.note(`the leftover-process check is not applicable on this host: ${scan.method}`);
+      }
     } finally {
+      killProcesses((scan ?? processesUnder(dir)).processes);
       recordObjectiveUsage(ctx, repo, pi.sessions);
     }
   },
