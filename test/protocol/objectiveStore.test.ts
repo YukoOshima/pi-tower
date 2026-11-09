@@ -12,6 +12,7 @@ import {
   TowerObjectiveCompletionError,
   TowerProtocolError,
   TowerStore,
+  parseFrontmatter,
 } from '../../src/protocol/index.ts';
 import type { TowerState } from '../../src/protocol/index.ts';
 
@@ -636,5 +637,203 @@ describe('validation worktrees', () => {
     expect(worktrees).toContain(live.worktree);
     expect(worktrees).not.toContain(dirty.worktree);
     expect(worktrees).not.toContain(idle.worktree);
+  });
+});
+
+describe('submitValidation', () => {
+  async function registerValidator(
+    name: string,
+    kind: 'scrutiny' | 'user-testing' | 'commands',
+    validatedCommit?: string,
+  ): Promise<void> {
+    await store.registerAgent({
+      name,
+      agentId: `agent-${name}`,
+      kind: 'validator',
+      milestoneId: 'MS1',
+      validationKind: kind,
+      validationRound: 1,
+      ...(validatedCommit === undefined ? {} : { validatedCommit }),
+      spawnedAt: '2026-04-04T00:00:00.000Z',
+    });
+  }
+
+  it('authorizes only the registered validator, or the tower for commands', async () => {
+    const tip = await validatingMilestone();
+    await registerValidator('val-scrutiny', 'scrutiny', tip);
+    await store.registerAgent({ name: 'w-1', agentId: 'agent-w-1', kind: 'worker', missionId: 'M1', spawnedAt: '2026-04-04T00:00:00.000Z' });
+    const pass = { milestone: 'MS1', kind: 'scrutiny' as const, verdict: 'pass' as const };
+    await expect(store.submitValidation('stranger', pass)).rejects.toThrow(/not the validator registered for MS1 scrutiny/);
+    await expect(store.submitValidation('w-1', pass)).rejects.toThrow(/not the validator registered/);
+    await expect(store.submitValidation('val-scrutiny', { ...pass, kind: 'user-testing' })).rejects.toThrow(
+      /not the validator registered for MS1 user-testing/,
+    );
+    await expect(store.submitValidation('tower', pass)).rejects.toThrow(/tower records only the mechanical commands/);
+    await expect(store.submitValidation('tower', { ...pass, kind: 'commands' })).rejects.toThrow(/must state the commit/);
+    await expect(store.submitValidation('val-scrutiny', { ...pass, validatedCommit: 'f'.repeat(40) })).rejects.toThrow(
+      /was checked out at/,
+    );
+    await expect(store.submitValidation('val-scrutiny', { ...pass, milestone: 'MS9' })).rejects.toThrow(/no milestone "MS9"/);
+    await expect(store.submitValidation('val-scrutiny', { ...pass, verdict: 'meh' as 'pass' })).rejects.toThrow(
+      /verdict must be pass \| fail/,
+    );
+    await expect(store.submitValidation('val-scrutiny', { ...pass, kind: 'lint' as 'scrutiny' })).rejects.toThrow(
+      /kind must be scrutiny/,
+    );
+    await expect(store.submitValidation('val-scrutiny', { ...pass, verdict: 'fail', failures: [' '] })).rejects.toThrow(
+      /must list at least one failure/,
+    );
+    await expect(store.submitValidation('val-scrutiny', { ...pass, failures: ['x'] })).rejects.toThrow(/lists no failures/);
+    expect((await readState()).objective!.milestones[0]!.rounds).toEqual([]);
+  });
+
+  it('stores the report, appends the round, notifies the tower and passes the milestone once every kind passed', async () => {
+    const tip = await validatingMilestone();
+    await registerValidator('val-scrutiny', 'scrutiny', tip);
+    await registerValidator('val-qa', 'user-testing', tip);
+    const first = await store.submitValidation('val-scrutiny', {
+      milestone: 'MS1',
+      kind: 'scrutiny',
+      verdict: 'pass',
+      checks: ['npm test green', ' '],
+      evidence: 'diff reviewed against the tasks',
+    });
+    expect(first.round).toEqual({
+      round: 1,
+      kind: 'scrutiny',
+      validator: 'val-scrutiny',
+      validatedCommit: tip,
+      verdict: 'pass',
+      failures: [],
+      file: '.tower/comms/validations/validation-ms1-scrutiny-val-scrutiny-r1.md',
+      date: expect.any(String),
+    });
+    expect(first.milestone.status).toBe('validating');
+    expect(first.notificationError).toBeUndefined();
+    const document = parseFrontmatter(await readFile(store.abs(first.round.file), 'utf8'));
+    expect(document.fields).toEqual({
+      milestone: 'MS1',
+      kind: 'scrutiny',
+      validator: 'val-scrutiny',
+      round: '1',
+      verdict: 'pass',
+      validatedCommit: tip,
+      date: first.round.date,
+    });
+    expect(document.body).toBe(
+      '## Failures\n\n- (none)\n\n## Checks\n\n- [x] npm test green\n\n## Evidence\n\ndiff reviewed against the tasks',
+    );
+    expect(first.message?.item).toMatchObject({
+      from: 'val-scrutiny',
+      to: 'tower',
+      subject: 'validation MS1 scrutiny r1: pass',
+      scope: 'MS1',
+      action: 'validation-result',
+    });
+    expect(first.message?.item.body).toContain('Milestone MS1 is now validating.');
+    expect(await activityLog()).toContain(
+      `val-scrutiny validation.submit milestone=MS1 kind=scrutiny round=1 verdict=pass commit=${tip.slice(0, 7)} status=validating ref=${first.round.file}`,
+    );
+    await expect(
+      store.submitValidation('val-scrutiny', { milestone: 'MS1', kind: 'scrutiny', verdict: 'pass' }),
+    ).rejects.toThrow(/already reported its MS1 scrutiny round/);
+
+    const second = await store.submitValidation('val-qa', { milestone: 'MS1', kind: 'user-testing', verdict: 'pass' });
+    expect(second.milestone).toMatchObject({ status: 'passed', passedAt: second.round.date });
+    const state = await readState();
+    expect(state.objective!.milestones[0]!.rounds.map((round) => [round.kind, round.round, round.verdict])).toEqual([
+      ['scrutiny', 1, 'pass'],
+      ['user-testing', 1, 'pass'],
+    ]);
+    const unread = await store.readUnreadInbox('tower', 10);
+    expect(unread.map((item) => item.subject)).toEqual(
+      expect.arrayContaining(['validation MS1 scrutiny r1: pass', 'validation MS1 user-testing r1: pass']),
+    );
+  });
+
+  it('fails the milestone on a failing round and lists the failures', async () => {
+    const tip = await validatingMilestone();
+    await registerValidator('val-scrutiny', 'scrutiny', tip);
+    const result = await store.submitValidation('val-scrutiny', {
+      milestone: 'MS1',
+      kind: 'scrutiny',
+      verdict: 'fail',
+      failures: ['tests fail on empty input', 'task 2 not implemented'],
+    });
+    expect(result.milestone.status).toBe('failed');
+    expect(result.objective.status).toBe('executing');
+    expect(result.message?.item.subject).toBe('validation MS1 scrutiny r1: fail (2 failures)');
+    expect(result.message?.item.body).toContain('- tests fail on empty input\n- task 2 not implemented');
+    expect(await readFile(store.abs(result.round.file), 'utf8')).toContain(
+      '## Failures\n\n- tests fail on empty input\n- task 2 not implemented',
+    );
+  });
+
+  it('blocks the milestone and the objective when failed rounds reach maxValidationRounds', async () => {
+    const tip = await validatingMilestone();
+    await mutateState((state) => {
+      state.objective!.limits.maxValidationRounds = 2;
+    });
+    await registerValidator('val-a', 'user-testing', tip);
+    await registerValidator('val-b', 'user-testing', tip);
+    const failing = { milestone: 'MS1', kind: 'user-testing' as const, verdict: 'fail' as const, failures: ['crash'] };
+    expect((await store.submitValidation('val-a', failing)).milestone.status).toBe('failed');
+    const result = await store.submitValidation('val-b', failing);
+    expect(result.round.round).toBe(2);
+    expect(result.milestone.status).toBe('blocked');
+    expect(result.objective).toMatchObject({
+      status: 'blocked',
+      blockedReason: 'milestone MS1 "Core" failed user-testing validation 2 times — maxValidationRounds is 2',
+    });
+    expect(result.message?.item.body).toContain('Objective O1 is now blocked');
+    expect(await activityLog()).toContain('status=blocked objective=blocked');
+  });
+
+  it('records the tower commands round on an explicit commit', async () => {
+    const tip = await validatingMilestone();
+    await mutateState((state) => {
+      state.objective!.milestones[0]!.validation = { scrutiny: false, userTesting: false, commands: ['npm test'] };
+    });
+    const result = await store.submitValidation(
+      'tower',
+      { milestone: 'MS1', kind: 'commands', verdict: 'pass', checks: ['npm test (exit 0)'], validatedCommit: tip.slice(0, 9) },
+      { skipUserTesting: true },
+    );
+    expect(result.round).toMatchObject({ validator: 'tower', validatedCommit: tip, round: 1 });
+    expect(result.round.file).toBe('.tower/comms/validations/validation-ms1-commands-tower-r1.md');
+    expect(result.milestone.status).toBe('passed');
+    expect(result.message?.item).toMatchObject({ from: 'tower', to: 'tower', action: 'validation-result' });
+  });
+
+  it('records a round stamped on another commit without letting it decide the milestone', async () => {
+    const tip = await validatingMilestone();
+    await commitFile(repo, 'next.txt', 'next\n', 'next');
+    const next = await git(repo, 'rev-parse', 'main');
+    await store.startMilestoneValidation('MS1', next);
+    await registerValidator('val-old', 'scrutiny', tip);
+    const result = await store.submitValidation('val-old', {
+      milestone: 'MS1',
+      kind: 'scrutiny',
+      verdict: 'fail',
+      failures: ['old failure'],
+    });
+    expect(result.round.validatedCommit).toBe(tip);
+    expect(result.milestone.status).toBe('validating');
+    expect(result.message?.item.body).toContain(
+      `This round was recorded but does not decide the milestone: it was validating and validates ${next.slice(0, 7)}.`,
+    );
+  });
+
+  it('refuses validations for a pending milestone or a completed objective', async () => {
+    await approvedObjective();
+    await expect(
+      store.submitValidation('tower', { milestone: 'MS2', kind: 'commands', verdict: 'pass', validatedCommit: 'HEAD' }),
+    ).rejects.toThrow(/MS2 is pending/);
+    await mutateState((state) => {
+      state.objective!.status = 'completed';
+    });
+    await expect(
+      store.submitValidation('tower', { milestone: 'MS1', kind: 'commands', verdict: 'pass', validatedCommit: 'HEAD' }),
+    ).rejects.toThrow(/validations are closed/);
   });
 });

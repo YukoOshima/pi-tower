@@ -51,6 +51,7 @@ import type { TowerMissionGateResult, TowerMissionGitObservations } from './miss
 import {
   applyAutopilotPatch,
   applyObjectiveUpdate,
+  applyValidationRound,
   buildObjective,
   currentMilestone,
   estimateObjectiveRuns,
@@ -66,6 +67,7 @@ import {
   sortedMilestones,
   TOWER_VALIDATION_KINDS,
   TowerObjectiveCompletionError,
+  validationResultSubject,
 } from './objective.ts';
 import type {
   TowerObjectiveAutopilotPatch,
@@ -73,6 +75,7 @@ import type {
   TowerObjectiveEvaluation,
   TowerObjectiveUpdateInput,
   TowerObjectiveUpdateResult,
+  TowerValidationOutcome,
   TowerValidationSettings,
 } from './objective.ts';
 import {
@@ -89,6 +92,7 @@ import {
   TOWER_NAME,
   TOWER_ROOT,
   VALIDATION_WORKTREE_PREFIX,
+  VALIDATIONS_DIR,
   WORKTREES_DIR,
   isReservedTowerAgentName,
   dateDash,
@@ -99,6 +103,7 @@ import {
   reviewFileName,
   slugify,
   targetSlug,
+  validationFileName,
   validationWorktreeName,
 } from './paths.ts';
 import type {
@@ -116,6 +121,8 @@ import type {
   TowerRosterEntry,
   TowerState,
   TowerValidationKind,
+  TowerValidationRound,
+  TowerValidationVerdict,
 } from './types.ts';
 
 export { TowerProtocolError } from './errors.ts';
@@ -211,6 +218,25 @@ export interface TowerReviewInput {
 export interface TowerReviewResult {
   readonly review: TowerReviewInfo;
   readonly storedMessages: readonly TowerSendResult[];
+  readonly notificationError?: string;
+  readonly activityLogError?: string;
+}
+
+export interface TowerValidationInput {
+  readonly milestone: string;
+  readonly kind: TowerValidationKind;
+  readonly verdict: TowerValidationVerdict;
+  readonly failures?: readonly string[];
+  readonly checks?: readonly string[];
+  readonly evidence?: string;
+  readonly validatedCommit?: string;
+}
+
+export interface TowerValidationResult {
+  readonly round: TowerValidationRound;
+  readonly milestone: TowerMilestone;
+  readonly objective: TowerObjective;
+  readonly message?: TowerSendResult;
   readonly notificationError?: string;
   readonly activityLogError?: string;
 }
@@ -1975,6 +2001,7 @@ export class TowerStore {
     callerName: string,
     input: TowerSendInput,
     state: TowerState,
+    options: { readonly allowSelf?: boolean } = {},
   ): Promise<TowerSendResult> {
     const to = input.to.trim();
     if (to !== TOWER_NAME && to !== BROADCAST_NAME && this.findAgent(state, to) === undefined) {
@@ -1983,7 +2010,7 @@ export class TowerStore {
         `unknown recipient "${to}" — address a roster agent, ${TOWER_NAME}, or ${BROADCAST_NAME} (known: ${known.join(', ')})`,
       );
     }
-    if (to === callerName) {
+    if (to === callerName && options.allowSelf !== true) {
       throw new TowerProtocolError('cannot send an inbox message to yourself');
     }
 
@@ -3404,6 +3431,180 @@ export class TowerStore {
     return { rel, spawnBase };
   }
 
+  async submitValidation(
+    callerName: string,
+    input: TowerValidationInput,
+    settings: TowerValidationSettings = {},
+  ): Promise<TowerValidationResult> {
+    if (!TOWER_VALIDATION_KINDS.includes(input.kind)) {
+      throw new TowerProtocolError(
+        `validation kind must be ${TOWER_VALIDATION_KINDS.join(' | ')}, got "${String(input.kind)}"`,
+      );
+    }
+    if (input.verdict !== 'pass' && input.verdict !== 'fail') {
+      throw new TowerProtocolError(`validation verdict must be pass | fail, got "${String(input.verdict)}"`);
+    }
+    const failures = (input.failures ?? []).map((item) => item.trim()).filter((item) => item.length > 0);
+    if (input.verdict === 'fail' && failures.length === 0) {
+      throw new TowerProtocolError(
+        'a fail verdict must list at least one failure — the orchestrator plans fix features from them',
+      );
+    }
+    if (input.verdict === 'pass' && failures.length > 0) {
+      throw new TowerProtocolError(
+        'a pass verdict lists no failures — use verdict fail, or move non-blocking remarks into the evidence',
+      );
+    }
+    return this.withStateLock(async () => {
+      const state = await this.load();
+      const objective = this.requireObjective(state);
+      if (objective.status === 'completed') {
+        throw new TowerProtocolError(`objective ${objective.id} is completed — validations are closed`);
+      }
+      const milestone = findMilestone(objective, input.milestone);
+      if (milestone === undefined) {
+        throw new TowerProtocolError(`objective ${objective.id} has no milestone "${input.milestone}"`);
+      }
+      if (milestone.status === 'pending') {
+        throw new TowerProtocolError(`milestone ${milestone.id} is pending — its validation has not started`);
+      }
+      const validatedCommit = await this.resolveCommit(
+        this.validationCommitFor(state, callerName, input, milestone),
+      );
+      const round = nextValidationRound(milestone, input.kind);
+      const date = new Date().toISOString();
+      await mkdir(this.abs(VALIDATIONS_DIR), { recursive: true });
+      const frontmatter = renderFrontmatter({
+        milestone: milestone.id,
+        kind: input.kind,
+        validator: callerName,
+        round: String(round),
+        verdict: input.verdict,
+        validatedCommit,
+        date,
+      });
+      const file = await this.writeUnique(
+        join(
+          VALIDATIONS_DIR,
+          validationFileName({ milestone: milestone.id, kind: input.kind, validator: callerName, round }),
+        ),
+        `${frontmatter}\n\n${validationDocumentBody(failures, input.checks ?? [], input.evidence ?? '')}\n`,
+      );
+      const record: TowerValidationRound = {
+        round,
+        kind: input.kind,
+        validator: callerName,
+        validatedCommit,
+        verdict: input.verdict,
+        failures,
+        file,
+        date,
+      };
+      const outcome = applyValidationRound(objective, milestone, record, settings);
+      await this.save(state);
+      await this.renderMissionsIndex(state);
+      let activityLogError: string | undefined;
+      try {
+        await this.appendLog(
+          callerName,
+          'validation.submit',
+          {
+            milestone: milestone.id,
+            kind: input.kind,
+            round,
+            verdict: input.verdict,
+            commit: validatedCommit.slice(0, 7),
+            status: milestone.status,
+            objective: outcome.objectiveBlocked ? objective.status : undefined,
+          },
+          file,
+        );
+      } catch (error) {
+        activityLogError = `validation ${file} was stored, but appending its validation.submit activity log failed: ${error instanceof Error ? error.message : String(error)}`;
+      }
+      let message: TowerSendResult | undefined;
+      let notificationError: string | undefined;
+      try {
+        message = await this.withInboxPublicationLock(() =>
+          this.sendDetailedSnapshot(
+            callerName,
+            {
+              to: TOWER_NAME,
+              subject: validationResultSubject(milestone.id, record),
+              body: validationResultBody(objective, milestone, record, outcome),
+              scope: milestone.id,
+              action: 'validation-result',
+            },
+            state,
+            { allowSelf: true },
+          ),
+        );
+      } catch (error) {
+        notificationError = `validation ${file} was stored, but storing its validation-result notification failed: ${error instanceof Error ? error.message : String(error)}`;
+      }
+      return {
+        round: record,
+        milestone,
+        objective,
+        message,
+        notificationError,
+        activityLogError: activityLogError ?? message?.activityLogError,
+      };
+    });
+  }
+
+  private validationCommitFor(
+    state: TowerState,
+    callerName: string,
+    input: TowerValidationInput,
+    milestone: TowerMilestone,
+  ): string {
+    if (callerName === TOWER_NAME) {
+      if (input.kind !== 'commands') {
+        throw new TowerProtocolError(
+          `the tower records only the mechanical commands validation — ${input.kind} is reported by its validator`,
+        );
+      }
+      if (input.validatedCommit === undefined || input.validatedCommit.trim().length === 0) {
+        throw new TowerProtocolError(
+          'the tower must state the commit it ran the validation commands on (validatedCommit)',
+        );
+      }
+      return input.validatedCommit;
+    }
+    const entry = this.findAgent(state, callerName);
+    if (
+      entry?.kind !== 'validator' ||
+      entry.milestoneId !== milestone.id ||
+      entry.validationKind !== input.kind
+    ) {
+      throw new TowerProtocolError(
+        `agent "${callerName}" is not the validator registered for ${milestone.id} ${input.kind}`,
+      );
+    }
+    if (milestone.rounds.some((round) => round.validator === callerName && round.kind === input.kind)) {
+      throw new TowerProtocolError(
+        `validator "${callerName}" already reported its ${milestone.id} ${input.kind} round — a validator reports exactly once`,
+      );
+    }
+    if (
+      input.validatedCommit !== undefined &&
+      entry.validatedCommit !== undefined &&
+      input.validatedCommit !== entry.validatedCommit
+    ) {
+      throw new TowerProtocolError(
+        `validator "${callerName}" was checked out at ${entry.validatedCommit.slice(0, 7)}, not ${input.validatedCommit} — a round is stamped on the commit its worktree validated`,
+      );
+    }
+    const commit = entry.validatedCommit ?? input.validatedCommit ?? milestone.validationCommit;
+    if (commit === undefined) {
+      throw new TowerProtocolError(
+        `validator "${callerName}" has no validated commit and milestone ${milestone.id} has no validation commit`,
+      );
+    }
+    return commit;
+  }
+
   async prepareValidationWorktree(
     milestoneId: string,
     kind: TowerValidationKind,
@@ -3697,6 +3898,55 @@ function reviewDocumentBody(input: TowerReviewInput): string {
     '## Decision',
     input.decision.trim(),
   ].join('\n');
+}
+
+function validationDocumentBody(
+  failures: readonly string[],
+  checks: readonly string[],
+  evidence: string,
+): string {
+  const checkLines = checks
+    .map((check) => check.trim())
+    .filter((check) => check.length > 0)
+    .map((check) => `- [x] ${check}`);
+  return [
+    '## Failures',
+    '',
+    failures.length > 0 ? failures.map((failure) => `- ${failure}`).join('\n') : '- (none)',
+    '',
+    '## Checks',
+    '',
+    checkLines.length > 0 ? checkLines.join('\n') : '- [x] (validator reported no formal checks)',
+    '',
+    '## Evidence',
+    '',
+    evidence.trim().length > 0 ? evidence.trim() : '(none)',
+  ].join('\n');
+}
+
+function validationResultBody(
+  objective: TowerObjective,
+  milestone: TowerMilestone,
+  round: TowerValidationRound,
+  outcome: TowerValidationOutcome,
+): string {
+  const lines = [
+    `Validation ${round.kind} round ${String(round.round)} of milestone ${milestone.id} "${milestone.title}" by ${round.validator}: ${round.verdict} on ${round.validatedCommit.slice(0, 7)}.`,
+    `Milestone ${milestone.id} is now ${milestone.status}.`,
+  ];
+  if (!outcome.counted) {
+    lines.push(
+      `This round was recorded but does not decide the milestone: it was ${outcome.previousStatus}${milestone.validationCommit === undefined ? '' : ` and validates ${milestone.validationCommit.slice(0, 7)}`}.`,
+    );
+  }
+  if (outcome.objectiveBlocked) {
+    lines.push(`Objective ${objective.id} is now blocked: ${objective.blockedReason ?? 'validation rounds exhausted'}.`);
+  }
+  if (round.failures.length > 0) {
+    lines.push('', 'Failures:', ...round.failures.map((failure) => `- ${failure}`));
+  }
+  lines.push('', `Report: ${round.file}`);
+  return lines.join('\n');
 }
 
 function singleLine(value: string): string {

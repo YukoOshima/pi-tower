@@ -868,3 +868,54 @@ export function planPlacement(state: TowerState, item: TowerPlanPlacementInput):
     milestone.status === 'failed' || milestone.status === 'validating' || milestone.status === 'blocked';
   return { milestone, origin: item.origin ?? (reopens ? 'fix' : 'plan'), reopens };
 }
+
+export function validationResultSubject(
+  milestoneId: string,
+  round: Pick<TowerValidationRound, 'kind' | 'round' | 'verdict' | 'failures'>,
+): string {
+  const failures = round.failures.length;
+  const detail =
+    round.verdict === 'fail' ? ` (${String(failures)} failure${failures === 1 ? '' : 's'})` : '';
+  return `validation ${milestoneId} ${round.kind} r${String(round.round)}: ${round.verdict}${detail}`;
+}
+
+export interface TowerValidationOutcome {
+  readonly previousStatus: TowerMilestoneStatus;
+  readonly status: TowerMilestoneStatus;
+  readonly counted: boolean;
+  readonly objectiveBlocked: boolean;
+}
+
+export function applyValidationRound(
+  objective: TowerObjective,
+  milestone: TowerMilestone,
+  round: TowerValidationRound,
+  settings: TowerValidationSettings = {},
+): TowerValidationOutcome {
+  const previousStatus = milestone.status;
+  milestone.rounds.push(round);
+  const status = deriveMilestoneStatus(objective, milestone, settings);
+  milestone.status = status;
+  if (status === 'passed' && previousStatus !== 'passed') milestone.passedAt = round.date;
+  let objectiveBlocked = false;
+  if (status === 'blocked' && previousStatus !== 'blocked' && !isTerminalObjectiveStatus(objective.status)) {
+    const max = objective.limits.maxValidationRounds;
+    const exhausted = TOWER_VALIDATION_KINDS.filter(
+      (kind) =>
+        failedValidationRounds(milestone, kind) >= max &&
+        latestValidationRound(milestone, kind, milestone.validationCommit)?.verdict === 'fail',
+    );
+    objective.status = 'blocked';
+    objective.blockedReason = `milestone ${milestone.id} "${milestone.title}" failed ${exhausted.map((kind) => `${kind} validation ${String(failedValidationRounds(milestone, kind))} times`).join(' and ')} — maxValidationRounds is ${String(max)}`;
+    delete objective.pausedReason;
+    objectiveBlocked = true;
+  }
+  return {
+    previousStatus,
+    status,
+    counted:
+      (previousStatus === 'validating' || previousStatus === 'failed') &&
+      round.validatedCommit === milestone.validationCommit,
+    objectiveBlocked,
+  };
+}
