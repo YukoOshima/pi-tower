@@ -12,7 +12,7 @@ import {
   towerWriteGuard,
   type TowerAgentGuardTarget,
 } from '../../src/tower/guards.ts';
-import { createRepo, removeDir } from './fakes.ts';
+import { createRepo, git, removeDir } from './fakes.ts';
 
 let repo: string;
 let store: TowerStore;
@@ -22,6 +22,7 @@ beforeEach(async () => {
   repo = await createRepo('tower-guards-');
   store = new TowerStore(repo);
   worktree = store.abs(join(WORKTREES_DIR, 'wt-1'));
+  await git(repo, 'worktree', 'add', '-q', '-b', 'feat/wt-1', worktree);
 });
 
 afterEach(async () => {
