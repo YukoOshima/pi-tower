@@ -211,9 +211,9 @@ Mission O1 "CSV and JSON export for shop report" — plan ready (2 milestones ·
 ```
 
 - 对话框打开时选中的是 **Not yet — keep planning**，因此只按 Enter 永远不会批准。要批准，请先按 ↓ 再按 Enter。也可以关闭对话框，然后运行 `/mission approve`。
-- 对话框打开时如果你开始输入，对话框会关闭，输入的内容会进入编辑器，因此误触按键不会批准计划。
-- 对话框会等到 orchestrator 完成当前轮次、编辑器为空，并且你已经停止输入约 2 秒之后才打开。
-- 想修改计划，就用普通消息说明要改什么。orchestrator 会更新计划并再次请你批准，届时会弹出新的对话框。
+- 对话框打开时如果你开始输入或粘贴，对话框会关闭，内容会进入编辑器，因此误触按键不会批准计划。
+- 对话框会等到 orchestrator 完成当前轮次、编辑器为空，并且键盘已经安静 2 秒之后才打开。
+- 想修改计划，就用普通消息说明要改什么。orchestrator 会更新计划并再次请你批准，届时会弹出新的对话框。如果是在批准之后修改了契约，对话框会显示 **plan revised**，第二个选项变为 **Approve the revised plan**。
 - 只有你可以批准，orchestrator 没有用来批准的工具。
 
 批准之后，mission 开始执行：
@@ -1100,6 +1100,7 @@ pi-tower 提供三道防护：
 - **自动清理会删除被 git 忽略的文件。** mission 完成后，每个干净的 feature worktree 都会连同其中的所有内容一起被移除，包括被 git 忽略的文件，例如 `node_modules`、构建产物或本地的 `.env`。已提交的工作仍安全地保留在各自的 branch 上。设置 `"objective": { "autoTeardown": false }` 可以保留这些 worktree。
 - **自动批准与被阻塞的 mission。** 设置 `"objective": { "autoApprove": true }` 后，一个 mission 被阻塞之后，orchestrator 可能会起草一个新的 mission，而它会被自动批准。这会在没有你参与的情况下重新开始计算时长和花费预算。交互使用时请保持 `autoApprove` 关闭。无人值守运行器在 mission 被阻塞时会以退出码 1 退出，不会走到这一步。
 - **批准对话框需要 mission 模式。** 它只在开启了 `/mission` 的交互会话中弹出；如果进入 mission 模式时计划已经在等待批准（例如重启之后），对话框也不会再弹出。这样的计划请用 `/mission approve` 批准。
+- **批准对话框可能顶替 pi 自带的选择器。** 计划准备好时，如果你正停留在 pi 自带的某个选择器（例如 `/model`）中，并且已经有 2 秒或更久没有操作，批准对话框会替换掉这个选择器，原本要在该选择器中按下的 ↓ 和 Enter 就会批准计划。pi 1.5.0 不会把自带选择器的状态通知给扩展。在计划可能已经准备好时，确认选择之前请先看清标题。
 - **验证命令需要自带准备步骤。** 它们在一个全新的 detached checkout 中运行，没有安装好的依赖，也没有构建产物，因此每条命令都必须包含准备步骤，例如 `npm ci && npm test`。
 - **验证失败轮数不会清零。** 无论换了几个 commit、契约是否修改过、是否执行过 `/mission resume`，失败轮次都会计入 `maxValidationRounds`。恢复一个因验证失败而被阻塞的 mission 之前，请先在 `tower.json` 中调高 `maxValidationRounds`，否则同类验证再失败一次，它就会再次被阻塞。
 - **user-testing 没有浏览器。** user-testing validator 没有浏览器或 GUI 工具，行为测试只能依靠 bash 能驱动的东西：CLI、HTTP 请求和脚本。

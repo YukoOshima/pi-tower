@@ -211,9 +211,9 @@ Mission O1 "CSV and JSON export for shop report" — plan ready (2 milestones ·
 ```
 
 - The dialog opens on **Not yet — keep planning**, so pressing Enter alone never approves. To approve, press ↓ and then Enter. You can also close the dialog and run `/mission approve`.
-- Typing while the dialog is open closes it, and your text goes to the editor, so a stray keystroke cannot approve the plan.
-- The dialog waits until the orchestrator has finished its turn, the editor is empty, and you have not typed for about 2 seconds.
-- To change the plan, say what to change in a normal message. The orchestrator updates the plan and asks again, with a new dialog.
+- Typing or pasting while the dialog is open closes it, and the text goes to the editor, so a stray keystroke cannot approve the plan.
+- The dialog waits until the orchestrator has finished its turn, the editor is empty, and the keyboard has been quiet for 2 seconds.
+- To change the plan, say what to change in a normal message. The orchestrator updates the plan and asks again, with a new dialog. When the contract changed after an approval, the dialog says **plan revised** and its second option reads **Approve the revised plan**.
 - Only you can approve. The orchestrator has no tool for it.
 
 Once you approve, the mission starts:
@@ -1100,6 +1100,7 @@ Start with a small mission, or a few independent missions in a free-form run, an
 - **Automatic teardown deletes git-ignored files.** A completed mission removes every clean feature worktree with everything in it, including git-ignored files such as `node_modules`, build output or a local `.env`. Committed work is safe on its branch. Set `"objective": { "autoTeardown": false }` to keep the worktrees.
 - **Auto-approval and blocked missions.** With `"objective": { "autoApprove": true }`, the orchestrator could draft a fresh mission after one blocked, and that mission would be approved automatically. This restarts the wall-time and cost budgets without you. Keep `autoApprove` off for interactive use. The headless runner exits with code 1 on a blocked mission before this can happen.
 - **The approval dialog needs mission mode.** It opens only in an interactive session where `/mission` is on, and not again for a plan that already awaited approval when mission mode started, for example after a restart. Approve such a plan with `/mission approve`.
+- **The approval dialog can take over one of pi's own selectors.** If you sit idle for 2 seconds or more inside one of pi's built-in selectors, such as `/model`, when the plan becomes ready, the approval dialog replaces that selector, and ↓ then Enter meant for it approves the plan. pi 1.5.0 gives extensions no signal for its built-in selectors. While a plan may be due, read the title before you confirm a selection.
 - **Validation commands bring their own setup.** They run in a fresh, detached checkout without installed dependencies or build output, so every command must include its setup, for example `npm ci && npm test`.
 - **Failed validation rounds are never reset.** They count toward `maxValidationRounds` across commits, contract changes and `/mission resume`. Before you resume a mission that blocked on failed validations, raise `maxValidationRounds` in `tower.json`; otherwise the next failure of that kind blocks it again.
 - **No browser for user-testing.** User-testing validators have no browser or GUI tooling. Their behavioural QA relies on what bash can drive: CLIs, HTTP calls and scripts.
