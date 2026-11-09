@@ -1,4 +1,4 @@
-import type { TowerAgentKind } from '../protocol/types.ts';
+import type { PromptAgentKind } from './objectiveTypes.ts';
 
 export const TOWER_MAIN_AGENT_ONLY =
   'Tower orchestration tools are only supported by the main agent.';
@@ -17,13 +17,15 @@ export function subagentToolDenied(toolName: string): string {
 
 export function duplicateAgentRefusal(
   name: string,
-  existing: { readonly agentId: string; readonly kind: TowerAgentKind },
+  existing: { readonly agentId: string; readonly kind: PromptAgentKind },
 ): string {
   return (
     `tower agent "${name}" is already registered (agent_id: ${existing.agentId}, kind: ${existing.kind}) — ` +
     (existing.kind === 'worker'
       ? `resume it instead of spawning a duplicate: TowerResume(agent="${name}", prompt="...")`
-      : 'a reviewer is one-shot: diagnose the previous round and spawn a fresh reviewer with a new name instead of resuming a roster agent')
+      : existing.kind === 'validator'
+        ? 'a validator is one-shot: every validation round gets a fresh validator with a new name instead of a reused roster agent'
+        : 'a reviewer is one-shot: diagnose the previous round and spawn a fresh reviewer with a new name instead of resuming a roster agent')
   );
 }
 

@@ -45,6 +45,8 @@ export {
 export {
   TOWER_CODER_ROLE,
   TOWER_TASK_AGENT_ROLE_PREFIX,
+  TOWER_VALIDATOR_ROLE,
+  TOWER_VALIDATOR_ROLE_OVERLAY,
   TOWER_WORKER_ROLE,
   TOWER_WORKER_ROLE_OVERLAY,
 } from './workerRole.ts';
@@ -87,6 +89,7 @@ export {
   REVIEWER_SPAWN_GUIDANCE,
   STEER_SUBJECT_PREVIEW_MAX,
   TOWER_TEARDOWN_PROMPT,
+  VALIDATOR_SPAWN_GUIDANCE,
   WAKE_BATCH_LIMIT,
   WAKE_DIGEST_LIMIT,
   WAKE_SUBJECT_PREVIEW_MAX,
@@ -112,6 +115,7 @@ export {
   type InboxWakeItem,
   type SpawnResultInput,
   type SpawnTaskDescriptionInput,
+  type SpawnValidationTarget,
   type TowerAgentEndStatus,
   type TowerAgentNotificationInput,
   type WakeDigestTargets,
