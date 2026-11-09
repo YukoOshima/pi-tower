@@ -176,7 +176,7 @@ export function workerIdleWake(input: {
   const details = [...(mission.milestone === undefined ? [] : [`milestone ${mission.milestone}`]), `branch ${mission.branch}`];
   const lastText = input.lastText?.trim() ?? '';
   const situation = input.nudged
-    ? ' The autopilot already resumed it once on this tip with a reminder to finish, report a blocker or ask, and it stopped again — it does not resume it again until the tip moves.'
+    ? ' A worker of this feature was already resumed once on this tip with a reminder to finish, report a blocker or ask — the autopilot does not resume the feature again until its tip moves.'
     : input.autopilot
       ? ''
       : ' With the autopilot off, nobody resumes it unless you do.';

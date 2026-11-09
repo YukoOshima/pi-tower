@@ -347,6 +347,17 @@ table('continue nudge and worker-idle wake', [
   },
   { name: 'the worker-idle wake is sent once per tip', snap: snapshot({ missions: [STOPPED_SILENTLY], memory: { wakeKeys: NUDGED } }), actions: [] },
   {
+    name: 'a respawned worker idle on an already-nudged tip is reported as a worker of the feature, not as the one resumed',
+    snap: snapshot({ missions: [{ ...STOPPED_SILENTLY, attempts: 2, worker: worker({ state: 'idle', name: 'w-M1-2' }) }], memory: { wakeKeys: [CONTINUE_KEY] } }),
+    actions: [
+      expect.objectContaining({
+        type: 'wake-orchestrator',
+        key: 'worker-idle:M1:tip-M1',
+        detail: 'M1: worker w-M1-2 is idle on the active feature without TowerComplete, a blocker or an unanswered message, and a worker of this feature was already resumed once on this tip',
+      }),
+    ],
+  },
+  {
     name: 'a new tip re-arms the nudge',
     snap: snapshot({ missions: [{ ...STOPPED_SILENTLY, tip: 'tip-M1b' }], memory: { wakeKeys: NUDGED } }),
     actions: [nudge('M1', 'tip-M1b')],

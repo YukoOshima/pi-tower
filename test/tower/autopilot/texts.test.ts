@@ -40,6 +40,13 @@ describe('worker-idle wake', () => {
     expect(quote.length).toBeLessThan(1_600);
   });
 
+  it('after a nudge on this tip names the feature, not the worker, as resumed — a respawned worker never was', () => {
+    const text = workerIdleWake({ mission: BUILD, worker: 'ap-w-M3-2', autopilot: true, nudged: true });
+    expect(text.split('\n')[0]).toBe(
+      'worker-idle: worker ap-w-M3-2 on feature M3 "Core A" (milestone MS1, branch feat/core-a) is idle without TowerComplete, a blocker or an unanswered message, and the feature is still active. A worker of this feature was already resumed once on this tip with a reminder to finish, report a blocker or ask — the autopilot does not resume the feature again until its tip moves.',
+    );
+  });
+
   it('says nothing about resuming when the autopilot has not nudged the worker yet', () => {
     const text = workerIdleWake({ mission: { ...BUILD, milestone: undefined }, worker: 'w', autopilot: true, nudged: false });
     expect(text.split('\n')[0]).toBe(

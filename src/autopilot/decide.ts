@@ -328,7 +328,7 @@ function planContinue(draft: Draft, feature: AutopilotMission): void {
     'worker-idle',
     feature.id,
     tip,
-    `${feature.id}: worker ${worker ?? '-'} is idle on the active feature without TowerComplete, a blocker or an unanswered message${nudged ? ', again after the autopilot resumed it on this tip' : ''}`,
+    `${feature.id}: worker ${worker ?? '-'} is idle on the active feature without TowerComplete, a blocker or an unanswered message${nudged ? ', and a worker of this feature was already resumed once on this tip' : ''}`,
   );
 }
 

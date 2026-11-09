@@ -360,7 +360,7 @@ describe('executing', () => {
     await settle(runner);
     expect(tower.wakes).toHaveLength(1);
     expect(tower.wakes[0]).toMatch(
-      /^worker-idle: worker ap-w-M1-1 on feature M1 "Core A" \(milestone MS1, branch feat\/core-a\) is idle without TowerComplete, a blocker or an unanswered message, and the feature is still active\. The autopilot already resumed it once on this tip/,
+      /^worker-idle: worker ap-w-M1-1 on feature M1 "Core A" \(milestone MS1, branch feat\/core-a\) is idle without TowerComplete, a blocker or an unanswered message, and the feature is still active\. A worker of this feature was already resumed once on this tip/,
     );
     expect(tower.wakes[0]).toContain('Its last message:\n> Should core A store the value as JSON?\n> I stop here until someone decides.');
     expect(tower.wakes[0]).toContain('TowerSend(to="ap-w-M1-1", ...) and resume it with TowerResume(agent="ap-w-M1-1", prompt="...")');
