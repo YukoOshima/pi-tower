@@ -75,6 +75,7 @@ describe('TOWER_OBJECTIVE_PLAYBOOK', () => {
   it('hands the mechanics to the autopilot and keeps the judgment duties', () => {
     for (const sentence of [
       'it spawns workers, reviewers, and validators',
+      'starts validation once every feature of the current milestone is merged or abandoned',
       'Do not duplicate these steps and do not poll',
       'With the autopilot off (`objective.autopilot=false`), you drive feature execution yourself with the work cycle above — spawn workers and reviewers, rebase, merge — but validation start, milestone advancement, and objective completion stay automatic in both modes',
       'never start a validation yourself (spawn a validator only to recover a validation-stuck round)',

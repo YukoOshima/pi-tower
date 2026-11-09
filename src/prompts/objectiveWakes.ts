@@ -181,7 +181,7 @@ export function fixRequest(input: FixRequestInput): string {
       `## Next step — plan fix features into ${milestone.id}`,
       '1. Read every failure (open the report file when you need the evidence) and find its cause — fix causes, not symptoms.',
       `2. Call TowerPlan with milestone="${milestone.id}" and origin="fix" on every item: one feature per failure or per tightly related group, each failure quoted verbatim in the feature's tasks so its worker and reviewer can verify the fix, with disjoint scopes so the fixes run in parallel.`,
-      '3. Planning into the failed milestone reopens it; the autopilot spawns the fix workers (with the autopilot off, spawn them yourself with TowerSpawn), and validation re-runs automatically on the new base tip once every fix is merged.',
+      '3. Planning into the failed milestone reopens it; the autopilot spawns the fix workers (with the autopilot off, spawn them yourself with TowerSpawn), and validation re-runs automatically on the new base tip once every fix is merged or abandoned.',
       '4. If a failure shows that the contract itself is wrong (definition of done, acceptance commands, or a validation spec), change it with TowerObjective(action="update") instead — the human must approve it again. If the failures cannot be fixed as specified, call TowerObjective(action="block", reason) with what the human must decide.',
     ].join('\n'),
   ];

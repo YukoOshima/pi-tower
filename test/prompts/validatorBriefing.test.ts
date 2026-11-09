@@ -92,7 +92,9 @@ describe('buildValidatorBriefing — scrutiny', () => {
     expect(text).toContain(`- Validated commit: ${COMMIT} — the tip of base "main"`);
     expect(text).toContain('never edit tracked files, never commit, never check out another commit or branch');
     expect(text).toContain('never touch the main checkout (/repo)');
-    expect(text).toContain(`git log --first-parent --merges --oneline ${COMMIT}`);
+    expect(text).toContain(
+      `- The milestone's changes: the merges of the feature branches listed below — find them with \`git log --first-parent --merges --oneline ${COMMIT}\` (each is titled "Merge branch '<branch>'") and inspect each such merge M with \`git diff M^1 M\`; other merges in that log belong to earlier work.`,
+    );
   });
 
   it('carries the objective goal and definition of done', () => {
@@ -109,6 +111,18 @@ describe('buildValidatorBriefing — scrutiny', () => {
     expect(text).toContain('- [x] Write rows as RFC 4180 CSV\n- [ ] Escape embedded quotes\n- [~] Stream large reports (dropped)');
     expect(text).toContain('### M2: CLI flag (abandoned — its work did not land');
     expect(text).toContain('### M3: Fix header row (merged, fix feature)');
+  });
+
+  it('tells validators that dropped tasks were descoped on purpose', () => {
+    expect(text).toContain(
+      'every task of a merged feature must be delivered on the validated commit\nTasks marked [~] were dropped: descoped on purpose with a recorded reason — never fail the milestone for them.',
+    );
+    const base = input();
+    const undropped = buildValidatorBriefing({
+      ...base,
+      features: base.features.map((feature) => ({ ...feature, tasks: (feature.tasks ?? []).filter((task) => task.dropped !== true) })),
+    });
+    expect(undropped).not.toContain('Tasks marked [~]');
   });
 
   it('lists the milestone commands but not the acceptance commands before the final milestone', () => {

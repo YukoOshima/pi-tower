@@ -50,7 +50,7 @@ describe('objective formatting helpers', () => {
       'commands `npm test`, `npm run e2e`',
     );
     expect(describeValidation({ scrutiny: true, userTesting: true, commands: [] }, [], ['scrutiny', 'user-testing'])).toBe(
-      'none (passes as soon as its features merge)',
+      'none (passes as soon as its features are merged or abandoned)',
     );
   });
 
@@ -59,7 +59,7 @@ describe('objective formatting helpers', () => {
       'scrutiny · user-testing · commands `npm test`, `npm run e2e`',
     );
     expect(describeValidation({ scrutiny: false, userTesting: false, commands: [] })).toBe(
-      'none (passes as soon as its features merge)',
+      'none (passes as soon as its features are merged or abandoned)',
     );
   });
 

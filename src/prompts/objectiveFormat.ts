@@ -46,7 +46,7 @@ export function describeValidation(
   skipKinds: readonly PromptValidationKind[] = [],
 ): string {
   const kinds = requiredValidationKinds(spec, acceptanceCommands, skipKinds);
-  if (kinds.length === 0) return 'none (passes as soon as its features merge)';
+  if (kinds.length === 0) return 'none (passes as soon as its features are merged or abandoned)';
   const commands = [...spec.commands, ...acceptanceCommands].map((command) => `\`${command}\``);
   return kinds
     .map((kind) => (kind === 'commands' ? `commands ${commands.join(', ')}` : kind))

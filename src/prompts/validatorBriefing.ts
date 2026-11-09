@@ -50,7 +50,7 @@ function validatorWorkplaceSection(input: ValidatorBriefingInput): string {
   const diff =
     input.diffBase !== undefined
       ? `- The milestone's changes: \`git diff ${input.diffBase}..${commit}\` (and \`git log --first-parent ${input.diffBase}..${commit}\` for the feature merges).`
-      : `- The milestone's changes: list the feature merges with \`git log --first-parent --merges --oneline ${commit}\` and inspect each merge M with \`git diff M^1 M\`.`;
+      : `- The milestone's changes: the merges of the feature branches listed below — find them with \`git log --first-parent --merges --oneline ${commit}\` (each is titled "Merge branch '<branch>'") and inspect each such merge M with \`git diff M^1 M\`; other merges in that log belong to earlier work.`;
   return [
     '# Your workplace',
     `- Validation worktree (detached, read-only): ${input.worktreePath}`,
@@ -81,8 +81,12 @@ function milestoneSection(input: ValidatorBriefingInput): string {
     parts.push('No features are recorded for this milestone — judge it against its description and the definition of done.');
     return parts.join('\n\n');
   }
+  const anyDropped = features.some((feature) => (feature.tasks ?? []).some((task) => task.dropped === true));
   parts.push(
-    "## Its features — every task of a merged feature must be delivered on the validated commit",
+    "## Its features — every task of a merged feature must be delivered on the validated commit" +
+      (anyDropped
+        ? '\nTasks marked [~] were dropped: descoped on purpose with a recorded reason — never fail the milestone for them.'
+        : ''),
     ...features.map(featureBlock),
   );
   return parts.join('\n\n');
