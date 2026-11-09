@@ -439,7 +439,7 @@ describe('executing', () => {
       return result.ok ? spawn(missionId, name) : result;
     };
     await runner.tick('first');
-    expect(runner.pendingWork()).toEqual({ agents: ['ap-w-M1-1'], validators: [] });
+    expect(runner.pendingWork()).toEqual({ agents: [{ name: 'ap-w-M1-1', kind: 'worker', mission: 'M1' }], validators: [] });
     await runner.tick('second');
     expect(tower.calls).toEqual(['held M1 ap-w-M1-1']);
     release({ ok: true });
@@ -577,6 +577,116 @@ describe('executing', () => {
     expect(milestone).toMatchObject({ status: 'validating', rounds: [] });
     expect(existsSync(join(repo, '.tower', 'worktrees', 'val-ms1-commands-r1'))).toBe(false);
     expect(runner.pendingWork().validators).toEqual([]);
+  });
+});
+
+describe('duplicate launch guard', () => {
+  async function completedFeature(): Promise<ReturnType<typeof setup>> {
+    await draft();
+    await store.approveObjective('human');
+    const harness = setup();
+    await settle(harness.runner);
+    await harness.tower.actAll();
+    return harness;
+  }
+
+  const spawnedReviewers = (tower: FakeTower): string[] => tower.calls.filter((call) => call.startsWith('spawnReviewer'));
+
+  it('a reviewer launch that settles after the next tick loaded the state is not launched again (live S15 double spawn-reviewer)', async () => {
+    const { runner, tower } = await completedFeature();
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const spawnReviewer = tower.spawnReviewer.bind(tower);
+    tower.spawnReviewer = async (missionId, name) => {
+      await held;
+      return spawnReviewer(missionId, name);
+    };
+    await runner.tick('agent-end');
+    expect(runner.pendingWork().agents).toEqual([{ name: 'ap-r-M1-1', kind: 'reviewer', mission: 'M1' }]);
+    const load = store.load.bind(store);
+    let armed = true;
+    store.load = async () => {
+      const state = await load();
+      if (armed) {
+        armed = false;
+        release();
+        expect(await waitUntil(() => runner.pendingWork().agents.length === 0)).toBe(true);
+      }
+      return state;
+    };
+    await settle(runner, 'inbox');
+    expect(spawnedReviewers(tower)).toEqual(['spawnReviewer M1 ap-r-M1-1']);
+    expect((await store.load()).roster.agents.filter((entry) => entry.kind === 'reviewer').map((entry) => entry.name)).toEqual([
+      'ap-r-M1-1',
+    ]);
+    const activity = await readFile(store.abs(ACTIVITY_LOG), 'utf8');
+    expect(activity).not.toMatch(/result=(refused|skipped)/);
+    expect(activity.match(/ autopilot spawn-reviewer mission=M1 result=launched /g)).toHaveLength(1);
+  });
+
+  it('skips a launch when an agent for its subject was registered after the snapshot', async () => {
+    const { runner, tower } = await completedFeature();
+    const readInbox = store.readInbox.bind(store);
+    let armed = true;
+    store.readInbox = async (name, limit) => {
+      if (armed) {
+        armed = false;
+        await store.registerSpawnedAgent({
+          name: 'manual-reviewer',
+          agentId: 'agent-manual-reviewer',
+          kind: 'reviewer',
+          reviewTarget: 'feat/core-a',
+          reviewMissionId: 'M1',
+          cwd: store.repoRoot,
+          spawnedAt: new Date().toISOString(),
+        });
+      }
+      return readInbox(name, limit);
+    };
+    await settle(runner, 'agent-end');
+    expect(spawnedReviewers(tower)).toEqual([]);
+    const activity = await readFile(store.abs(ACTIVITY_LOG), 'utf8');
+    expect(activity).toMatch(
+      / autopilot spawn-reviewer mission=M1 result=skipped detail=reviewer manual-reviewer was registered since the snapshot\n/,
+    );
+  });
+
+  it('an "already registered" refusal for an agent the autopilot started itself never counts toward the refused-action wake', async () => {
+    const { runner, tower } = await completedFeature();
+    const started = new Set<string>();
+    tower.spawnReviewer = async (missionId, name) => {
+      tower.calls.push(`spawnReviewer ${missionId} ${name}`);
+      if (!started.has(name)) {
+        started.add(name);
+        return { ok: true };
+      }
+      return {
+        ok: false,
+        error: `tower agent "${name}" is already registered (agent_id: agent-${name}, kind: reviewer) — a reviewer is one-shot: diagnose the previous round and spawn a fresh reviewer with a new name instead of resuming a roster agent`,
+      };
+    };
+    for (let tick = 0; tick < 5; tick += 1) {
+      await settle(runner);
+      tower.clock += 10_000;
+    }
+    const calls = spawnedReviewers(tower);
+    expect(calls.length).toBeGreaterThanOrEqual(5);
+    expect(new Set(calls)).toEqual(new Set(['spawnReviewer M1 ap-r-M1-1']));
+    expect(tower.wakes.filter((text) => text.startsWith('autopilot-refused:'))).toEqual([]);
+    const activity = await readFile(store.abs(ACTIVITY_LOG), 'utf8');
+    expect(activity.match(/ autopilot spawn-reviewer mission=M1 name=ap-r-M1-1 result=duplicate error=tower agent "ap-r-M1-1" is already registered/g)).toHaveLength(calls.length - 1);
+  });
+
+  it('the same refusal for an agent the autopilot never started still counts', async () => {
+    const { runner, tower } = await completedFeature();
+    tower.refuse.set('spawnReviewer', 'tower agent "ap-r-M1-1" is already registered (agent_id: agent-9, kind: reviewer)');
+    for (let tick = 0; tick < 3; tick += 1) {
+      await settle(runner);
+      tower.clock += 10_000;
+    }
+    expect(tower.wakes.filter((text) => text.startsWith('autopilot-refused:'))).toHaveLength(1);
   });
 });
 

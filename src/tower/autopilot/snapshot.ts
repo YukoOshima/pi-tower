@@ -46,9 +46,15 @@ import type {
 
 export const REBASE_CONFLICT_BLOCKER_PREFIX = 'tower rebase onto ';
 
+export interface AutopilotPendingAgent {
+  readonly name: string;
+  readonly kind: 'worker' | 'reviewer';
+  readonly mission?: string;
+}
+
 export interface AutopilotPendingWork {
-  /** Names of agents a pending spawn or resume effect is starting. */
-  readonly agents: readonly string[];
+  /** Agents a pending spawn or resume effect is starting: each is the running worker or reviewer of its mission. */
+  readonly agents: readonly AutopilotPendingAgent[];
   /** Validator spawns not settled yet and mechanical commands runs in flight. */
   readonly validators: readonly AutopilotValidatorRun[];
 }
@@ -305,12 +311,15 @@ export function stoppedByHuman(
   );
 }
 
-function autopilotWorker(world: AutopilotWorld, mission: TowerMission): AutopilotWorker {
+function autopilotWorker(world: AutopilotWorld, mission: TowerMission, launching: string | undefined): AutopilotWorker {
   const entry = missionWorkerEntries(world.state, mission).at(-1);
+  if (launching !== undefined && launching !== entry?.name) {
+    return { state: 'running', name: launching, humanStopped: false, unreadFindings: false, awaitingReply: false };
+  }
   if (entry === undefined) return { state: 'none', humanStopped: false, unreadFindings: false, awaitingReply: false };
   const observation = world.agent(entry.agentId);
   return {
-    state: workerStateOf(entry, observation),
+    state: launching === undefined ? workerStateOf(entry, observation) : 'running',
     name: entry.name,
     humanStopped: stoppedByHuman(entry, observation),
     unreadFindings: hasUnreadFindings(world.inbox, entry, mission),
@@ -409,6 +418,7 @@ function autopilotMission(world: AutopilotWorld, mission: TowerMission): Autopil
   const tip = gate?.observations.branch?.tip;
   const reviewers = missionReviewerEntries(world.state, mission);
   const latestReview = reviewOnTip(gate);
+  const launching = world.pending.agents.filter((agent) => agent.mission === mission.id);
   return {
     id: mission.id,
     kind: mission.kind,
@@ -417,9 +427,11 @@ function autopilotMission(world: AutopilotWorld, mission: TowerMission): Autopil
     deps: [...mission.deps],
     attempts: mission.attempts ?? 0,
     ...(tip === undefined ? {} : { tip }),
-    worker: autopilotWorker(world, mission),
+    worker: autopilotWorker(world, mission, launching.find((agent) => agent.kind === 'worker')?.name),
     reviewRequestOnTip: reviewRequestOnTip(world, mission, tip),
-    reviewerRunning: reviewers.some((entry) => world.agent(entry.agentId)?.status === 'running'),
+    reviewerRunning:
+      launching.some((agent) => agent.kind === 'reviewer') ||
+      reviewers.some((entry) => world.agent(entry.agentId)?.status === 'running'),
     reviewerAttemptsOnTip: reviewerAttemptsOnTip(world, reviewers, world.reviews.get(mission.id) ?? [], tip),
     ...(latestReview === undefined ? {} : { latestReviewOnTip: latestReview }),
     gate: autopilotGate(gate),
@@ -480,6 +492,6 @@ function otherRunningAgents(
     missions.filter((mission) => mission.worker.state === 'running').length +
     missions.filter((mission) => mission.reviewerRunning).length +
     validatorAgents;
-  const pending = world.pending.agents.filter((name) => !runningNames.has(name)).length;
-  return Math.max(0, runningIds.size - represented) + pending;
+  const pending = world.pending.agents.filter((agent) => !runningNames.has(agent.name)).length;
+  return Math.max(0, runningIds.size + pending - represented);
 }

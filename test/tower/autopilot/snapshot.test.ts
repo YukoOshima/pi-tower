@@ -3,6 +3,7 @@ import { join } from 'node:path';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
+import { runningAgents } from '../../../src/autopilot/index.ts';
 import type {
   TowerInboxItem,
   TowerMission,
@@ -565,11 +566,52 @@ describe('buildAutopilotSnapshot — validators and live agents', () => {
           'id-r-loose': { status: 'running' },
           'id-w-idle': { status: 'idle' },
         },
-        pending: { agents: ['ap-w-M4-1', 'w1', 'w-idle'], validators: [] },
+        pending: {
+          agents: [
+            { name: 'ap-w-M4-1', kind: 'worker', mission: 'M4' },
+            { name: 'w1', kind: 'worker', mission: 'M1' },
+            { name: 'w-idle', kind: 'worker', mission: 'M3' },
+          ],
+          validators: [],
+        },
       }),
     );
     expect(snap.missions.filter((entry) => entry.worker.state === 'running')).toHaveLength(2);
     expect(snap.otherRunningAgents).toBe(4);
+  });
+
+  it('a pending launch is the running worker or reviewer of its mission and counts once', () => {
+    const snap = buildAutopilotSnapshot(
+      world({
+        state: towerState({
+          missions: [mission('M1'), mission('M2', { status: 'completed' }), mission('M3')],
+          roster: {
+            agents: [
+              agent('w1', { missionId: 'M1' }),
+              agent('w2', { missionId: 'M2' }),
+              agent('w3', { missionId: 'M3' }),
+            ],
+          },
+        }),
+        agents: { 'id-w1': { status: 'failed' }, 'id-w2': { status: 'idle' }, 'id-w3': { status: 'idle' } },
+        inbox: [message({ from: 'r0', to: 'w3', action: 'review-result', scope: 'M3', sentAt: iso(5_000) })],
+        pending: {
+          agents: [
+            { name: 'ap-w-M1-2', kind: 'worker', mission: 'M1' },
+            { name: 'ap-r-M2-1', kind: 'reviewer', mission: 'M2' },
+            { name: 'w3', kind: 'worker', mission: 'M3' },
+          ],
+          validators: [],
+        },
+      }),
+    );
+    expect(snap.missions.map((entry) => [entry.worker, entry.reviewerRunning])).toEqual([
+      [{ state: 'running', name: 'ap-w-M1-2', humanStopped: false, unreadFindings: false, awaitingReply: false }, false],
+      [{ state: 'idle', name: 'w2', humanStopped: false, unreadFindings: false, awaitingReply: false }, true],
+      [{ state: 'running', name: 'w3', humanStopped: false, unreadFindings: true, awaitingReply: false }, false],
+    ]);
+    expect(snap.otherRunningAgents).toBe(0);
+    expect(runningAgents(snap)).toBe(3);
   });
 });
 

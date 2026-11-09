@@ -13,6 +13,7 @@ import {
   type TowerMission,
   type TowerObjective,
   type TowerReviewInfo,
+  type TowerRosterEntry,
   type TowerState,
   type TowerStore,
 } from '../../protocol/index.ts';
@@ -88,6 +89,43 @@ export function autopilotActionMission(action: AutopilotAction): string | undefi
       return action.mission;
     default:
       return undefined;
+  }
+}
+
+export function isAgentLaunch(action: AutopilotAction): boolean {
+  switch (action.type) {
+    case 'spawn-worker':
+    case 'respawn-worker':
+    case 'resume-worker':
+    case 'spawn-reviewer':
+      return true;
+    case 'start-validation':
+      return action.kinds.some((kind) => kind !== 'commands');
+    default:
+      return false;
+  }
+}
+
+export function isLaunchSubjectAgent(state: TowerState, action: AutopilotAction, entry: TowerRosterEntry): boolean {
+  switch (action.type) {
+    case 'spawn-worker':
+    case 'respawn-worker':
+    case 'resume-worker':
+      return entry.kind === 'worker' && entry.missionId === action.mission;
+    case 'spawn-reviewer': {
+      const mission = state.missions.find((candidate) => candidate.id === action.mission);
+      return mission !== undefined && missionReviewerEntries(state, mission).includes(entry);
+    }
+    case 'start-validation':
+      return (
+        entry.kind === 'validator' &&
+        entry.milestoneId === action.milestone &&
+        entry.validatedCommit === action.commit &&
+        entry.validationKind !== undefined &&
+        action.kinds.includes(entry.validationKind)
+      );
+    default:
+      return false;
   }
 }
 

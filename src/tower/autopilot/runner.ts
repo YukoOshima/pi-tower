@@ -29,6 +29,8 @@ import {
   autopilotActionMission,
   autopilotActionSubject,
   executeAutopilotAction,
+  isAgentLaunch,
+  isLaunchSubjectAgent,
   type AutopilotExecution,
   type AutopilotLaunch,
 } from './executor.ts';
@@ -36,6 +38,7 @@ import {
   buildAutopilotSnapshot,
   observeAutopilotWorld,
   validationSettings,
+  type AutopilotPendingAgent,
   type AutopilotPendingWork,
   type AutopilotWorld,
 } from './snapshot.ts';
@@ -166,6 +169,7 @@ export class AutopilotRunner {
   private readonly refusals = new Map<string, Refusal>();
   private readonly refusedWakeKeys = new Set<string>();
   private readonly noticeKeys = new Set<string>();
+  private readonly startedAgents = new Set<string>();
   private sweep: Promise<void> = Promise.resolve();
   private cost: { readonly objectiveId: string; readonly total: number } | undefined;
   private planning: { readonly objectiveId: string; readonly key: string; readonly since: number } | undefined;
@@ -219,14 +223,24 @@ export class AutopilotRunner {
   }
 
   pendingWork(): AutopilotPendingWork {
-    const launches = [...this.launches.values()].map((pending) => pending.launch);
+    const launches = [...this.launches.values()];
     const commands = [...this.commandRuns.values()].map(
       (run): AutopilotValidatorRun => ({ milestone: run.milestone, kind: 'commands', commit: run.commit }),
     );
     return {
-      agents: launches.filter((launch) => launch.validator === undefined).map((launch) => launch.agent),
+      agents: launches.flatMap(({ launch, type }): AutopilotPendingAgent[] =>
+        launch.validator === undefined
+          ? [
+              {
+                name: launch.agent,
+                kind: type === 'spawn-reviewer' ? 'reviewer' : 'worker',
+                ...(launch.mission === undefined ? {} : { mission: launch.mission }),
+              },
+            ]
+          : [],
+      ),
       validators: [
-        ...launches.flatMap((launch) => (launch.validator === undefined ? [] : [launch.validator])),
+        ...launches.flatMap(({ launch }) => (launch.validator === undefined ? [] : [launch.validator])),
         ...commands,
       ],
     };
@@ -264,6 +278,7 @@ export class AutopilotRunner {
 
   private async runTick(reasons: readonly string[]): Promise<void> {
     this.ticks += 1;
+    const pending = this.pendingWork();
     try {
       const store = this.observations.store();
       const state = await store.load();
@@ -275,13 +290,13 @@ export class AutopilotRunner {
       }
       switch (objective.status) {
         case 'awaiting-approval':
-          await this.awaitingApproval(store, state, objective);
+          await this.awaitingApproval(store, state, objective, pending);
           return;
         case 'planning':
           await this.planningTick(store, state, objective);
           return;
         case 'executing':
-          await this.executingTick(store, state);
+          await this.executingTick(store, state, pending);
           return;
         case 'blocked':
           this.refusals.clear();
@@ -330,7 +345,12 @@ export class AutopilotRunner {
     await this.activity(store, 'notify-human', { objective: objective.id, reason });
   }
 
-  private async awaitingApproval(store: TowerStore, state: TowerState, objective: TowerObjective): Promise<void> {
+  private async awaitingApproval(
+    store: TowerStore,
+    state: TowerState,
+    objective: TowerObjective,
+    pending: AutopilotPendingWork,
+  ): Promise<void> {
     const settings = this.observations.settings();
     const request = approvalRequest({
       objective,
@@ -362,7 +382,7 @@ export class AutopilotRunner {
         'info',
       );
       const approved = await store.load();
-      if (approved.objective?.status === 'executing') await this.executingTick(store, approved);
+      if (approved.objective?.status === 'executing') await this.executingTick(store, approved, pending);
       return;
     }
     const key = `approval:${objective.id}:${digest(request)}`;
@@ -408,16 +428,11 @@ export class AutopilotRunner {
     return true;
   }
 
-  private async executingTick(store: TowerStore, loaded: TowerState): Promise<void> {
+  private async executingTick(store: TowerStore, loaded: TowerState, pending: AutopilotPendingWork): Promise<void> {
     const objective = loaded.objective!;
     const state = (await this.recordUsage(store, objective)) ? await store.load() : loaded;
     if (state.objective?.status !== 'executing') return;
-    const world = await observeAutopilotWorld({
-      store,
-      observations: this.observations,
-      state,
-      pending: this.pendingWork(),
-    });
+    const world = await observeAutopilotWorld({ store, observations: this.observations, state, pending });
     const snapshot = buildAutopilotSnapshot(world);
     const decision = decideAutopilot(snapshot);
     const decided = new Set(decision.actions.map(autopilotActionIdentity));
@@ -425,7 +440,11 @@ export class AutopilotRunner {
       if (!decided.has(identity)) this.refusals.delete(identity);
     }
     const tick = this.ticks;
-    const reserved = new Set(this.launches.keys());
+    const reserved = new Set([
+      ...pending.agents.map((agent) => agent.name),
+      ...pending.validators.flatMap((run) => (run.name === undefined ? [] : [run.name])),
+      ...this.launches.keys(),
+    ]);
     const wakeKeys: string[] = [];
     let current: AutopilotAction | undefined;
     let launchedByCurrent: Promise<void>[] = [];
@@ -458,6 +477,15 @@ export class AutopilotRunner {
       }
       const mission = autopilotActionMission(action);
       if (mission !== undefined && this.missionPending(mission)) continue;
+      const superseded = await this.supersededLaunch(store, world.state, reserved, action);
+      if (!this.active) {
+        stopped = true;
+        break;
+      }
+      if (superseded !== undefined) {
+        await this.activity(store, action.type, { ...actionDetails(action), result: 'skipped', detail: superseded });
+        continue;
+      }
       current = action;
       launchedByCurrent = [];
       commandsByCurrent = false;
@@ -492,6 +520,44 @@ export class AutopilotRunner {
 
   private missionPending(missionId: string): boolean {
     return [...this.launches.values()].some((pending) => pending.launch.mission === missionId);
+  }
+
+  private async supersededLaunch(
+    store: TowerStore,
+    observed: TowerState,
+    reserved: Set<string>,
+    action: AutopilotAction,
+  ): Promise<string | undefined> {
+    if (!isAgentLaunch(action)) return undefined;
+    const starting = [...this.launches.values()].find(
+      ({ launch }) =>
+        action.type === 'start-validation' &&
+        launch.validator?.milestone === action.milestone &&
+        launch.validator.commit === action.commit &&
+        action.kinds.includes(launch.validator.kind),
+    );
+    if (starting !== undefined) return `validator ${starting.launch.agent} is starting`;
+    let current: TowerState;
+    try {
+      current = await store.load();
+    } catch {
+      return undefined;
+    }
+    for (const entry of current.roster.agents) reserved.add(entry.name);
+    const known = new Set(observed.roster.agents.map((entry) => entry.agentId));
+    const registered = current.roster.agents.find(
+      (entry) => !known.has(entry.agentId) && isLaunchSubjectAgent(current, action, entry),
+    );
+    if (registered !== undefined) return `${registered.kind} ${registered.name} was registered since the snapshot`;
+    if (action.type !== 'resume-worker') return undefined;
+    const worker = current.roster.agents.find((entry) => entry.name === action.worker);
+    return worker !== undefined && this.observations.agent(worker.agentId)?.status === 'running'
+      ? `worker ${action.worker} is running again`
+      : undefined;
+  }
+
+  private isOwnDuplicate(agent: string, error: string): boolean {
+    return this.startedAgents.has(agent) && error.includes(`"${agent}" is already registered`);
   }
 
   private refuse(identity: string, type: string, subject: string, error: string, tick: number): void {
@@ -599,7 +665,9 @@ export class AutopilotRunner {
         result = { ok: false, error: errorMessage(error) };
       }
       this.launches.delete(launch.agent);
+      const duplicate = !result.ok && this.isOwnDuplicate(launch.agent, result.error);
       if (result.ok) {
+        this.startedAgents.add(launch.agent);
         if (action.type !== 'start-validation') this.refusals.delete(launch.identity);
         if (launch.wakeKey !== undefined) {
           try {
@@ -608,13 +676,13 @@ export class AutopilotRunner {
             this.log?.warn('tower autopilot could not record a resume key', { key: launch.wakeKey, error: errorMessage(error) });
           }
         }
-      } else {
+      } else if (!duplicate) {
         await this.refusedInBackground(store, launch.identity, pending.type, pending.subject, result.error, tick);
       }
       await this.activity(store, action.type, {
         ...actionDetails(action),
         name: launch.agent,
-        result: result.ok ? 'started' : 'refused',
+        result: result.ok ? 'started' : duplicate ? 'duplicate' : 'refused',
         ...(result.ok
           ? result.detail === undefined
             ? {}

@@ -61,7 +61,8 @@ export type AutopilotValidatorKind = 'scrutiny' | 'user-testing';
 
 /**
  * Agent effects resolve once the agent started or was refused. While a promise is pending the
- * runner counts it as a live agent and repeats no action on its mission or validation.
+ * runner reports it as the running worker or reviewer of its mission, or the running validator of
+ * its validation, and repeats no action on that mission or validation.
  */
 export interface AutopilotEffects {
   spawnWorker(missionId: string, name: string): Promise<EffectResult>;
