@@ -35,6 +35,7 @@ import {
   mapWithConcurrency,
   resolveTowerRepoRoot,
   type TowerAgentKind,
+  type TowerState,
 } from '../protocol/index.ts';
 import { createTowerSpawnTool } from '../tools/spawn/spawnTool.ts';
 import {
@@ -797,12 +798,37 @@ export class TowerController implements TowerToolHost {
   }
 
   private async adoptTowerRoster(): Promise<void> {
+    const store = this.store();
+    const validators = await store.load().then(validatorWorktrees, () => []);
     try {
-      this.noteRetiredAgents(await this.store().adopt(this.sessionId));
+      this.noteRetiredAgents(await store.adopt(this.sessionId));
     } catch (error) {
       throw new TowerProtocolError(
         `failed to adopt the tower workspace roster: ${errorText(error)}`,
       );
+    }
+    const orphaned = validators.filter((entry) => this.runtimeInstance?.get(entry.agentId) === undefined);
+    await this.removeValidationWorktrees(store, orphaned.map((entry) => entry.worktree));
+  }
+
+  private async releaseValidationWorktree(agentId: string): Promise<void> {
+    if (!this.active) return;
+    const store = this.store();
+    const entry = await store.load().then(
+      (state) => (state.sessionId === this.boundSessionId ? store.resolveAgent(state, agentId) : undefined),
+      () => undefined,
+    );
+    if (entry?.kind !== 'validator' || entry.worktree === undefined) return;
+    await this.removeValidationWorktrees(store, [entry.worktree]);
+  }
+
+  private async removeValidationWorktrees(store: TowerStore, worktrees: readonly string[]): Promise<void> {
+    for (const worktree of worktrees) {
+      try {
+        await store.removeValidationWorktree(worktree);
+      } catch (error) {
+        this.log.warn('tower: failed to remove a validation worktree', { worktree, error: errorText(error) });
+      }
     }
   }
 
@@ -1133,7 +1159,14 @@ export class TowerController implements TowerToolHost {
     }
     const output = runtime.output(agentId);
     if (output !== undefined) this.retainedOutputs.set(agentId, output);
-    void runtime.dispose(agentId, `${agentKind(info.kind)} finished`).catch(() => false);
+    const kind = agentKind(info.kind);
+    const disposed = runtime.dispose(agentId, `${kind} finished`).catch(() => false);
+    if (kind !== 'validator') return;
+    this.track(
+      disposed.then(() => {
+        this.enqueueDeathWork(agentId, () => this.releaseValidationWorktree(agentId));
+      }),
+    );
   }
 
   diagnostic(message: string): void {
@@ -1171,6 +1204,14 @@ async function createBaseBranch(repoRoot: string, base: string): Promise<void> {
         `The changes are still uncommitted on "${base}" — commit or move them, then re-run /tower ${base}.`,
     );
   }
+}
+
+function validatorWorktrees(state: TowerState): { readonly agentId: string; readonly worktree: string }[] {
+  return state.roster.agents.flatMap((entry) =>
+    entry.kind === 'validator' && entry.worktree !== undefined
+      ? [{ agentId: entry.agentId, worktree: entry.worktree }]
+      : [],
+  );
 }
 
 function observedAgent(info: TowerAgentInfo, disposed: boolean): TowerAutopilotAgent {

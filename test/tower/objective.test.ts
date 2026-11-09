@@ -1,4 +1,5 @@
-import { mkdtemp, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -14,7 +15,13 @@ import { FakeSession, assistantMessage } from '../runtime/fakeSession.ts';
 
 import { TOWER_OBJECTIVE_DEFAULTS } from '../../src/config/index.ts';
 import { TOWER_VALIDATOR_ROLE, TOWER_WORKER_ROLE } from '../../src/prompts/index.ts';
-import { TowerStore } from '../../src/protocol/index.ts';
+import {
+  ACTIVITY_LOG,
+  STATE_FILE,
+  TowerStore,
+  type TowerState,
+  type TowerValidationWorktree,
+} from '../../src/protocol/index.ts';
 import type { TowerAgentSessionRequest } from '../../src/runtime/index.ts';
 import { createTowerSpawnTool } from '../../src/tools/spawn/spawnTool.ts';
 import { ORCHESTRATOR_CALLER } from '../../src/tools/support.ts';
@@ -37,6 +44,7 @@ import {
   FakeRuntime,
   FakeSessionManager,
   createRepo,
+  git,
   removeDir,
   sentText,
   settle,
@@ -81,6 +89,7 @@ interface HarnessOptions {
   readonly prepare?: (store: TowerStore) => Promise<void>;
   readonly entries?: FakeSessionManager['entries'];
   readonly createRuntime?: (controller: TowerController) => TowerRuntime;
+  readonly alive?: (pid: number) => boolean;
 }
 
 const cleanups: string[] = [];
@@ -117,7 +126,7 @@ async function harness(options: HarnessOptions = {}): Promise<Harness> {
   const controller = new TowerController({
     pi,
     ...(models === undefined ? {} : { models }),
-    isProcessAlive: () => true,
+    isProcessAlive: options.alive ?? (() => true),
     ...(options.runtime === false ? {} : { createRuntime: options.createRuntime ?? (() => runtime) }),
     createAutopilot: () => {
       const autopilot = new FakeAutopilot();
@@ -685,5 +694,152 @@ describe('autopilot effects', () => {
       },
     ]);
     expect(h.ctx.ui.notices).toContainEqual({ message: 'Objective O1 is blocked: stalled', level: 'warning' });
+  });
+});
+
+describe('validation worktrees', () => {
+  const DEAD_PID = 434_343;
+
+  async function mutateState(store: TowerStore, mutate: (state: TowerState) => void): Promise<void> {
+    const file = store.abs(STATE_FILE);
+    const state = JSON.parse(await readFile(file, 'utf8')) as TowerState;
+    mutate(state);
+    await writeFile(file, `${JSON.stringify(state, null, 2)}\n`);
+  }
+
+  async function validatingObjective(store: TowerStore): Promise<void> {
+    await executingObjective(store);
+    await mutateState(store, (state) => {
+      for (const feature of state.missions) feature.status = 'merged';
+    });
+    await store.startMilestoneValidation('MS1', await git(store.repoRoot, 'rev-parse', 'main'));
+  }
+
+  async function registerValidator(
+    store: TowerStore,
+    name: string,
+    agentId: string,
+    sessionId: string,
+  ): Promise<TowerValidationWorktree> {
+    const prepared = await store.prepareValidationWorktree('MS1', 'scrutiny');
+    const revision = (await store.load()).objective?.contractRevision;
+    await store.registerAgent({
+      name,
+      agentId,
+      sessionId,
+      kind: 'validator',
+      milestoneId: 'MS1',
+      validationKind: 'scrutiny',
+      validationRound: prepared.round,
+      validatedCommit: prepared.commit,
+      worktree: prepared.worktree,
+      cwd: prepared.path,
+      spawnedAt: new Date().toISOString(),
+      ...(revision === undefined ? {} : { contractRevision: revision }),
+    });
+    return prepared;
+  }
+
+  async function launchValidator(h: Harness): Promise<{ readonly agentId: string; readonly prepared: TowerValidationWorktree }> {
+    const launched = await h.controller.launchAgent({
+      name: 'ap-v-MS1-scrutiny-1',
+      kind: 'validator',
+      description: 'validate MS1',
+      cwd: h.repo,
+      prompt: 'validate MS1',
+    });
+    if (!launched.ok) throw new Error(launched.reason);
+    const prepared = await registerValidator(h.store, 'ap-v-MS1-scrutiny-1', launched.agentId, SESSION_ID);
+    expect(existsSync(prepared.path)).toBe(true);
+    return { agentId: launched.agentId, prepared };
+  }
+
+  async function activityLog(h: Harness): Promise<string> {
+    return readFile(h.store.abs(ACTIVITY_LOG), 'utf8');
+  }
+
+  it('keeps the worktree while the validator runs and removes it after its verdict and normal end', async () => {
+    const h = await harness({ prepare: validatingObjective });
+    await h.controller.enter();
+    const { agentId, prepared } = await launchValidator(h);
+    await h.store.submitValidation(
+      'ap-v-MS1-scrutiny-1',
+      { milestone: 'MS1', kind: 'scrutiny', verdict: 'pass', failures: [], checks: ['typecheck'], evidence: 'green' },
+      { skipScrutiny: false, skipUserTesting: false },
+    );
+    await settle();
+    expect(existsSync(prepared.path)).toBe(true);
+
+    h.runtime.finish(agentId, 'idle', { summary: 'Submitted pass.' });
+
+    await vi.waitFor(() => expect(existsSync(prepared.path)).toBe(false));
+    expect(h.runtime.disposed).toEqual([agentId]);
+    expect(await git(h.repo, 'worktree', 'list')).not.toContain(prepared.worktree);
+    expect(await activityLog(h)).toContain(`worktree.remove worktree=${prepared.worktree}`);
+  });
+
+  it('removes the worktree of a validator that died without a verdict, after its death mark', async () => {
+    const h = await harness({ prepare: validatingObjective });
+    await h.controller.enter();
+    const { agentId, prepared } = await launchValidator(h);
+
+    h.runtime.finish(agentId, 'timed_out', { stopReason: 'timed out after 2h' });
+
+    await vi.waitFor(() => expect(existsSync(prepared.path)).toBe(false));
+    const log = await activityLog(h);
+    const died = log.indexOf(`died name=ap-v-MS1-scrutiny-1 agent=${agentId}`);
+    expect(died).toBeGreaterThanOrEqual(0);
+    expect(log.indexOf(`worktree.remove worktree=${prepared.worktree}`)).toBeGreaterThan(died);
+    const entry = (await h.store.load()).roster.agents.find((agent) => agent.agentId === agentId);
+    expect(entry).toMatchObject({ deathStatus: 'timed_out', worktree: prepared.worktree });
+  });
+
+  it('cleans the worktree a validator left behind when pi resumes the session after a restart', async () => {
+    let left: TowerValidationWorktree | undefined;
+    const h = await harness({
+      prepare: async (store) => {
+        await validatingObjective(store);
+        left = await registerValidator(store, 'ap-v-MS1-scrutiny-1', 'agent-before-restart', SESSION_ID);
+      },
+      entries: [ACTIVE_MODE_RECORD],
+    });
+
+    expect(h.controller.isActive).toBe(true);
+    expect(left === undefined || existsSync(left.path)).toBe(false);
+    expect((await h.store.load()).roster.agents.map((entry) => entry.name)).toEqual(['ap-v-MS1-scrutiny-1']);
+  });
+
+  it('cleans the worktree of a validator the next session retires from a dead owner', async () => {
+    let left: TowerValidationWorktree | undefined;
+    const h = await harness({
+      prepare: async (store) => {
+        await validatingObjective(store);
+        await mutateState(store, (state) => {
+          state.sessionId = 'session-before-restart';
+          state.ownerPid = DEAD_PID;
+        });
+        left = await registerValidator(store, 'ap-v-MS1-scrutiny-1', 'agent-gone', 'session-before-restart');
+      },
+      alive: (pid) => pid !== DEAD_PID,
+    });
+
+    await expect(h.controller.enter()).resolves.toEqual({ entered: true });
+
+    expect(h.controller.isRetiredAgent('ap-v-MS1-scrutiny-1')).toBe(true);
+    expect(left === undefined || existsSync(left.path)).toBe(false);
+    expect((await h.store.load()).roster.agents).toEqual([]);
+  });
+
+  it('keeps the worktree of a validator still running in this process when tower mode is re-entered', async () => {
+    const h = await harness({ prepare: validatingObjective });
+    await h.controller.enter();
+    const { agentId, prepared } = await launchValidator(h);
+
+    await h.controller.exit();
+    await h.controller.enter();
+
+    expect(existsSync(prepared.path)).toBe(true);
+    h.runtime.finish(agentId, 'idle');
+    await vi.waitFor(() => expect(existsSync(prepared.path)).toBe(false));
   });
 });
