@@ -87,6 +87,8 @@ From any other project, pass the absolute path: `pi -e /path/to/pi-tower/src/ind
 
 There is no experiment flag to turn on. Loading the extension is the opt-in. Its tools stay inactive, and hidden from the model, until you run `/tower on`.
 
+For unattended runs, the package also ships the `pi-tower` command (`bin/pi-tower.js`, Node 22.19 or newer); see [Headless runs](#headless-runs-pi-tower-run).
+
 ## Quick start
 
 ```sh
@@ -107,7 +109,7 @@ A plain tower run ends when the orchestrator decides the work is done. An **obje
 
 ### What it guarantees
 
-- **You approve the plan.** The orchestrator turns your request into a contract: a goal, a definition of done, optional acceptance commands, and ordered milestones, each with its own validation. No feature starts before you run `/tower approve`. The orchestrator cannot approve for you: none of its tools can.
+- **You approve the plan.** The orchestrator turns your request into a contract: a goal, a definition of done, optional acceptance commands, and ordered milestones, each with its own validation. No feature starts before you run `/tower approve`, unless you turned on automatic approval yourself. The orchestrator cannot approve for you: none of its tools can.
 - **Every milestone is validated.** When all features of a milestone are merged (or abandoned), validators check the integrated result on one exact commit, the tip of the base branch.
 - **Failures get fixed.** A failed validation goes back to the orchestrator, which plans fix features into the same milestone. Once they merge, validation runs again on the new tip. This repeats until the milestone passes.
 - **Completion is gated.** The objective completes only when every milestone has passed, no feature is still open, and the final milestone passed on the current base tip. Nobody can mark it done otherwise, the orchestrator included.
@@ -227,7 +229,7 @@ A milestone passes when the latest round of every required kind passed on the sa
 > [!IMPORTANT]
 > Validation commands run mechanically in a fresh, detached checkout of the base tip, without installed dependencies or build output. Each command must bring its own setup: write `npm ci && npm test`, not `npm test`.
 
-The commands run one after another, each in its own `bash -c` started at the root of that checkout, so `cd` and exported variables do not carry over from one command to the next. Every command runs, even after an earlier one failed. Each one gets 15 minutes before its process group is killed. Its stdin is closed, and the environment adds `CI=1`, `TERM=dumb`, `NO_COLOR=1` and similar variables. The last 4000 characters of each command's output go into the validation report.
+The commands run one after another, each in its own `bash -c` started at the root of that checkout, so `cd` and exported variables do not carry over from one command to the next. Every command runs, even after an earlier one failed. Each one gets 15 minutes before its process group is killed. Its stdin is `/dev/null`, and the environment adds `CI=1`, `TERM=dumb`, `NO_COLOR=1` and similar variables. The last 4000 characters of each command's output go into the validation report.
 
 Validator agents work in a detached validation worktree, `.tower/worktrees/val-<milestone>-<kind>-r<round>`, checked out at the commit they validate. They may install dependencies, build and start the product there, but they cannot change files: they have no `write` or `edit` tool, and such calls are vetoed. Each validator reports its verdict exactly once with `TowerValidate`, and its worktree is removed afterwards. Every round, the mechanical ones included, is recorded under `.tower/comms/validations/`.
 
@@ -305,6 +307,121 @@ Two tools exist for objectives only:
 - **`TowerValidate`** (validators only) submits a validator's verdict for its milestone and kind: `pass` or `fail`, with failures, checks and evidence. A validator calls it exactly once.
 
 Two existing tools gain objective parameters. `TowerPlan` takes a `milestone` for every feature (required for build missions while an objective is open) and an `origin` of `plan` or `fix`. `TowerSpawn` takes `kind: "validator"` with a `milestone` and a `validation_kind` (`scrutiny` or `user-testing`), which the orchestrator uses to recover a stuck validation. See the [Tool reference](#tool-reference).
+
+## Headless runs: `pi-tower run`
+
+`pi-tower run` runs an objective unattended: in CI, from a scheduled job, or in a terminal you walk away from. It starts pi in RPC mode in your repository, turns tower mode on, hands over an objective file with `/tower objective --headless`, and follows the objective until it ends. In headless mode the orchestrator plans without asking questions. It decides open points itself, records each assumption as a note on the objective, and requests approval.
+
+```text
+pi-tower run -f <objective.md> [--auto-approve] [--timeout <ms>] [--cwd <dir>] [--pi <path>] [-- <extra pi args>]
+```
+
+| Option | Meaning |
+| --- | --- |
+| `-f`, `--file <path>` | The objective file (Markdown). Required. |
+| `--auto-approve` | Approves the plan without a human: the run sends `/tower approve --auto`, which is recorded as an automatic approval. Without it, the run stops at the plan with exit code 3. |
+| `--timeout <ms>` | Gives up after this many milliseconds, at most 2147483647 (exit code 2) |
+| `--cwd <dir>` | The repository to run in. Default: the current directory. |
+| `--pi <path>` | The pi executable: a path, or a command looked up on `PATH`. Default: `pi`. |
+| `-- <args>` | Passes everything after `--` to pi unchanged |
+
+Relative paths resolve against the current directory. `pi-tower --help` prints the usage, and `pi-tower --version` the version.
+
+| Exit code | Meaning |
+| --- | --- |
+| `0` | The objective completed |
+| `1` | The objective is blocked or paused (for example by a budget), pi exited after the run started, or `/tower approve --auto` failed for a reason other than those of exit code 3 |
+| `2` | Timeout (`--timeout`) |
+| `3` | The plan needs approval: `--auto-approve` was not given, or only a human may approve this plan because its contract changed while it was blocked or paused. The plan is printed. Approve it with `/tower approve` in pi, or re-run with `--auto-approve` where that is allowed. |
+| `4` | Usage or startup error: bad arguments, a missing objective file or directory, pi did not start, pi has no `/tower` command, or `/tower on` or `/tower objective` failed |
+| `130` / `143` | Interrupted by SIGINT / SIGTERM. pi is stopped first; a second signal kills it. |
+
+**Getting the command.** `pi-tower` is the package's `bin/pi-tower.js` and needs Node 22.19 or newer. From a checkout, run `node /path/to/pi-tower/bin/pi-tower.js run …`. A global npm install of the package puts `pi-tower` on your `PATH`.
+
+**Loading the extension.** The pi that the run starts loads pi-tower the same way your interactive sessions do: as an installed pi package, or with `-e`, which you pass after `--`, as in `pi-tower run -f objective.md -- -e /path/to/pi-tower/src/index.ts`. Do not combine both. pi would load the extension twice and rename its commands, and the run stops with exit code 4.
+
+What the run does:
+
+1. It starts `pi --mode rpc` in the repository, followed by your extra arguments. The checked-out branch becomes the base, so check out a branch first.
+2. It sends `/tower on`, then `/tower objective --headless @<absolute path of the file>`. If the workspace already has an objective that awaits approval or is executing, it follows that one instead and does not send the file again. A paused one ends the run at once with exit code 1: resume it in pi with `/tower resume`, then run `pi-tower run` again to follow it.
+3. It reads `.tower/comms/state.json` every second and prints a line whenever the objective or one of its milestones changes state.
+4. When the objective awaits approval, it prints the plan. With `--auto-approve` it approves and goes on; without it, it exits with 3.
+5. It ends when the objective completes, blocks or pauses, when pi exits, on timeout, or on a signal. pi is always stopped before the run exits.
+
+The run passes your environment to pi, so `PI_TOWER_CONFIG` and the `PI_TOWER_*_MODEL` variables work as usual, for example to give a run its own `tower.json`. Dialogs that nobody can answer are cancelled. The runner writes no files itself: it only reads the state file. Progress goes to stdout, warnings and errors go to stderr.
+
+When you take over a headless objective in pi, a plain `/tower approve` or `/tower resume` switches it back to interactive mode, so the orchestrator asks you again instead of deciding alone.
+
+For unattended runs, set `maxWallTimeMs` and `maxCostUsd` in the [objective settings](#the-objective-section) and use `--timeout` as the outer limit. Approve with `--auto-approve` and leave `objective.autoApprove` off: the flag acts only during this run, and when both are on, they can try to approve the same plan at once, which can fail the run.
+
+An end-to-end example. Keep the objective file outside the repository, because untracked files in the main checkout can end up in worker branches:
+
+```sh
+cd ~/work/shop
+git switch main
+pi-tower run -f ~/objectives/csv-export.md --auto-approve --timeout 14400000
+echo "exit code: $?"
+```
+
+[`examples/objective.md`](examples/objective.md) is a complete objective file for this run. The output looks like this, with the plan shortened:
+
+```text
+[pi-tower +0s] started pi (pi --mode rpc) in /home/you/work/shop
+[pi-tower +2s] > /tower on
+[pi-tower +2s] pi: Tower mode: ON
+[pi-tower +2s] > /tower objective --headless @/home/you/objectives/csv-export.md
+[pi-tower +2s] pi: Objective handed to the tower (headless)
+[pi-tower +2s] objective handed to the orchestrator: /home/you/objectives/csv-export.md
+[pi-tower +2s] waiting for the orchestrator to draft the objective
+[pi-tower +48s] O1 planning — MS1 pending · MS2 pending
+[pi-tower +2m31s] O1 awaiting-approval — MS1 pending · MS2 pending — features 0/2 done
+Plan for O1 "CSV and JSON export for shop report" (awaiting-approval):
+  goal: Add a --format option to shop report so the monthly report can be exported as CSV or JSON; the table output stays as it is.
+  …
+  milestones:
+    MS1 Serializers — validation: scrutiny, commands (npm ci && npm test)
+      CSV and JSON serializers for report rows, with unit tests.
+      - M1 CSV serializer
+      - M2 JSON serializer
+    MS2 CLI options and docs — validation: scrutiny, user-testing, commands (npm ci && npm run typecheck && npm test)
+      QA: Build with npm ci && npm run build, then run node dist/cli.js report --month 2026-10 with each --format.
+      (no features planned yet)
+  notes:
+    - Assumed: --output overwrites an existing file.
+  estimated runs: 6 (features + 2 × milestones)
+[pi-tower +2m31s] > /tower approve --auto
+[pi-tower +2m31s] pi: Objective O1 approved — executing
+[pi-tower +2m31s] auto-approved the plan of O1 (--auto-approve)
+[pi-tower +2m32s] O1 executing — MS1 active · MS2 pending — features 0/2 done
+[pi-tower +16m05s] O1 executing — MS1 validating · MS2 pending — features 2/2 done
+[pi-tower +21m40s] O1 executing — MS1 failed · MS2 pending — features 2/2 done
+[pi-tower +23m02s] O1 executing — MS1 active · MS2 pending — features 2/3 done
+[pi-tower +30m12s] O1 executing — MS1 validating · MS2 pending — features 3/3 done
+[pi-tower +34m49s] O1 executing — MS1 passed · MS2 pending — features 3/3 done
+[pi-tower +34m50s] O1 executing — MS1 passed · MS2 active — features 3/3 done
+[pi-tower +52m19s] O1 executing — MS1 passed · MS2 validating — features 5/5 done
+[pi-tower +1h00m] O1 executing — MS1 passed · MS2 passed — features 5/5 done
+[pi-tower +1h01m] O1 completed — MS1 passed · MS2 passed — features 5/5 done
+[pi-tower +1h01m] objective O1 "CSV and JSON export for shop report" completed
+exit code: 0
+```
+
+## Droid Missions and pi-tower
+
+Objective mode borrows the shape of [Factory's Droid Missions](https://docs.factory.com/missions/overview): plan with the human, approve, validate every milestone, fix until it holds. It changes how the work runs.
+
+| | Droid Missions | pi-tower objective mode |
+| --- | --- | --- |
+| Planning | With you: features grouped into milestones | With you, or alone with recorded assumptions in a headless run: a contract (goal, definition of done, acceptance commands) and ordered milestones whose features are tower missions |
+| Approval | You approve the plan before execution starts | Only you approve, with `/tower approve`, or an auto-approval you configured. The orchestrator has no tool to approve, and a contract change after approval needs your approval again. |
+| Features of a milestone | One after another (Factory's docs list parallel execution as an open question) | In parallel, each in its own git worktree and branch, up to `maxRunningAgents` |
+| Review of each feature | Validators check each milestone; no separate review per feature is documented | Each feature gets an independent reviewer and the merge gate before it merges, and the milestone is validated afterwards |
+| Validation | Scrutiny and user-testing validators | Scrutiny and user-testing validators, plus a mechanical `commands` kind: milestone and acceptance commands that must exit with 0, run by the tower without a model |
+| Fix loop | Failed validation leads to fix features | The same, until every milestone passes. A kind that fails `maxValidationRounds` times blocks the objective for you to decide. |
+| Limits | A feature retry limit | `maxFeatureAttempts`, `maxValidationRounds`, a stall watchdog, and wall-time and cost budgets (`maxWallTimeMs`, `maxCostUsd`) that pause the objective |
+| Headless | `droid exec --mission -f mission.md` | `pi-tower run -f objective.md [--auto-approve]`, with documented exit codes |
+| Models | Orchestrator, worker and validation worker models | Orchestrator, worker, reviewer and validator models |
+| Run estimate | features + 2 × milestones | The same formula, shown in the approval request |
 
 ## When Tower fits
 
@@ -726,6 +843,15 @@ Resource cost:
 - An objective takes at least one agent run per feature and two per milestone, and every failed validation adds fix features and validation rounds. Bound it with `maxCostUsd` and `maxWallTimeMs` in the [objective settings](#the-objective-section).
 
 Start with a few independent missions, and remove finished worktrees to get disk space back.
+
+## Known limitations
+
+- **Auto-approval and blocked objectives.** With `"objective": { "autoApprove": true }`, the orchestrator could draft a fresh objective after one blocked, and that objective would be approved automatically. This restarts the wall-time and cost budgets without you. Keep `autoApprove` off for interactive use. The headless runner exits with code 1 on a blocked objective before this can happen.
+- **Validation commands bring their own setup.** They run in a fresh, detached checkout without installed dependencies or build output, so every command must include its setup, for example `npm ci && npm test`.
+- **No browser for user-testing.** User-testing validators have no browser or GUI tooling. Their behavioural QA relies on what bash can drive: CLIs, HTTP calls and scripts.
+- **One-second commit timestamps.** To decide whether a review request covers the current branch tip, the autopilot compares commit timestamps, which have a resolution of one second. This is harmless: reviewers always review the real tip.
+- **Node 22 is untested for `pi-tower`.** The command was developed and tested on Node 26 only. Its code paths for Node 22.x are untested.
+- **`autoTeardown` does nothing yet.** The key is accepted and shown, but a completed objective never removes worktrees by itself. Run `/tower teardown`.
 
 ## Differences from kimi-code Tower
 
