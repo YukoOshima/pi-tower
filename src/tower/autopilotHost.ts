@@ -18,19 +18,26 @@ export function towerAutopilotObservations(controller: TowerController): Autopil
 
 export function towerAutopilotEffects(controller: TowerController): AutopilotEffects {
   const operations = createOrchestratorOperations(controller);
+  const run = (name: string, execute: () => Promise<TowerToolResult>): Promise<EffectResult> =>
+    effect(execute).finally(() => {
+      controller.noteStateChange(`autopilot ${name}`);
+    });
   return {
-    spawnWorker: (missionId, name) => effect(() => operations.spawnWorker(missionId, name)),
-    respawnWorker: (missionId, name, reason) => effect(() => operations.spawnWorker(missionId, name, reason)),
-    resumeWorker: (agentName, prompt) => effect(() => operations.resume(agentName, prompt)),
-    spawnReviewer: (missionId, name) => effect(() => operations.spawnReviewer(missionId, name)),
-    rebase: (missionId) => effect(() => operations.rebase(missionId)),
-    merge: (missionId) => effect(() => operations.merge(missionId)),
-    spawnValidator: (milestoneId, kind, name) => effect(() => operations.spawnValidator(milestoneId, kind, name)),
+    spawnWorker: (missionId, name) => run('spawn-worker', () => operations.spawnWorker(missionId, name)),
+    respawnWorker: (missionId, name, reason) =>
+      run('respawn-worker', () => operations.spawnWorker(missionId, name, reason)),
+    resumeWorker: (agentName, prompt) => run('resume-worker', () => operations.resume(agentName, prompt)),
+    spawnReviewer: (missionId, name) => run('spawn-reviewer', () => operations.spawnReviewer(missionId, name)),
+    rebase: (missionId) => run('rebase', () => operations.rebase(missionId)),
+    merge: (missionId) => run('merge', () => operations.merge(missionId)),
+    spawnValidator: (milestoneId, kind, name) =>
+      run('spawn-validator', () => operations.spawnValidator(milestoneId, kind, name)),
     wakeOrchestrator: (text) => {
       controller.wakeOrchestrator(text);
     },
     notifyHuman: (text, level) => {
       controller.notify(text, level);
+      controller.noteStateChange('autopilot notice');
     },
   };
 }
