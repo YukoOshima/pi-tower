@@ -116,3 +116,21 @@ export function isAlive(pid: number): boolean {
     return false;
   }
 }
+
+export async function waitDead(pid: number, timeoutMs = 5000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (isAlive(pid)) {
+    if (Date.now() > deadline) return false;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  return true;
+}
+
+export function processGroup(pid: number): number | undefined {
+  try {
+    const stat = readFileSync(`/proc/${String(pid)}/stat`, 'utf8');
+    return Number(stat.slice(stat.lastIndexOf(')') + 2).split(' ')[2]);
+  } catch {
+    return undefined;
+  }
+}

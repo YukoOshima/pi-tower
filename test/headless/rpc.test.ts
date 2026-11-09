@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { PiRpcClient, PiRpcError, type PiEvent } from '../../src/headless/rpc.ts';
-import { createWorld, type FakeWorld, type Json } from './harness.ts';
+import { createWorld, isAlive, processGroup, waitDead, type FakeWorld, type Json } from './harness.ts';
 
 const worlds: FakeWorld[] = [];
 const clients: PiRpcClient[] = [];
@@ -119,5 +119,22 @@ describe('PiRpcClient', () => {
     await stubborn.pi.send({ type: 'get_state' });
     expect(await stubborn.pi.terminate(200)).toMatchObject({ code: null, signal: 'SIGKILL' });
     expect(stubborn.world.log().some((entry) => entry.kind === 'signal')).toBe(true);
+  });
+
+  it.skipIf(process.platform === 'win32' || processGroup(process.pid) === undefined)('starts pi as the leader of its own process group', async () => {
+    const { pi } = start({});
+    await pi.send({ type: 'get_state' });
+    const pid = Number(pi.pid);
+    expect(processGroup(pid)).toBe(pid);
+    expect(processGroup(process.pid)).not.toBe(pid);
+  });
+
+  it.skipIf(process.platform === 'win32')('takes pi’s whole process group down when SIGTERM is ignored and SIGKILL follows', async () => {
+    const { world, pi } = start({ ignoreSigterm: true, spawnChild: true });
+    await pi.send({ type: 'get_state' });
+    const child = Number(world.log().find((entry) => entry.kind === 'child')?.pid);
+    expect(isAlive(child)).toBe(true);
+    expect(await pi.terminate(200)).toMatchObject({ signal: 'SIGKILL' });
+    expect(await waitDead(child)).toBe(true);
   });
 });

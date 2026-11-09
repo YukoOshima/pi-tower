@@ -1,3 +1,4 @@
+import { spawn } from 'node:child_process';
 import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -24,6 +25,7 @@ export interface FakeScenario {
   readonly stderr?: string;
   readonly startupExit?: number;
   readonly ignoreSigterm?: boolean;
+  readonly spawnChild?: boolean;
   readonly silent?: readonly string[];
   readonly commands?: readonly FakeCommand[];
 }
@@ -134,6 +136,11 @@ process.on('SIGTERM', () => {
   if (scenario.ignoreSigterm !== true) process.exit(143);
 });
 if (scenario.ignoreSigterm === true) setInterval(() => undefined, 1000);
+if (scenario.spawnChild === true) {
+  const child = spawn(process.execPath, ['-e', 'setTimeout(() => undefined, 60000)'], { stdio: 'ignore' });
+  child.unref();
+  log({ kind: 'child', pid: child.pid });
+}
 
 let buffer = '';
 process.stdin.on('data', (chunk: Buffer) => {

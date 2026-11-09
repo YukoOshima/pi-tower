@@ -7,7 +7,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import { HEADLESS_USAGE } from '../../src/headless/args.ts';
 import type { FakeCommand, FakeScenario } from './fakePi.ts';
-import { CHECKOUT, createWorld, feature, isAlive, milestone, objective, type FakeWorld, type Json } from './harness.ts';
+import { CHECKOUT, createWorld, feature, isAlive, milestone, objective, waitDead, type FakeWorld, type Json } from './harness.ts';
 
 const BIN = join(CHECKOUT, 'bin', 'pi-tower.js');
 const VERSION = (JSON.parse(readFileSync(join(CHECKOUT, 'package.json'), 'utf8')) as { version: string }).version;
@@ -243,7 +243,7 @@ describe('pi-tower CLI (bin/pi-tower.js)', () => {
     expect(isAlive(pid)).toBe(false);
   });
 
-  it('exits 130 when Ctrl-C reaches the whole process group and pi dies of the SIGINT itself', { timeout: 20_000 }, async () => {
+  it('turns a terminal Ctrl-C to its process group into a graceful SIGTERM for pi, which runs in its own group, and exits 130', { timeout: 20_000 }, async () => {
     const fake = world();
     const run = startCli(runArgs(fake, { commands: [TOWER_ON, DRAFT, approve()] }, ['--auto-approve']), { detached: true });
     await waitUntil(() => run.stdout().includes('] O1 executing'), 'the runner to see the objective executing');
@@ -252,7 +252,19 @@ describe('pi-tower CLI (bin/pi-tower.js)', () => {
     const result = await run.done;
     expect(result.code).toBe(130);
     expect(result.stderr).toContain('interrupted by SIGINT; pi was stopped (objective O1 was executing)');
+    expect(fake.log().filter((entry) => entry.kind === 'signal').map((entry) => entry.signal)).toEqual(['SIGTERM']);
     expect(isAlive(pid)).toBe(false);
+  });
+
+  it('leaves no pi behind when pi-tower itself is killed: pi shuts down on stdin EOF', { timeout: 20_000 }, async () => {
+    const fake = world();
+    const run = startCli(runArgs(fake, { commands: [TOWER_ON, DRAFT, approve()] }, ['--auto-approve']));
+    await waitUntil(() => run.stdout().includes('] O1 executing'), 'the runner to see the objective executing');
+    const pid = fakePid(fake);
+    run.kill('SIGKILL');
+    await run.done;
+    expect(await waitDead(pid)).toBe(true);
+    expect(fake.log().some((entry) => entry.kind === 'stdin-end')).toBe(true);
   });
 
   it('runs from an installed copy under node_modules, where Node refuses to strip types natively', { timeout: 20_000 }, async () => {

@@ -69,6 +69,7 @@ export class PiRpcClient {
   exit: PiExit | undefined;
   readonly exited: Promise<PiExit>;
   private readonly child: ChildProcessWithoutNullStreams;
+  private readonly ownGroup = process.platform !== 'win32';
   private readonly pending = new Map<string, Pending>();
   private readonly listeners = new Set<(event: PiEvent) => void>();
   private readonly goneListeners = new Set<(exit: PiExit) => void>();
@@ -85,6 +86,7 @@ export class PiRpcClient {
       cwd: options.cwd,
       env: options.env ?? process.env,
       stdio: ['pipe', 'pipe', 'pipe'],
+      detached: this.ownGroup,
     });
     this.child.on('exit', (code, signal) => {
       this.markGone({ code, signal, reason: signal === null ? `exited with code ${String(code)}` : `killed by ${signal}` });
@@ -263,8 +265,10 @@ export class PiRpcClient {
 
   kill(signal: NodeJS.Signals = 'SIGTERM'): void {
     if (this.exit !== undefined) return;
+    const pid = this.child.pid;
     try {
-      this.child.kill(signal);
+      if (signal === 'SIGKILL' && this.ownGroup && pid !== undefined) process.kill(-pid, signal);
+      else this.child.kill(signal);
     } catch {
       return;
     }
