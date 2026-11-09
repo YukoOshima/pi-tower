@@ -1,13 +1,19 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { MISSION_HANDED_TITLE, missionHandedBody } from '../../src/mission/texts.ts';
+import { MISSION_STATUS_KEY } from '../../src/mission/constants.ts';
+import {
+  MISSION_HANDED_TITLE,
+  MISSION_STATUS_PLANNING_GOAL,
+  MISSION_STATUS_WAITING_FOR_GOAL,
+  missionHandedBody,
+} from '../../src/mission/texts.ts';
 import { buildObjectivePlanningPrompt } from '../../src/prompts/objectivePlanning.ts';
 import { STATE_FILE, type TowerState } from '../../src/protocol/index.ts';
 import { handleTowerCommand } from '../../src/tower/command.ts';
-import { removeDir } from '../tower/fakes.ts';
+import { removeDir, settle } from '../tower/fakes.ts';
 import { awaitingApproval, missionHarness, plannedObjective, recordingUi } from './fakes.ts';
 
 const cleanups: string[] = [];
@@ -90,12 +96,44 @@ describe('mission intake', () => {
       },
     ]);
 
-    await h.run('exit');
+    const other = await missionHarness(cleanups);
+    await other.run('');
+    await other.input('@team please add a CSV export');
+    expect(other.pi.userMessages).toEqual([
+      { text: buildObjectivePlanningPrompt({ mode: 'interactive', text: '@team please add a CSV export' }) },
+    ]);
+  });
+
+  it('moves the footer from waiting for the goal straight to planning it, without clearing it in between', async () => {
+    const h = await missionHarness(cleanups);
     await h.run('');
-    await h.input('@team please add a CSV export');
-    expect(h.pi.userMessages[1]).toEqual({
-      text: buildObjectivePlanningPrompt({ mode: 'interactive', text: '@team please add a CSV export' }),
+    await vi.waitFor(() => {
+      expect(h.ctx.missionStatus()).toBe(MISSION_STATUS_WAITING_FOR_GOAL);
     });
+    await settle(10);
+    const from = h.ctx.statusCalls.length;
+
+    await h.input(GOAL);
+
+    await vi.waitFor(() => {
+      expect(h.ctx.missionStatus()).toBe(MISSION_STATUS_PLANNING_GOAL);
+    });
+    await settle(10);
+    expect(h.ctx.statusCalls.slice(from).filter((call) => call.key === MISSION_STATUS_KEY)).toEqual([
+      { key: MISSION_STATUS_KEY, text: MISSION_STATUS_PLANNING_GOAL },
+    ]);
+  });
+
+  it('goes back to idle, without the planning status, when the handover is refused', async () => {
+    const h = await missionHarness(cleanups);
+    await h.run('');
+    await awaitingApproval(h.store);
+
+    await h.input(GOAL);
+
+    await settle(10);
+    expect(h.ctx.statusCalls.filter((call) => call.key === MISSION_STATUS_KEY && call.text === MISSION_STATUS_PLANNING_GOAL)).toEqual([]);
+    expect(h.mission.intakeArmed).toBe(false);
   });
 
   it('disarms on /mission exit and on /tower off', async () => {

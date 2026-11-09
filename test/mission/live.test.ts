@@ -1,6 +1,7 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
+import { visibleWidth } from '@earendil-works/pi-tui';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { MISSION_MODE_ENTRY, MISSION_PANEL_MAX_LINES, MISSION_STATUS_KEY, MISSION_WIDGET_KEY } from '../../src/mission/constants.ts';
@@ -47,6 +48,32 @@ describe('Mission Control panel', () => {
     expect(lines).toContain('models: orchestrator session-model · worker session-model · reviewer session-model · validator = orchestrator');
     expect(lines.at(-1)).toBe('next: 2 features of MS1 in flight — validation starts once all are merged');
     expect(h.ctx.ui.statuses.get(MISSION_STATUS_KEY)).toBe('mission O1 executing · MS1 0/2 merged');
+  });
+
+  it('caps every panel row at the terminal width in the TUI, and sends plain lines over RPC', async () => {
+    const h = await missionHarness(cleanups);
+    await executingMission(h);
+    await h.run('');
+    await vi.waitFor(() => {
+      expect(h.ctx.widget()).toBeDefined();
+    });
+
+    const call = h.ctx.widgetCalls.find((entry) => entry.key === MISSION_WIDGET_KEY && entry.lines !== undefined);
+    const rows = call?.component?.render(40) ?? [];
+    expect(rows).toHaveLength(call?.lines?.length ?? -1);
+    for (const row of rows) expect(visibleWidth(row)).toBeLessThanOrEqual(39);
+    expect(rows[0]?.startsWith(' 🔵 Mission O1')).toBe(true);
+
+    const rpc = await missionHarness(cleanups);
+    rpc.ctx.mode = 'rpc';
+    await executingMission(rpc);
+    await rpc.run('');
+    await vi.waitFor(() => {
+      expect(rpc.ctx.widget()).toBeDefined();
+    });
+    const plain = rpc.ctx.widgetCalls.find((entry) => entry.key === MISSION_WIDGET_KEY && entry.lines !== undefined);
+    expect(plain?.component).toBeUndefined();
+    expect(plain?.lines?.[0]).toMatch(/^🔵 Mission O1 /);
   });
 
   it('refreshes on tower state changes at most once per throttle window', async () => {

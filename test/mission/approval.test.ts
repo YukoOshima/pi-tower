@@ -5,16 +5,37 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   MISSION_APPROVE_OPTION,
+  MISSION_APPROVE_REVISED_OPTION,
   MISSION_KEEP_PLANNING_OPTION,
 } from '../../src/mission/texts.ts';
 import { STATE_FILE, type TowerState } from '../../src/protocol/index.ts';
 import { handleTowerCommand } from '../../src/tower/command.ts';
 import { removeDir, settle } from '../tower/fakes.ts';
-import { awaitingApproval, missionHarness, plannedObjective, recordingUi, type MissionHarness } from './fakes.ts';
+import {
+  awaitingApproval,
+  missionHarness,
+  plannedObjective,
+  recordingUi,
+  type MissionHarness,
+  type MissionHarnessOptions,
+} from './fakes.ts';
 
 const cleanups: string[] = [];
+const harnesses: MissionHarness[] = [];
+
+async function harness(options: MissionHarnessOptions = {}): Promise<MissionHarness> {
+  const created = await missionHarness(cleanups, options);
+  harnesses.push(created);
+  return created;
+}
 
 afterEach(async () => {
+  for (const h of harnesses.splice(0)) {
+    for (const select of h.ctx.selects) {
+      expect(select.options[0], select.title).toBe(MISSION_KEEP_PLANNING_OPTION);
+      expect([MISSION_APPROVE_OPTION, MISSION_APPROVE_REVISED_OPTION]).not.toContain(select.options[0]);
+    }
+  }
   for (const dir of cleanups.splice(0)) await removeDir(dir);
 });
 
@@ -40,7 +61,7 @@ async function requestApproval(h: MissionHarness): Promise<void> {
 
 describe('mission approval dialog', () => {
   it('offers to approve once the plan awaits approval, and approving does what /mission approve does', async () => {
-    const h = await missionHarness(cleanups);
+    const h = await harness();
     await planningMission(h);
 
     await requestApproval(h);
@@ -49,8 +70,8 @@ describe('mission approval dialog', () => {
       expect(h.ctx.selects).toHaveLength(1);
     });
     const dialog = h.ctx.selects[0]!;
-    expect(dialog.title).toBe('Start mission O1 "CSV and JSON export"? 2 milestones · 2 features planned');
-    expect(dialog.options).toEqual([MISSION_APPROVE_OPTION, MISSION_KEEP_PLANNING_OPTION]);
+    expect(dialog.title).toBe('Mission O1 "CSV and JSON export" — plan ready (2 milestones · 2 features). Approve it?');
+    expect(dialog.options).toEqual([MISSION_KEEP_PLANNING_OPTION, MISSION_APPROVE_OPTION]);
     expect(dialog.signal?.aborted).toBe(false);
     expect(h.mission.approvalOpen).toBe(true);
 
@@ -66,7 +87,7 @@ describe('mission approval dialog', () => {
   });
 
   it('keeps planning on "Keep planning" or a dismissal and tells the human what to do next', async () => {
-    const h = await missionHarness(cleanups);
+    const h = await harness();
     await planningMission(h);
     await requestApproval(h);
     await vi.waitFor(() => {
@@ -98,7 +119,7 @@ describe('mission approval dialog', () => {
   });
 
   it('dismisses the dialog through its signal when the objective leaves awaiting-approval another way', async () => {
-    const h = await missionHarness(cleanups);
+    const h = await harness();
     await planningMission(h);
     await requestApproval(h);
     await vi.waitFor(() => {
@@ -120,7 +141,7 @@ describe('mission approval dialog', () => {
   });
 
   it('closes the dialog when mission mode is left', async () => {
-    const h = await missionHarness(cleanups);
+    const h = await harness();
     await planningMission(h);
     await requestApproval(h);
     await vi.waitFor(() => {
@@ -134,7 +155,7 @@ describe('mission approval dialog', () => {
   });
 
   it('waits until the orchestrator has finished presenting the plan', async () => {
-    const h = await missionHarness(cleanups);
+    const h = await harness();
     await planningMission(h);
     h.ctx.idle = false;
 
@@ -150,7 +171,7 @@ describe('mission approval dialog', () => {
   });
 
   it('replaces an open dialog when the orchestrator requests approval for a revised plan', async () => {
-    const h = await missionHarness(cleanups);
+    const h = await harness();
     await planningMission(h);
     await requestApproval(h);
     await vi.waitFor(() => {
@@ -164,11 +185,82 @@ describe('mission approval dialog', () => {
       expect(h.ctx.selects).toHaveLength(2);
     });
     expect(h.ctx.selects[0]?.signal?.aborted).toBe(true);
-    expect(h.ctx.selects[1]?.title).toBe('Start mission O1 "CSV and JSON export"? 2 milestones · 3 features planned');
+    expect(h.ctx.selects[1]?.title).toBe('Mission O1 "CSV and JSON export" — plan ready (2 milestones · 3 features). Approve it?');
+  });
+
+  it('puts the non-approving choice first, so Enter on a fresh dialog leaves the plan awaiting approval', async () => {
+    const h = await harness();
+    await planningMission(h);
+    await requestApproval(h);
+    await vi.waitFor(() => {
+      expect(h.ctx.selects).toHaveLength(1);
+    });
+    const dialog = h.ctx.selects[0]!;
+    expect(dialog.options[0]).toBe(MISSION_KEEP_PLANNING_OPTION);
+
+    dialog.answer(dialog.options[0]);
+
+    await vi.waitFor(() => {
+      expect(h.ctx.ui.notices.at(-1)?.message).toContain('Mission O1 still awaits your approval');
+    });
+    await settle();
+    expect((await readState(h.repo)).objective).toMatchObject({ status: 'awaiting-approval' });
+    expect((await readState(h.repo)).objective?.approvedBy).toBeUndefined();
+    expect(h.hooks.ticks).toEqual([]);
+  });
+
+  it('waits while the editor holds text and offers on the next refresh once it is cleared', async () => {
+    const h = await harness();
+    await planningMission(h);
+    h.ctx.editorText = 'please split M3 into two features';
+
+    await requestApproval(h);
+    await vi.waitFor(() => {
+      expect(h.ctx.widget()?.[0]).toContain('awaiting approval');
+    });
+    await settle(10);
+    h.mission.refreshSoon();
+    await settle(10);
+    expect(h.ctx.selects).toEqual([]);
+
+    h.ctx.editorText = '   ';
+    h.timers.advance(5_000);
+    await vi.waitFor(() => {
+      expect(h.ctx.selects).toHaveLength(1);
+    });
+    expect(h.ctx.selects[0]?.options).toEqual([MISSION_KEEP_PLANNING_OPTION, MISSION_APPROVE_OPTION]);
+  });
+
+  it('asks to approve the revised plan after a contract change', async () => {
+    const h = await harness();
+    await planningMission(h);
+    await h.store.requestObjectiveApproval();
+    await h.store.approveObjective('human');
+    h.controller.noteStateChange('approved');
+    await vi.waitFor(() => {
+      expect(h.ctx.widget()?.[0]).toContain('executing');
+    });
+
+    await h.store.updateObjective({ definitionOfDone: ['both formats work', 'the README documents --format'] });
+    h.controller.noteTowerToolResult('TowerObjective', false);
+
+    await vi.waitFor(() => {
+      expect(h.ctx.selects).toHaveLength(1);
+    });
+    const dialog = h.ctx.selects[0]!;
+    expect(dialog.title).toBe(
+      'Mission O1 "CSV and JSON export" — plan revised (2 milestones · 2 features). Approve the revised plan?',
+    );
+    expect(dialog.options).toEqual([MISSION_KEEP_PLANNING_OPTION, MISSION_APPROVE_REVISED_OPTION]);
+
+    dialog.answer(MISSION_APPROVE_REVISED_OPTION);
+    await vi.waitFor(async () => {
+      expect((await readState(h.repo)).objective).toMatchObject({ status: 'executing', approvedBy: 'human' });
+    });
   });
 
   it('is not offered for an approval that was already pending when mission mode started, until it is requested again', async () => {
-    const h = await missionHarness(cleanups);
+    const h = await harness();
     await awaitingApproval(h.store);
 
     await h.run('');
@@ -185,7 +277,7 @@ describe('mission approval dialog', () => {
   });
 
   it('is never shown for a headless objective, with autoApprove, or without a UI', async () => {
-    const headless = await missionHarness(cleanups);
+    const headless = await harness();
     await headless.store.init('session-mission', 'main');
     await headless.store.setObjectiveMode('headless');
     await headless.run('');
@@ -201,7 +293,7 @@ describe('mission approval dialog', () => {
     await settle(10);
     expect(headless.ctx.selects).toEqual([]);
 
-    const auto = await missionHarness(cleanups);
+    const auto = await harness();
     auto.hooks.settings = { ...auto.hooks.settings, autoApprove: true };
     await planningMission(auto);
     await requestApproval(auto);
@@ -211,7 +303,7 @@ describe('mission approval dialog', () => {
     await settle(10);
     expect(auto.ctx.selects).toEqual([]);
 
-    const blind = await missionHarness(cleanups);
+    const blind = await harness();
     blind.ctx.hasUI = false;
     await blind.run('');
     await blind.input('Add a CSV export');
@@ -225,7 +317,7 @@ describe('mission approval dialog', () => {
   });
 
   it('never blocks a command or a refresh while the dialog waits for an answer', async () => {
-    const h = await missionHarness(cleanups);
+    const h = await harness();
     await planningMission(h);
     await requestApproval(h);
     await vi.waitFor(() => {
@@ -242,7 +334,7 @@ describe('mission approval dialog', () => {
   });
 
   it('reports a failing dialog without a notice', async () => {
-    const h = await missionHarness(cleanups);
+    const h = await harness();
     await planningMission(h);
     h.ctx.selectFailure = new Error('dialog unavailable');
     const notices = h.ctx.ui.notices.length;

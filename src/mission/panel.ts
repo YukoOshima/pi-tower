@@ -1,3 +1,5 @@
+import { truncateToWidth, type Component } from '@earendil-works/pi-tui';
+
 import type { TowerResolvedModel, TowerResolvedModels } from '../config/index.ts';
 import { formatDuration, formatUsd } from '../prompts/objectiveFormat.ts';
 import {
@@ -53,6 +55,13 @@ export function renderMissionPanel(input: MissionPanelInput): string[] {
   return [first, strip, ...features, ...rest].map(clip);
 }
 
+export function missionPanelComponent(lines: readonly string[]): Component {
+  return {
+    render: (width) => lines.map((line) => ` ${truncateToWidth(line, Math.max(1, width - 2))}`),
+    invalidate: () => undefined,
+  };
+}
+
 export function renderMissionStatus(input: MissionPanelInput): string {
   const { objective } = input;
   const current = currentMilestone(objective);
@@ -98,7 +107,10 @@ function milestoneStrip(input: MissionPanelInput, current: TowerMilestone | unde
     return `${label} (${String(merged)}/${String(features.length)} merged)`;
   });
   if (items.length <= MILESTONE_STRIP_MAX) return items.join('   ');
-  const at = Math.max(0, milestones.findIndex((milestone) => milestone.id === current?.id));
+  const at =
+    current === undefined
+      ? milestones.length - 1
+      : Math.max(0, milestones.findIndex((milestone) => milestone.id === current.id));
   const start = Math.min(Math.max(0, at - 1), items.length - MILESTONE_STRIP_MAX);
   const end = start + MILESTONE_STRIP_MAX;
   return [

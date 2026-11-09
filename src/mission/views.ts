@@ -61,7 +61,7 @@ export function renderMissionHeader(input: MissionHeaderInput): string {
   ].join('\n');
 }
 
-export function renderMissionPlanning(models: MissionModelsView, goal: string): string {
+export function renderMissionPlanning(models: MissionModelsView, goal: string | undefined): string {
   return [...missionModelLines(models).map(indent), missionPlanningLine(goal)].join('\n');
 }
 

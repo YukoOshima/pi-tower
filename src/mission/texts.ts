@@ -119,8 +119,9 @@ export function missionPreviousLine(objective: TowerObjective): string {
   return `Previous mission ${objective.id} "${objective.title}" is ${objective.status} — your goal starts a new one.`;
 }
 
-export function missionPlanningLine(goal: string): string {
-  return `The orchestrator is planning your goal: "${preview(goal, 160)}". Answer its questions in plain messages; it drafts the mission and proposes a plan for your approval. /mission <goal> starts over with another goal.`;
+export function missionPlanningLine(goal: string | undefined): string {
+  const subject = goal === undefined ? 'the goal you handed over' : `your goal: "${preview(goal, 160)}"`;
+  return `The orchestrator is planning ${subject}. Answer its questions in plain messages; it drafts the mission and proposes a plan for your approval. /mission <goal> starts over with another goal.`;
 }
 
 export const MISSION_HANDED_TITLE = 'Mission goal handed to the orchestrator';
@@ -299,11 +300,31 @@ export const MISSION_MODELS_TEXTS: TowerModelsCommandTexts = {
     'The orchestrator model is applied when mission mode starts — run /mission exit and /mission, or switch this session now with /model.',
 };
 
+export const MISSION_KEEP_PLANNING_OPTION = 'Not yet — keep planning';
 export const MISSION_APPROVE_OPTION = 'Approve and start mission';
-export const MISSION_KEEP_PLANNING_OPTION = 'Keep planning';
+export const MISSION_APPROVE_REVISED_OPTION = 'Approve the revised plan';
 
-export function missionApprovalTitle(objective: TowerObjective, milestones: number, features: number): string {
-  return `Start mission ${objective.id} "${objective.title}"? ${count(milestones, 'milestone')} · ${count(features, 'feature')} planned`;
+export interface MissionApprovalDialog {
+  readonly title: string;
+  readonly options: readonly [keep: string, approve: string];
+}
+
+export function missionApprovalDialog(
+  objective: TowerObjective,
+  milestones: number,
+  features: number,
+): MissionApprovalDialog {
+  const planned = `${count(milestones, 'milestone')} · ${count(features, 'feature')}`;
+  if (objective.approvalReason === 'contract-changed') {
+    return {
+      title: `Mission ${objective.id} "${objective.title}" — plan revised (${planned}). Approve the revised plan?`,
+      options: [MISSION_KEEP_PLANNING_OPTION, MISSION_APPROVE_REVISED_OPTION],
+    };
+  }
+  return {
+    title: `Mission ${objective.id} "${objective.title}" — plan ready (${planned}). Approve it?`,
+    options: [MISSION_KEEP_PLANNING_OPTION, MISSION_APPROVE_OPTION],
+  };
 }
 
 export function missionKeepPlanning(objective: TowerObjective): string {

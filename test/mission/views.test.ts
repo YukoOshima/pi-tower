@@ -149,6 +149,9 @@ describe('mission header', () => {
     expect(renderMissionPlanning({ resolved }, 'Add   a CSV export')).toContain(
       'The orchestrator is planning your goal: "Add a CSV export".',
     );
+    expect(renderMissionPlanning({ resolved }, undefined)).toContain(
+      'The orchestrator is planning the goal you handed over. Answer its questions in plain messages;',
+    );
     const control = renderMissionControl({
       models: { resolved },
       objective: objective('awaiting-approval'),

@@ -1,8 +1,14 @@
+import { visibleWidth } from '@earendil-works/pi-tui';
 import { describe, expect, it } from 'vitest';
 
 import { resolveTowerModels, type TowerConfig } from '../../src/config/index.ts';
 import { MISSION_PANEL_MAX_LINES } from '../../src/mission/constants.ts';
-import { renderMissionPanel, renderMissionStatus, type MissionPanelInput } from '../../src/mission/panel.ts';
+import {
+  missionPanelComponent,
+  renderMissionPanel,
+  renderMissionStatus,
+  type MissionPanelInput,
+} from '../../src/mission/panel.ts';
 import { MissionRefresher } from '../../src/mission/refresher.ts';
 import type {
   TowerMilestone,
@@ -191,6 +197,34 @@ describe('renderMissionPanel', () => {
 
     expect(strip.startsWith('… 3 earlier   ✅ MS4 Step 4   🔵 MS5 Step 5')).toBe(true);
     expect(strip.endsWith('⚪ MS8 Step 8')).toBe(true);
+  });
+
+  it('shows the last milestones of a long strip once every milestone passed', () => {
+    const done = objective({
+      status: 'completed',
+      completedAt: new Date(STARTED + 600_000).toISOString(),
+      milestones: Array.from({ length: 8 }, (_, index) =>
+        milestone(`MS${String(index + 1)}`, `Step ${String(index + 1)}`, 'passed', index + 1),
+      ),
+    });
+
+    const strip = renderMissionPanel(input({ objective: done, missions: [] }))[1];
+
+    expect(strip).toBe('… 3 earlier   ✅ MS4 Step 4   ✅ MS5 Step 5   ✅ MS6 Step 6   ✅ MS7 Step 7   ✅ MS8 Step 8');
+  });
+
+  it('renders the TUI panel one row per line, cut to the terminal width', () => {
+    const lines = renderMissionPanel(input());
+
+    const narrow = missionPanelComponent(lines).render(30);
+    const wide = missionPanelComponent(lines).render(400);
+
+    expect(narrow).toHaveLength(lines.length);
+    for (const row of narrow) {
+      expect(row.startsWith(' ')).toBe(true);
+      expect(visibleWidth(row)).toBeLessThanOrEqual(29);
+    }
+    expect(wide).toEqual(lines.map((line) => ` ${line}`));
   });
 
   it('mirrors the panel in one footer status line', () => {

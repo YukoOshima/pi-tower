@@ -12,6 +12,7 @@ import {
   currentMilestone,
   hasAnyCommit,
   isInsideRepo,
+  isTerminalObjectiveStatus,
   objectiveMissions,
   tryGit,
   type TowerObjective,
@@ -48,17 +49,20 @@ import {
   MISSION_STATUS_KEY,
   MISSION_WIDGET_KEY,
 } from './constants.ts';
-import { renderMissionPanel, renderMissionStatus, type MissionPanelInput } from './panel.ts';
+import {
+  missionPanelComponent,
+  renderMissionPanel,
+  renderMissionStatus,
+  type MissionPanelInput,
+} from './panel.ts';
 import { DEFAULT_MISSION_TIMERS, MissionRefresher, type MissionTimers } from './refresher.ts';
 import {
   MISSION_AGENTS_TITLE,
   MISSION_ALREADY_OFF,
-  MISSION_APPROVE_OPTION,
   MISSION_CONTINUES_LATER,
   MISSION_CONTROL_TITLE,
   MISSION_DETACHED_HEAD,
   MISSION_HANDED_TITLE,
-  MISSION_KEEP_PLANNING_OPTION,
   MISSION_MODE_TITLE,
   MISSION_NO_COMMITS,
   MISSION_NOTHING_TO_RESUME,
@@ -68,8 +72,8 @@ import {
   MISSION_STATUS_WAITING_FOR_GOAL,
   MISSION_STOP_USAGE,
   missionAgentsFailed,
+  missionApprovalDialog,
   missionApprovalFailed,
-  missionApprovalTitle,
   missionApprovedBody,
   missionApprovedTitle,
   missionFailure,
@@ -91,6 +95,7 @@ import {
   missionStoppedTitle,
   missionTickFailed,
   missionWorkspaceFailure,
+  type MissionApprovalDialog,
 } from './texts.ts';
 import {
   renderMissionControl,
@@ -203,8 +208,8 @@ export class MissionMode {
     this.activate(ctx);
     const visible = this.visibleObjective(state);
     try {
-      if (this.phase === 'planning' && visible === undefined) {
-        ui.notice(MISSION_MODE_TITLE, renderMissionPlanning(this.modelsView(), this.goal ?? ''));
+      if (visible === undefined && (this.phase === 'planning' || handoverPending(state))) {
+        ui.notice(MISSION_MODE_TITLE, renderMissionPlanning(this.modelsView(), this.goal));
       } else if (visible !== undefined && visible.status !== 'completed') {
         this.setPhase('idle');
         ui.notice(MISSION_CONTROL_TITLE, this.controlView(state, visible));
@@ -345,7 +350,7 @@ export class MissionMode {
 
   onTowerCommand(args: string): void {
     const [head = '', next = ''] = args.trim().toLowerCase().split(/\s+/);
-    if (head === 'objective' && next !== 'status' && this.phase === 'armed') this.setPhase('idle');
+    if (head === 'objective' && next !== 'status' && this.phase !== 'idle') this.setPhase('idle');
     this.refreshSoon();
   }
 
@@ -360,8 +365,12 @@ export class MissionMode {
     if (this.phase !== 'armed' || event.source === 'extension') return CONTINUE;
     const text = event.text.trim();
     if (text.length === 0 || text.startsWith('/')) return CONTINUE;
-    this.setPhase('idle');
-    if (!this.on || !this.controller.isActive) return CONTINUE;
+    if (!this.on || !this.controller.isActive) {
+      this.setPhase('idle');
+      return CONTINUE;
+    }
+    this.phase = 'planning';
+    this.goal = event.text;
     this.controller.observe(ctx);
     await this.handOver(await intakeRequest(event.text, ctx.cwd), ctx, commandUi(ctx), event.images);
     return HANDLED;
@@ -419,20 +428,29 @@ export class MissionMode {
     images: InputImages | undefined,
     initializedBase?: string,
   ): Promise<void> {
-    this.setPhase('idle');
+    const goal = request.text ?? `@${request.file ?? ''}`;
+    this.phase = 'planning';
+    this.goal = goal;
+    let handed = false;
     try {
       const outcome = await handOverObjective(this.controller, ctx, this.sender(images), request);
       if (!outcome.handed) {
         ui.error(missionOpenRefusal(outcome.open));
         return;
       }
-      if (outcome.current !== undefined && outcome.current.status !== 'planning') this.hide(outcome.current);
-      this.goal = request.text ?? `@${request.file ?? ''}`;
+      handed = true;
+      const previous = outcome.current;
+      if (previous !== undefined && isTerminalObjectiveStatus(previous.status)) this.hide(previous);
       this.phase = 'planning';
+      this.goal = goal;
       ui.notice(MISSION_HANDED_TITLE, missionHandedBody(outcome.initializedBase ?? initializedBase));
     } catch (error) {
       ui.error(missionFailure(errorText(error)));
     } finally {
+      if (!handed) {
+        this.phase = 'idle';
+        this.goal = undefined;
+      }
       this.refresher.request();
     }
   }
@@ -495,6 +513,7 @@ export class MissionMode {
   private visibleObjective(state: TowerState): TowerObjective | undefined {
     const objective = state.objective;
     if (objective === undefined) return undefined;
+    if (handoverPending(state)) return undefined;
     const hidden = this.hidden;
     return hidden?.id === objective.id && hidden.status === objective.status ? undefined : objective;
   }
@@ -518,7 +537,7 @@ export class MissionMode {
     if (!this.on) return;
     const ctx = this.controller.context;
     const visible = this.visibleObjective(state);
-    if (visible !== undefined && this.phase === 'planning') {
+    if (visible !== undefined && !isTerminalObjectiveStatus(visible.status) && this.phase === 'planning') {
       this.phase = 'idle';
       this.goal = undefined;
     }
@@ -529,7 +548,7 @@ export class MissionMode {
         ctx,
         this.phase === 'armed'
           ? MISSION_STATUS_WAITING_FOR_GOAL
-          : this.phase === 'planning'
+          : this.phase === 'planning' || handoverPending(state)
             ? MISSION_STATUS_PLANNING_GOAL
             : undefined,
       );
@@ -559,7 +578,7 @@ export class MissionMode {
       previous !== undefined &&
       (previous === null || previous.id !== objective.id || previous.status !== 'awaiting-approval');
     if ((entered || requested) && this.canOffer(ctx, state, objective)) this.offerFor = objective.id;
-    if (this.offerFor !== objective.id || !idle(ctx)) return;
+    if (this.offerFor !== objective.id || !idle(ctx) || editorHoldsText(ctx)) return;
     this.offerFor = undefined;
     this.closeDialog();
     this.offer(ctx, state, objective);
@@ -581,21 +600,20 @@ export class MissionMode {
     const dialog: ApprovalDialog = { objectiveId: objective.id, abort: new AbortController() };
     this.dialog = dialog;
     const features = objectiveMissions(state).filter((mission) => mission.status !== 'abandoned').length;
-    const title = missionApprovalTitle(objective, objective.milestones.length, features);
-    void this.awaitApproval(ctx, dialog, title, objective);
+    const question = missionApprovalDialog(objective, objective.milestones.length, features);
+    void this.awaitApproval(ctx, dialog, question, objective);
   }
 
   private async awaitApproval(
     ctx: ExtensionContext,
     dialog: ApprovalDialog,
-    title: string,
+    question: MissionApprovalDialog,
     objective: TowerObjective,
   ): Promise<void> {
+    const [, approveOption] = question.options;
     let choice: string | undefined;
     try {
-      choice = await ctx.ui.select(title, [MISSION_APPROVE_OPTION, MISSION_KEEP_PLANNING_OPTION], {
-        signal: dialog.abort.signal,
-      });
+      choice = await ctx.ui.select(question.title, [...question.options], { signal: dialog.abort.signal });
     } catch (error) {
       if (this.dialog === dialog) this.dialog = undefined;
       this.controller.diagnostic(`mission approval dialog failed: ${errorText(error)}`);
@@ -605,7 +623,7 @@ export class MissionMode {
     if (dialog.abort.signal.aborted) return;
     const ui = commandUi(ctx);
     try {
-      if (choice === MISSION_APPROVE_OPTION) {
+      if (choice === approveOption) {
         await this.approve(ui);
         return;
       }
@@ -659,7 +677,11 @@ export class MissionMode {
     const key = lines === undefined ? undefined : JSON.stringify(lines);
     if (key === this.shownLines) return;
     try {
-      ctx.ui.setWidget(MISSION_WIDGET_KEY, lines, { placement: 'aboveEditor' });
+      if (lines !== undefined && ctx.mode === 'tui') {
+        ctx.ui.setWidget(MISSION_WIDGET_KEY, () => missionPanelComponent(lines), { placement: 'aboveEditor' });
+      } else {
+        ctx.ui.setWidget(MISSION_WIDGET_KEY, lines, { placement: 'aboveEditor' });
+      }
       this.shownLines = key;
     } catch (error) {
       this.controller.diagnostic(`mission control panel could not be shown: ${errorText(error)}`);
@@ -719,11 +741,24 @@ async function isFile(path: string): Promise<boolean> {
   }
 }
 
+function handoverPending(state: TowerState): boolean {
+  if (state.objectiveMode === undefined || state.objectiveModeFor !== undefined) return false;
+  return state.objective === undefined || isTerminalObjectiveStatus(state.objective.status);
+}
+
 function idle(ctx: ExtensionContext): boolean {
   try {
     return ctx.isIdle();
   } catch {
     return true;
+  }
+}
+
+function editorHoldsText(ctx: ExtensionContext): boolean {
+  try {
+    return ctx.ui.getEditorText().trim().length > 0;
+  } catch {
+    return false;
   }
 }
 

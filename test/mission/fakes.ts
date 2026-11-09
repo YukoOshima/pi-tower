@@ -143,13 +143,19 @@ export interface WidgetCall {
   readonly key: string;
   readonly lines: readonly string[] | undefined;
   readonly placement: string | undefined;
+  readonly component?: { render(width: number): string[] };
 }
+
+type WidgetContent = string[] | ((tui: unknown, theme: unknown) => { render(width: number): string[] }) | undefined;
+
+export const WIDE = 1_000;
 
 export class MissionContext extends FakeContext {
   readonly selects: SelectCall[] = [];
   readonly widgetCalls: WidgetCall[] = [];
   readonly statusCalls: { readonly key: string; readonly text: string | undefined }[] = [];
   selectFailure: Error | undefined;
+  editorText = '';
 
   constructor(cwd: string, session: FakeSessionManager) {
     super(cwd, session);
@@ -172,13 +178,20 @@ export class MissionContext extends FakeContext {
           this.selects.push({ title, options: [...options], signal: opts?.signal, answer: resolve });
         });
       },
-      setWidget: (key: string, lines: string[] | undefined, options?: { readonly placement?: string }): void => {
-        this.widgetCalls.push({ key, lines: lines === undefined ? undefined : [...lines], placement: options?.placement });
+      setWidget: (key: string, content: WidgetContent, options?: { readonly placement?: string }): void => {
+        if (typeof content === 'function') {
+          const component = content(undefined, undefined);
+          const lines = component.render(WIDE).map((line) => line.replace(/^ /, ''));
+          this.widgetCalls.push({ key, lines, placement: options?.placement, component });
+          return;
+        }
+        this.widgetCalls.push({ key, lines: content === undefined ? undefined : [...content], placement: options?.placement });
       },
       setStatus: (key: string, text: string | undefined): void => {
         this.statusCalls.push({ key, text });
         record(key, text);
       },
+      getEditorText: (): string => this.editorText,
     });
   }
 

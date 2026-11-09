@@ -18,12 +18,21 @@ import {
   MISSION_SUBCOMMANDS,
   missionHandedBody,
   missionNotARepository,
+  missionPlanningLine,
 } from '../../src/mission/texts.ts';
 import { buildObjectivePlanningPrompt } from '../../src/prompts/objectivePlanning.ts';
 import { STATE_FILE, TowerStore, type TowerState } from '../../src/protocol/index.ts';
+import { handleTowerCommand } from '../../src/tower/command.ts';
 import { HUMAN_STOP_REASON, TOWER_MODE_ENTRY, TOWER_STATUS_KEY } from '../../src/tower/constants.ts';
 import { createRepo, git, removeDir, settle } from '../tower/fakes.ts';
-import { FOREIGN_PID, SESSION_ID, awaitingApproval, missionHarness, plannedObjective } from './fakes.ts';
+import {
+  FOREIGN_PID,
+  SESSION_ID,
+  awaitingApproval,
+  missionHarness,
+  plannedObjective,
+  recordingUi,
+} from './fakes.ts';
 
 const cleanups: string[] = [];
 
@@ -200,6 +209,44 @@ describe('/mission entry', () => {
     expect(shown.notices[0]?.title).toBe('Mission mode');
     expect(shown.notices[0]?.body).toContain('Previous mission O1 "CSV and JSON export" is completed — your goal starts a new one.');
     expect(h.mission.intakeArmed).toBe(true);
+  });
+
+  it('does not re-arm after /tower objective handed a goal over that is not drafted yet', async () => {
+    const h = await missionHarness(cleanups);
+    await h.run('');
+    expect(h.mission.intakeArmed).toBe(true);
+    const { ui, recorded } = recordingUi();
+    const deps = { sendUserMessage: (text: string) => h.pi.sendUserMessage(text) };
+    await handleTowerCommand(h.controller, 'objective Ship a CSV export', h.ctx.asCommandContext, deps, ui);
+    h.mission.onTowerCommand('objective Ship a CSV export');
+    expect(recorded.errors).toEqual([]);
+
+    const shown = await h.run('');
+
+    expect(shown.notices[0]?.title).toBe('Mission mode');
+    expect(shown.notices[0]?.body).toContain(missionPlanningLine(undefined));
+    expect(h.mission.intakeArmed).toBe(false);
+    expect(await h.input('CSV only, no JSON')).toEqual({ action: 'continue' });
+    expect(h.pi.userMessages).toHaveLength(1);
+    await vi.waitFor(() => {
+      expect(h.ctx.missionStatus()).toBe('mission: planning your goal');
+    });
+
+    await plannedObjective(h.store);
+    expect((await h.run('')).notices[0]?.title).toBe('Mission Control');
+  });
+
+  it('shows the planning view for a /tower objective handover made before mission mode', async () => {
+    const h = await missionHarness(cleanups);
+    const { ui } = recordingUi();
+    const deps = { sendUserMessage: (text: string) => h.pi.sendUserMessage(text) };
+    await handleTowerCommand(h.controller, 'on', h.ctx.asCommandContext, deps, ui);
+    await handleTowerCommand(h.controller, 'objective Ship a CSV export', h.ctx.asCommandContext, deps, ui);
+
+    const shown = await h.run('');
+
+    expect(shown.notices[0]?.body).toContain(missionPlanningLine(undefined));
+    expect(h.mission.intakeArmed).toBe(false);
   });
 });
 
