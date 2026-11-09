@@ -165,6 +165,27 @@ function nudges(actions: readonly AutopilotAction[]): AutopilotAction[] {
 const SNAPSHOTS = Array.from({ length: 2_000 }, (_, seed) => randomSnapshot(seeded(seed + 1)));
 
 describe('continue nudge invariants over random snapshots', () => {
+  it('exercise silent stops, nudges, wakes, workers awaiting a reply and rebases planned in the tick', () => {
+    const counts = { silent: 0, awaiting: 0, rebased: 0, nudges: 0, wakes: 0, manualWakes: 0 };
+    for (const snap of SNAPSHOTS) {
+      const { actions } = decideAutopilot(snap);
+      for (const mission of snap.missions) {
+        const replied = { ...mission, worker: { ...mission.worker, awaitingReply: false } };
+        if (mission.worker.awaitingReply && stoppedSilently(snap, replied)) counts.awaiting += 1;
+        if (!stoppedSilently(snap, mission)) continue;
+        counts.silent += 1;
+        if (actions.some((action) => action.type === 'rebase' && action.mission === mission.id)) counts.rebased += 1;
+      }
+      for (const action of actions) {
+        if (action.type === 'resume-worker' && action.reason === 'continue') counts.nudges += 1;
+        if (action.type !== 'wake-orchestrator' || action.reason !== 'worker-idle') continue;
+        counts.wakes += 1;
+        if (!snap.settings.autopilot) counts.manualWakes += 1;
+      }
+    }
+    for (const count of Object.values(counts)) expect(count).toBeGreaterThan(0);
+  });
+
   it('resumes only an idle, nameable, unstopped worker of an active objective feature, once per tip and only with the autopilot on', () => {
     for (const snap of SNAPSHOTS) {
       for (const action of decideAutopilot(snap).actions) {
