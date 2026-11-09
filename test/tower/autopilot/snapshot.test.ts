@@ -3,6 +3,7 @@ import { join } from 'node:path';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
+import { runningAgents } from '../../../src/autopilot/index.ts';
 import type {
   TowerInboxItem,
   TowerMission,
@@ -434,6 +435,38 @@ describe('buildAutopilotSnapshot — review and gate facts', () => {
     expect(snap.missions[0]).toMatchObject({ reviewerRunning: true, reviewerAttemptsOnTip: 3 });
   });
 
+  it('reports a human stop of the latest reviewer of the current tip that did not review, across a tower rebase', () => {
+    const reviewer = (name: string, spawnedAt: number, overrides: Partial<TowerRosterEntry> = {}): TowerRosterEntry =>
+      agent(name, { kind: 'reviewer', reviewTarget: 'feat/feature-m1', reviewMissionId: 'M1', spawnedAt: iso(spawnedAt), ...overrides });
+    const stopped: AutopilotAgentObservation = { status: 'stopped', stopReason: 'user' };
+    const humanStopped = (
+      roster: TowerRosterEntry[],
+      agents: Record<string, AutopilotAgentObservation>,
+      parts: WorldParts = {},
+      missionOverrides: Partial<TowerMission> = {},
+    ): boolean =>
+      buildAutopilotSnapshot(
+        completedWorld(
+          {
+            state: towerState({ missions: [mission('M1', { status: 'completed', ...missionOverrides })], roster: { agents: roster } }),
+            agents,
+            ...parts,
+          },
+          missionOverrides,
+        ),
+      ).missions[0]!.reviewerHumanStopped;
+    expect(humanStopped([reviewer('r1', 8_000)], { 'id-r1': stopped })).toBe(true);
+    expect(humanStopped([reviewer('r1', 8_000, { diedAt: iso(9_000), deathStatus: 'stopped', deathReason: 'user' })], {})).toBe(true);
+    expect(humanStopped([reviewer('r1', 8_000)], { 'id-r1': { status: 'stopped', stopReason: 'stopped by the tower: teardown' } })).toBe(false);
+    expect(humanStopped([reviewer('r1', 8_000)], { 'id-r1': stopped }, { reviews: new Map([['M1', [review('r1', TIP)]]]) })).toBe(false);
+    expect(humanStopped([reviewer('r1', 1_000)], { 'id-r1': stopped })).toBe(false);
+    expect(humanStopped([reviewer('r1', 8_000), reviewer('r2', 9_000)], { 'id-r1': stopped, 'id-r2': { status: 'failed' } })).toBe(false);
+    expect(humanStopped([reviewer('r1', 8_000), reviewer('r2', 9_000)], { 'id-r1': stopped, 'id-r2': { status: 'running' } })).toBe(false);
+    const rebased = { commitTimes: new Map([[TIP, { committedAt: T0 + 9_000, authoredAt: T0 + 5_000 }]]) };
+    expect(humanStopped([reviewer('r1', 7_000)], { 'id-r1': stopped }, rebased, { lastRebase: { fromCommit: 'tip-0', toCommit: TIP } })).toBe(true);
+    expect(humanStopped([reviewer('r1', 7_000)], { 'id-r1': stopped }, rebased)).toBe(false);
+  });
+
   it('an unobservable reviewer is never running', () => {
     const snap = buildAutopilotSnapshot(
       completedWorld({
@@ -515,9 +548,34 @@ describe('buildAutopilotSnapshot — validators and live agents', () => {
     );
     expect(snap.validators).toEqual([{ milestone: 'MS1', kind: 'user-testing', commit: 'c1', name: 'v-run' }]);
     expect(snap.validationAttempts).toEqual([
-      { milestone: 'MS1', kind: 'user-testing', commit: 'c1', attempts: 3 },
-      { milestone: 'MS1', kind: 'user-testing', commit: 'c0', attempts: 1 },
+      { milestone: 'MS1', kind: 'user-testing', commit: 'c1', attempts: 3, humanStopped: false },
+      { milestone: 'MS1', kind: 'user-testing', commit: 'c0', attempts: 1, humanStopped: false },
     ]);
+  });
+
+  it('reports a human stop when the latest validator that ended without a verdict was stopped by the human', () => {
+    const attemptsOf = (roster: TowerRosterEntry[], agents: Record<string, AutopilotAgentObservation>) =>
+      buildAutopilotSnapshot(world({ state: towerState({ objective: validating, roster: { agents: roster } }), agents }))
+        .validationAttempts;
+    const stopped = { status: 'stopped', stopReason: 'user' } as const;
+    expect(attemptsOf([validator('v-1'), validator('v-2')], { 'id-v-1': { status: 'failed' }, 'id-v-2': stopped })).toEqual([
+      { milestone: 'MS1', kind: 'user-testing', commit: 'c1', attempts: 2, humanStopped: true },
+    ]);
+    expect(attemptsOf([validator('v-1'), validator('v-2')], { 'id-v-1': stopped, 'id-v-2': { status: 'timeout' } })).toEqual([
+      { milestone: 'MS1', kind: 'user-testing', commit: 'c1', attempts: 2, humanStopped: false },
+    ]);
+    expect(
+      attemptsOf([validator('v-1', { diedAt: iso(1), deathStatus: 'stopped', deathReason: 'user' })], {}),
+    ).toEqual([{ milestone: 'MS1', kind: 'user-testing', commit: 'c1', attempts: 1, humanStopped: true }]);
+    expect(
+      attemptsOf([validator('v-1'), validator('v-2')], { 'id-v-1': stopped, 'id-v-2': { status: 'running' } }),
+    ).toEqual([{ milestone: 'MS1', kind: 'user-testing', commit: 'c1', attempts: 1, humanStopped: true }]);
+    expect(
+      attemptsOf([validator('v-1'), validator('v-tower-stop')], {
+        'id-v-1': { status: 'failed' },
+        'id-v-tower-stop': { status: 'stopped', stopReason: 'stopped by the tower: teardown' },
+      }),
+    ).toEqual([{ milestone: 'MS1', kind: 'user-testing', commit: 'c1', attempts: 2, humanStopped: false }]);
   });
 
   it('reports pending validator spawns and commands runs as live runs without double counting', () => {
@@ -565,11 +623,52 @@ describe('buildAutopilotSnapshot — validators and live agents', () => {
           'id-r-loose': { status: 'running' },
           'id-w-idle': { status: 'idle' },
         },
-        pending: { agents: ['ap-w-M4-1', 'w1', 'w-idle'], validators: [] },
+        pending: {
+          agents: [
+            { name: 'ap-w-M4-1', kind: 'worker', mission: 'M4' },
+            { name: 'w1', kind: 'worker', mission: 'M1' },
+            { name: 'w-idle', kind: 'worker', mission: 'M3' },
+          ],
+          validators: [],
+        },
       }),
     );
     expect(snap.missions.filter((entry) => entry.worker.state === 'running')).toHaveLength(2);
     expect(snap.otherRunningAgents).toBe(4);
+  });
+
+  it('a pending launch is the running worker or reviewer of its mission and counts once', () => {
+    const snap = buildAutopilotSnapshot(
+      world({
+        state: towerState({
+          missions: [mission('M1'), mission('M2', { status: 'completed' }), mission('M3')],
+          roster: {
+            agents: [
+              agent('w1', { missionId: 'M1' }),
+              agent('w2', { missionId: 'M2' }),
+              agent('w3', { missionId: 'M3' }),
+            ],
+          },
+        }),
+        agents: { 'id-w1': { status: 'failed' }, 'id-w2': { status: 'idle' }, 'id-w3': { status: 'idle' } },
+        inbox: [message({ from: 'r0', to: 'w3', action: 'review-result', scope: 'M3', sentAt: iso(5_000) })],
+        pending: {
+          agents: [
+            { name: 'ap-w-M1-2', kind: 'worker', mission: 'M1' },
+            { name: 'ap-r-M2-1', kind: 'reviewer', mission: 'M2' },
+            { name: 'w3', kind: 'worker', mission: 'M3' },
+          ],
+          validators: [],
+        },
+      }),
+    );
+    expect(snap.missions.map((entry) => [entry.worker, entry.reviewerRunning])).toEqual([
+      [{ state: 'running', name: 'ap-w-M1-2', humanStopped: false, unreadFindings: false, awaitingReply: false }, false],
+      [{ state: 'idle', name: 'w2', humanStopped: false, unreadFindings: false, awaitingReply: false }, true],
+      [{ state: 'running', name: 'w3', humanStopped: false, unreadFindings: true, awaitingReply: false }, false],
+    ]);
+    expect(snap.otherRunningAgents).toBe(0);
+    expect(runningAgents(snap)).toBe(3);
   });
 });
 

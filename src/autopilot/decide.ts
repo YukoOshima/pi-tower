@@ -12,6 +12,7 @@ import {
   sortedMissions,
   validationAttemptsOn,
   validationInFlight,
+  validationStoppedOn,
 } from './derive.ts';
 import { computeProgressKey, dedupeKey, digest } from './progress.ts';
 import type {
@@ -211,13 +212,15 @@ function planFeature(draft: Draft, feature: AutopilotMission): void {
 
 function planReviewer(draft: Draft, feature: AutopilotMission): void {
   const max = draft.objective.limits.maxFeatureAttempts;
-  if (feature.reviewerAttemptsOnTip >= max) {
+  if (feature.reviewerHumanStopped || feature.reviewerAttemptsOnTip >= max) {
     wake(
       draft,
       'review-stuck',
       feature.id,
       feature.tip ?? '-',
-      `${feature.id}: ${String(feature.reviewerAttemptsOnTip)} reviewer(s) for the current tip ended without a review (max ${String(max)})`,
+      feature.reviewerHumanStopped
+        ? `${feature.id}: the human stopped the reviewer of the current tip, and autopilot never replaces it`
+        : `${feature.id}: ${String(feature.reviewerAttemptsOnTip)} reviewer(s) for the current tip ended without a review (max ${String(max)})`,
     );
     return;
   }
@@ -257,7 +260,7 @@ function planWorker(draft: Draft, feature: AutopilotMission): void {
   if (!needsWorker(feature) || worker.state === 'running') return;
   const autopilot = draft.snapshot.settings.autopilot;
   if (worker.humanStopped) {
-    if (feature.rebaseConflict) wakeRebaseConflict(draft, feature);
+    wakeWorkerStopped(draft, feature);
     return;
   }
   if (worker.state === 'idle') {
@@ -330,6 +333,17 @@ function planContinue(draft: Draft, feature: AutopilotMission): void {
     feature.id,
     tip,
     `${feature.id}: worker ${worker ?? '-'} is idle on the active feature without TowerComplete, a blocker or an unanswered message${nudged ? ', and a worker of this feature was already resumed once on this tip' : ''}`,
+  );
+}
+
+function wakeWorkerStopped(draft: Draft, feature: AutopilotMission): void {
+  const name = feature.worker.name ?? '-';
+  wake(
+    draft,
+    'worker-stopped',
+    feature.id,
+    name,
+    `${feature.id}: the human stopped worker ${name}${feature.rebaseConflict ? ' and the feature has an unresolved rebase conflict' : ''}; the feature waits for the human, and autopilot never replaces the worker`,
   );
 }
 
@@ -452,7 +466,8 @@ function planValidation(
     if (latestRound(milestone, kind, commit) !== undefined) continue;
     if (validationInFlight(draft.snapshot, milestone.id, kind, commit)) continue;
     const attempts = validationAttemptsOn(draft.snapshot, milestone.id, kind, commit);
-    if (attempts < max) {
+    const stopped = validationStoppedOn(draft.snapshot, milestone.id, kind, commit);
+    if (!stopped && attempts < max) {
       missing.push(kind);
       continue;
     }
@@ -461,7 +476,9 @@ function planValidation(
       'validation-stuck',
       `${milestone.id}:${kind}`,
       commit,
-      `${milestone.id} ${kind}: ${String(attempts)} validator run(s) on ${commit} ended without a verdict (max ${String(max)})`,
+      stopped
+        ? `${milestone.id} ${kind}: the human stopped the validator on ${commit}, and autopilot never replaces it`
+        : `${milestone.id} ${kind}: ${String(attempts)} validator run(s) on ${commit} ended without a verdict (max ${String(max)})`,
     );
   }
   const agents = missing.filter((kind) => kind !== 'commands').slice(0, draft.free);

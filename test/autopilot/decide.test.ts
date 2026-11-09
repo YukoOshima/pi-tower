@@ -308,9 +308,9 @@ table('resume-worker', [
     actions: [],
   },
   {
-    name: 'a human-stopped worker is never resumed',
+    name: 'a human-stopped worker is never resumed; the orchestrator is woken instead',
     snap: snapshot({ missions: [{ ...FINDINGS, worker: { ...FINDINGS.worker, humanStopped: true } }] }),
-    actions: [],
+    actions: [wakeOf('worker-stopped', 'M1', 'w-M1')],
   },
   {
     name: 'resumes an idle worker to resolve a rebase conflict',
@@ -323,9 +323,9 @@ table('resume-worker', [
     actions: [wakeOf('rebase-conflict', 'M1', `tip-M1@${BASE}`)],
   },
   {
-    name: 'a conflict on a human-stopped worker wakes the orchestrator',
+    name: 'a conflict on a human-stopped worker wakes the orchestrator once, about the human stop',
     snap: snapshot({ missions: [{ ...CONFLICT, worker: { ...IDLE, humanStopped: true } }] }),
-    actions: [wakeOf('rebase-conflict', 'M1', `tip-M1@${BASE}`)],
+    actions: [wakeOf('worker-stopped', 'M1', 'w-M1')],
   },
   {
     name: 'a conflict on a dead worker respawns it',
@@ -369,9 +369,9 @@ table('continue nudge and worker-idle wake', [
   },
   { name: 'a running worker is never nudged', snap: snapshot({ missions: [working('M1')] }), actions: [] },
   {
-    name: 'a human-stopped worker is neither nudged nor reported',
+    name: 'a human-stopped worker is neither nudged nor reported idle; the worker-stopped wake replaces both',
     snap: snapshot({ missions: [{ ...STOPPED_SILENTLY, worker: { ...IDLE, humanStopped: true } }] }),
-    actions: [],
+    actions: [wakeOf('worker-stopped', 'M1', 'w-M1')],
   },
   {
     name: 'a worker awaiting the reply to its own message is neither nudged nor reported',
@@ -471,9 +471,9 @@ table('respawn-worker', [
     actions: [wakeOf('feature-attempts-exhausted', 'M1', '3')],
   },
   {
-    name: 'never respawns a worker the human stopped',
+    name: 'never respawns a worker the human stopped; the orchestrator is woken instead',
     snap: snapshot({ missions: [working('M1', { worker: { ...DEAD, humanStopped: true } })] }),
-    actions: [],
+    actions: [wakeOf('worker-stopped', 'M1', 'w-M1')],
   },
   {
     name: 'a planned feature with open dependencies is not respawned',
@@ -489,6 +489,62 @@ table('respawn-worker', [
     name: 'a respawn wins over a first spawn when slots are short',
     snap: snapshot({ settings: { maxRunningAgents: 1 }, missions: [feature('M1'), working('M2', { worker: worker({ state: 'dead', name: 'w-M2' }) })] }),
     actions: [{ type: 'respawn-worker', mission: 'M2', attempt: 2, previousWorker: 'w-M2' }],
+  },
+]);
+
+const STOPPED_WORKER = { ...DEAD, humanStopped: true };
+
+table('worker-stopped', [
+  {
+    name: 'the wake is sent once per feature and stopped worker',
+    snap: snapshot({ missions: [working('M1', { worker: STOPPED_WORKER })], memory: { wakeKeys: ['worker-stopped:M1:w-M1'] } }),
+    actions: [],
+  },
+  {
+    name: 'a feature whose worker the human stopped waits even with its attempts used up',
+    snap: snapshot({ missions: [working('M1', { attempts: 3, worker: STOPPED_WORKER })] }),
+    actions: [wakeOf('worker-stopped', 'M1', 'w-M1')],
+  },
+  {
+    name: 'it notes an unresolved rebase conflict of the feature',
+    snap: snapshot({ missions: [{ ...CONFLICT, worker: STOPPED_WORKER }] }),
+    actions: [
+      expect.objectContaining({
+        key: 'worker-stopped:M1:w-M1',
+        detail: 'M1: the human stopped worker w-M1 and the feature has an unresolved rebase conflict; the feature waits for the human, and autopilot never replaces the worker',
+      }),
+    ],
+  },
+  {
+    name: 'a fresh worker spawned after the human decided runs undisturbed',
+    snap: snapshot({
+      missions: [working('M1', { attempts: 2, worker: worker({ state: 'running', name: 'w-M1-2' }) })],
+      memory: { wakeKeys: ['worker-stopped:M1:w-M1'] },
+    }),
+    actions: [],
+  },
+  {
+    name: 'stopping the fresh worker too wakes the orchestrator again',
+    snap: snapshot({
+      missions: [working('M1', { attempts: 2, worker: { ...STOPPED_WORKER, name: 'w-M1-2' } })],
+      memory: { wakeKeys: ['worker-stopped:M1:w-M1'] },
+    }),
+    actions: [wakeOf('worker-stopped', 'M1', 'w-M1-2')],
+  },
+  {
+    name: 'a stopped worker the snapshot cannot name is reported on "-"',
+    snap: snapshot({ missions: [working('M1', { worker: worker({ state: 'dead', humanStopped: true }) })] }),
+    actions: [wakeOf('worker-stopped', 'M1', '-')],
+  },
+  {
+    name: 'manual mode wakes about a worker the human stopped too',
+    snap: snapshot({ settings: { autopilot: false }, missions: [working('M1', { worker: STOPPED_WORKER })] }),
+    actions: [wakeOf('worker-stopped', 'M1', 'w-M1')],
+  },
+  {
+    name: 'a completed feature whose worker the human stopped needs no worker and still gets its review',
+    snap: snapshot({ missions: [awaitingReview('M1', { worker: STOPPED_WORKER })] }),
+    actions: [reviewer('M1')],
   },
 ]);
 
@@ -1379,7 +1435,9 @@ table('features attached to the objective', [
   },
 ]);
 
-const silentValidators = (ms: string, kind: Kind, commit: string, attempts: number) => [{ milestone: ms, kind, commit, attempts }];
+const silentValidators = (ms: string, kind: Kind, commit: string, attempts: number, humanStopped = false) => [
+  { milestone: ms, kind, commit, attempts, humanStopped },
+];
 
 table('loop guard for agents that end without submitting', [
   {
@@ -1441,6 +1499,60 @@ table('loop guard for agents that end without submitting', [
     snap: snapshot({
       baseTip: 'base-1',
       validationAttempts: silentValidators('MS2', 'scrutiny', 'base-1', 3),
+      objective: { milestones: [PASSED_MS1, FINAL_PASSED] },
+      missions: ALL_MERGED,
+    }),
+    actions: [validate('MS2', 'base-1', ['user-testing']), wakeOf('validation-stuck', 'MS2:scrutiny', 'base-1')],
+  },
+]);
+
+const STOPPED_REVIEW = awaitingReview('M1', { reviewerAttemptsOnTip: 1, reviewerHumanStopped: true });
+
+table('reviewers and validators the human stopped', [
+  {
+    name: 'a reviewer the human stopped is never replaced and wakes the orchestrator',
+    snap: snapshot({ missions: [STOPPED_REVIEW] }),
+    actions: [wakeOf('review-stuck', 'M1', 'tip-M1')],
+  },
+  {
+    name: 'the human-stop review wake is sent once per tip',
+    snap: snapshot({ missions: [STOPPED_REVIEW], memory: { wakeKeys: ['review-stuck:M1:tip-M1'] } }),
+    actions: [],
+  },
+  {
+    name: 'manual mode reports a reviewer the human stopped too',
+    snap: snapshot({ settings: { autopilot: false }, missions: [STOPPED_REVIEW] }),
+    actions: [wakeOf('review-stuck', 'M1', 'tip-M1')],
+  },
+  {
+    name: 'a feature whose reviewer the human stopped is still rebased onto a moved base',
+    snap: snapshot({ missions: [{ ...STOPPED_REVIEW, gate: { ready: false, blocks: ['stale-base'] } }] }),
+    actions: [rebase('M1')],
+  },
+  {
+    name: 'a validator the human stopped is never replaced and wakes the orchestrator',
+    snap: snapshot({ validationAttempts: silentValidators('MS1', 'scrutiny', BASE, 1, true), missions: DONE_MS1 }),
+    actions: [validate('MS1', BASE, ['user-testing']), wakeOf('validation-stuck', 'MS1:scrutiny', BASE)],
+  },
+  {
+    name: 'the human-stop validation wake is sent once per commit',
+    snap: snapshot({
+      validationAttempts: silentValidators('MS1', 'scrutiny', BASE, 1, true),
+      missions: DONE_MS1,
+      memory: { wakeKeys: [`validation-stuck:MS1:scrutiny:${BASE}`] },
+    }),
+    actions: [validate('MS1', BASE, ['user-testing'])],
+  },
+  {
+    name: 'a validator the human stopped on an older commit does not hold the new commit',
+    snap: snapshot({ validationAttempts: silentValidators('MS1', 'scrutiny', 'base-old', 1, true), missions: DONE_MS1 }),
+    actions: [validate('MS1', BASE, ['scrutiny', 'user-testing'])],
+  },
+  {
+    name: 'a final re-validation the human stopped wakes too',
+    snap: snapshot({
+      baseTip: 'base-1',
+      validationAttempts: silentValidators('MS2', 'scrutiny', 'base-1', 1, true),
       objective: { milestones: [PASSED_MS1, FINAL_PASSED] },
       missions: ALL_MERGED,
     }),

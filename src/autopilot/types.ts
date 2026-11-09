@@ -99,7 +99,7 @@ export interface AutopilotSettings {
 export interface AutopilotWorker {
   readonly state: AutopilotWorkerState;
   readonly name?: string;
-  /** The human stopped this worker: autopilot never resumes or respawns it. */
+  /** The human stopped this worker: autopilot never resumes or respawns it and wakes the orchestrator once instead. */
   readonly humanStopped: boolean;
   /** The worker has unread review findings (a non-clean review-result) in its inbox. */
   readonly unreadFindings: boolean;
@@ -143,6 +143,8 @@ export interface AutopilotMission {
   readonly reviewerRunning: boolean;
   /** Reviewers spawned for the current tip that ended without submitting a review. */
   readonly reviewerAttemptsOnTip: number;
+  /** The human stopped the latest reviewer of the current tip before it reviewed: autopilot never replaces it. */
+  readonly reviewerHumanStopped: boolean;
   /** Latest review stamped on the current tip (or carried over by a clean-rebase waiver). */
   readonly latestReviewOnTip?: AutopilotReviewVerdict;
   readonly gate: AutopilotGate;
@@ -169,6 +171,8 @@ export interface AutopilotValidationAttempts {
   readonly kind: AutopilotValidationKind;
   readonly commit: string;
   readonly attempts: number;
+  /** The human stopped the latest of these validators: autopilot never replaces it. */
+  readonly humanStopped: boolean;
 }
 
 export interface AutopilotMemory {
@@ -216,7 +220,8 @@ export type AutopilotWakeReason =
   | 'review-stuck'
   | 'validation-stuck'
   | 'stalled'
-  | 'worker-idle';
+  | 'worker-idle'
+  | 'worker-stopped';
 
 /**
  * `continue`: the worker of an active feature is idle without TowerComplete, a blocker or an

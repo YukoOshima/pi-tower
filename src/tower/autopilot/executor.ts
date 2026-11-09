@@ -13,6 +13,7 @@ import {
   type TowerMission,
   type TowerObjective,
   type TowerReviewInfo,
+  type TowerRosterEntry,
   type TowerState,
   type TowerStore,
 } from '../../protocol/index.ts';
@@ -55,7 +56,7 @@ export interface AutopilotExecution {
 }
 
 export type AutopilotActionOutcome =
-  | { readonly status: 'done'; readonly detail?: string; readonly wakeKey?: string }
+  | { readonly status: 'done'; readonly detail?: string; readonly wakeKey?: string; readonly followUp?: boolean }
   | { readonly status: 'launched'; readonly detail: string }
   | { readonly status: 'refused'; readonly error: string };
 
@@ -88,6 +89,43 @@ export function autopilotActionMission(action: AutopilotAction): string | undefi
       return action.mission;
     default:
       return undefined;
+  }
+}
+
+export function isAgentLaunch(action: AutopilotAction): boolean {
+  switch (action.type) {
+    case 'spawn-worker':
+    case 'respawn-worker':
+    case 'resume-worker':
+    case 'spawn-reviewer':
+      return true;
+    case 'start-validation':
+      return action.kinds.some((kind) => kind !== 'commands');
+    default:
+      return false;
+  }
+}
+
+export function isLaunchSubjectAgent(state: TowerState, action: AutopilotAction, entry: TowerRosterEntry): boolean {
+  switch (action.type) {
+    case 'spawn-worker':
+    case 'respawn-worker':
+    case 'resume-worker':
+      return entry.kind === 'worker' && entry.missionId === action.mission;
+    case 'spawn-reviewer': {
+      const mission = state.missions.find((candidate) => candidate.id === action.mission);
+      return mission !== undefined && missionReviewerEntries(state, mission).includes(entry);
+    }
+    case 'start-validation':
+      return (
+        entry.kind === 'validator' &&
+        entry.milestoneId === action.milestone &&
+        entry.validatedCommit === action.commit &&
+        entry.validationKind !== undefined &&
+        action.kinds.includes(entry.validationKind)
+      );
+    default:
+      return false;
   }
 }
 
@@ -191,7 +229,7 @@ function launched(execution: AutopilotExecution, launch: AutopilotLaunch): Autop
 
 function effectOutcome(result: EffectResult): AutopilotActionOutcome {
   return result.ok
-    ? { status: 'done', ...(result.detail === undefined ? {} : { detail: result.detail }) }
+    ? { status: 'done', followUp: true, ...(result.detail === undefined ? {} : { detail: result.detail }) }
     : { status: 'refused', error: result.error };
 }
 
@@ -262,7 +300,9 @@ async function execute(execution: AutopilotExecution, action: AutopilotAction): 
       return startValidation(execution, action.milestone, action.commit, action.kinds, identity);
     case 'advance-milestone': {
       const activated = await store.activateNextMilestone();
-      return { status: 'done', detail: activated === undefined ? 'nothing to activate' : `activated=${activated.id}` };
+      return activated === undefined
+        ? { status: 'done', detail: 'nothing to activate' }
+        : { status: 'done', detail: `activated=${activated.id}`, followUp: true };
     }
     case 'complete-objective':
       return completeObjective(execution);
@@ -290,7 +330,7 @@ async function startValidation(
     validationSettings(world.settings),
   );
   const status = started.milestone.status;
-  if (status !== 'validating') return { status: 'done', detail: `status=${status}` };
+  if (status !== 'validating') return { status: 'done', detail: `status=${status}`, followUp: true };
   const milestone = findMilestone(world.state.objective, milestoneId) ?? started.milestone;
   const names = new Set(reserved);
   const launchedKinds: string[] = [];
@@ -330,7 +370,7 @@ async function completeObjective(execution: AutopilotExecution): Promise<Autopil
     completedNoticeText({ objective: completed, state, baseTip: world.baseTip, now: world.now }),
     'info',
   );
-  return { status: 'done', detail: `objective=${completed.id}`, wakeKey: completedNoticeKey(completed) };
+  return { status: 'done', detail: `objective=${completed.id}`, wakeKey: completedNoticeKey(completed), followUp: true };
 }
 
 function blockReason(world: AutopilotWorld, action: AutopilotBlockObjective): string {

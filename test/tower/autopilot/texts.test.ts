@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest';
 
-import { continueResumePrompt, workerIdleWake } from '../../../src/tower/autopilot/texts.ts';
+import {
+  continueResumePrompt,
+  reviewerStoppedWake,
+  validatorStoppedWake,
+  workerIdleWake,
+  workerStoppedWake,
+} from '../../../src/tower/autopilot/texts.ts';
 
 const BUILD = { id: 'M3', title: 'Core A', branch: 'feat/core-a', milestone: 'MS1', kind: 'build' as const };
 
@@ -23,6 +29,71 @@ describe('continue resume prompt', () => {
     expect(prompt).toContain('1. The investigation is done → finish with TowerComplete(report=the full result).');
     expect(prompt).toContain('3. The mission leaves substantive doubt about what to investigate →');
     expect(prompt).not.toContain('reviewer');
+  });
+});
+
+describe('worker-stopped wake', () => {
+  it('the feature waits for the human, who alone decides how it continues', () => {
+    const [first, options, last] = workerStoppedWake({ mission: { ...BUILD, blockers: [] }, worker: 'ap-w-M3-1' }).split('\n\n');
+    expect(first).toBe(
+      'worker-stopped: the human stopped worker ap-w-M3-1 on feature M3 "Core A" (milestone MS1, branch feat/core-a). The feature waits: the autopilot never resumes, reassigns or replaces an agent the human stopped.',
+    );
+    expect(options!.split('\n')).toEqual([
+      'Ask the human how to continue, then act only on the answer:',
+      '- continue it → spawn a fresh worker with TowerSpawn(kind="worker", mission_id="M3") and instructions that carry the human\'s direction;',
+      '- change or drop it → abandon it with TowerMission(id="M3", status="abandoned") and re-plan the work with TowerPlan;',
+      '- stop here → block the objective with TowerObjective(action="block", reason).',
+    ]);
+    expect(last).toBe(
+      'Never replace the stopped worker on your own. In a headless run nobody can answer: block the objective and name the stopped worker.',
+    );
+  });
+
+  it('names the files of an unresolved rebase conflict', () => {
+    const blocker = 'tower rebase onto main conflicted in: src/a.ts, src/b.ts — the rebase was aborted';
+    const text = workerStoppedWake({ mission: { ...BUILD, blockers: [blocker] }, worker: 'ap-w-M3-1' });
+    expect(text.split('\n')[0]).toMatch(
+      / It also has an unresolved rebase conflict onto the base in src\/a\.ts, src\/b\.ts, which whoever continues it resolves first\.$/,
+    );
+  });
+});
+
+describe('wakes for a reviewer or validator the human stopped', () => {
+  it('the review waits for the human, who alone decides about a fresh reviewer', () => {
+    const [first, options, last] = reviewerStoppedWake({ mission: BUILD, reviewer: 'ap-r-M3-1', tip: '0123456789abcdef' }).split('\n\n');
+    expect(first).toBe(
+      'review-stuck: the human stopped reviewer ap-r-M3-1 of feature M3 "Core A" (milestone MS1, branch feat/core-a) on tip 0123456 before it submitted a review. The review waits: the autopilot never replaces an agent the human stopped.',
+    );
+    expect(options!.split('\n')).toEqual([
+      'Ask the human how to continue, then act only on the answer:',
+      '- review it after all → spawn a fresh reviewer with TowerSpawn(kind="reviewer", review_target="feat/core-a") under a new name;',
+      '- rework it first → tell the worker what to change with TowerSend, or TowerResume when it is idle; its next TowerComplete gets a fresh review;',
+      '- drop or re-plan it → abandon M3 with TowerMission(id="M3", status="abandoned") and plan replacement features with TowerPlan;',
+      '- stop here → block the objective with TowerObjective(action="block", reason).',
+    ]);
+    expect(last).toBe(
+      'Never spawn a replacement reviewer on your own. In a headless run nobody can answer: block the objective and name the stopped reviewer.',
+    );
+  });
+
+  it('the validation waits for the human, who alone decides about a fresh validator', () => {
+    const text = validatorStoppedWake({
+      objective: { id: 'O1', title: 'Ship' },
+      milestone: { id: 'MS1', title: 'Core' },
+      kind: 'user-testing',
+      validator: 'ap-v-MS1-user-testing-2',
+      commit: 'fedcba9876543210',
+    });
+    expect(text.split('\n')[0]).toBe(
+      'validation-stuck: the human stopped validator ap-v-MS1-user-testing-2 before it submitted a verdict — the user-testing validation of milestone MS1 "Core" on fedcba9 waits (objective O1 "Ship"). The autopilot never replaces an agent the human stopped.',
+    );
+    expect(text).toContain(
+      '- validate after all → spawn a fresh validator with TowerSpawn(kind="validator", milestone="MS1", validation_kind="user-testing") under a new name;',
+    );
+    expect(text).toContain('- fix something first → plan a fix feature with TowerPlan(milestone="MS1", origin="fix"); the validation runs again once it merges;');
+    expect(text.split('\n\n').at(-1)).toBe(
+      'Never start a replacement validator on your own. In a headless run nobody can answer: block the objective and name the stopped validator.',
+    );
   });
 });
 

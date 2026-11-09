@@ -152,6 +152,20 @@ function stoppedSilently(snap: AutopilotSnapshot, mission: AutopilotMission): bo
   );
 }
 
+function waitsForTheHuman(snap: AutopilotSnapshot, mission: AutopilotMission): boolean {
+  const objective = snap.objective!;
+  const current = currentMilestone(objective);
+  const order = objective.milestones.find((candidate) => candidate.id === mission.milestone)?.order;
+  return (
+    order !== undefined &&
+    order <= (current?.order ?? Number.POSITIVE_INFINITY) &&
+    !(current?.status === 'pending' && current.id === mission.milestone) &&
+    (mission.status === 'planned' || mission.status === 'active' || (mission.status === 'blocked' && mission.rebaseConflict)) &&
+    mission.worker.humanStopped &&
+    mission.worker.state !== 'running'
+  );
+}
+
 function nudgedMission(action: AutopilotAction): string | undefined {
   if (action.type === 'resume-worker' && action.reason === 'continue') return action.mission;
   if (action.type === 'wake-orchestrator' && action.reason === 'worker-idle') return action.subject;
@@ -249,6 +263,30 @@ describe('continue nudge invariants over random snapshots', () => {
         expect(snap.missions.find((candidate) => candidate.id === id)!.worker.awaitingReply).toBe(false);
       }
     }
+  });
+
+  it('a worker the human stopped is never resumed or replaced, and its waiting feature gets the worker-stopped wake instead', () => {
+    let woken = 0;
+    for (const snap of SNAPSHOTS) {
+      const { actions } = decideAutopilot(snap);
+      for (const mission of snap.missions.filter((candidate) => candidate.worker.humanStopped)) {
+        const forMission = actions.filter(
+          (action) =>
+            ('mission' in action && action.mission === mission.id) ||
+            (action.type === 'wake-orchestrator' && action.subject === mission.id && action.reason !== 'blocker'),
+        );
+        const wakes = forMission.filter((action) => action.type === 'wake-orchestrator');
+        const stopped = wakes.filter((action) => action.reason === 'worker-stopped');
+        if (waitsForTheHuman(snap, mission)) {
+          expect(wakes).toEqual([expect.objectContaining({ reason: 'worker-stopped', revision: mission.worker.name ?? '-' })]);
+        } else {
+          expect(stopped).toEqual([]);
+        }
+        expect(forMission.filter((action) => action.type === 'resume-worker' || action.type === 'respawn-worker' || action.type === 'spawn-worker')).toEqual([]);
+        woken += stopped.length;
+      }
+    }
+    expect(woken).toBeGreaterThan(0);
   });
 
   it('the post-action snapshot repeats no nudge and no worker-idle wake', () => {
