@@ -174,7 +174,7 @@ A plain tower run ends when the orchestrator decides the work is done. An **obje
    Goal: shop report prints the monthly sales report as a table. Add a --format option so the same report can be exported as CSV or JSON.
 
    ## Milestones
-   ✅ MS1 Serializers — passed · features 3/3 merged (1 fix) · scrutiny r2 pass · user-testing r2 pass · commands r2 pass
+   ✅ MS1 Serializers — passed · features 3/3 merged (1 fix) · scrutiny r2 pass · commands r2 pass
    🔵 MS2 CLI options and docs — active · features 0/2 merged · validation: scrutiny · user-testing · commands `npm ci && npm run typecheck && npm test`
 
    ## Current milestone MS2 — features (run in parallel)
