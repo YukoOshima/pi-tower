@@ -1,3 +1,4 @@
+import { mkdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import type { ExtensionAPI, ToolCallEvent } from '@earendil-works/pi-coding-agent';
@@ -12,7 +13,7 @@ import {
   towerWriteGuard,
   type TowerAgentGuardTarget,
 } from '../../src/tower/guards.ts';
-import { createRepo, removeDir } from './fakes.ts';
+import { createRepo, git, removeDir } from './fakes.ts';
 
 let repo: string;
 let store: TowerStore;
@@ -22,6 +23,7 @@ beforeEach(async () => {
   repo = await createRepo('tower-guards-');
   store = new TowerStore(repo);
   worktree = store.abs(join(WORKTREES_DIR, 'wt-1'));
+  await git(repo, 'worktree', 'add', '-q', '-b', 'feat/wt-1', worktree);
 });
 
 afterEach(async () => {
@@ -171,5 +173,60 @@ describe('towerAgentGuards', () => {
     expect(await onToolCall(write('../../../README.md'), { cwd: worktree })).toMatchObject({ block: true });
     expect(await onToolCall(write('notes.md'), { cwd: worktree })).toBeUndefined();
     expect([...handlers.keys()]).toEqual(['tool_call']);
+  });
+});
+
+describe('guard roots an agent cannot rewrite', () => {
+  const ESCAPES = ['rm -rf ../../comms', 'cd ../../.. && git clean -fdx', 'git -C ../../.. reset --hard'];
+
+  type ToolCallHandler = (event: ToolCallEvent, ctx: { readonly cwd: string }) => Promise<unknown>;
+
+  async function toolCallHandler(target: TowerAgentGuardTarget): Promise<ToolCallHandler> {
+    const extension = towerAgentGuards(target);
+    if (typeof extension === 'function') throw new Error('expected a named inline extension');
+    let onToolCall: ToolCallHandler | undefined;
+    await extension.factory({
+      on: (event: string, handler: ToolCallHandler) => {
+        if (event === 'tool_call') onToolCall = handler;
+      },
+    } as unknown as ExtensionAPI);
+    if (onToolCall === undefined) throw new Error('no tool_call handler');
+    return onToolCall;
+  }
+
+  it.each(['intact', 'deleted', 'replaced by git init'] as const)(
+    'keeps vetoing escapes to the main checkout when the worktree .git link is %s',
+    async (link) => {
+      await store.init('session-guard');
+      await registerWorker('agent-w1', 'wt-1');
+      const bound = await toolCallHandler(worker());
+      const unbound = await toolCallHandler(
+        worker({
+          repoRoot: () => {
+            throw new Error('the tower is not bound to a pi session yet');
+          },
+        }),
+      );
+      if (link !== 'intact') await rm(join(worktree, '.git'));
+      if (link === 'replaced by git init') await git(worktree, 'init', '-q');
+
+      for (const command of ESCAPES) {
+        expect(await bound(bash(command), { cwd: worktree }), command).toMatchObject({ block: true });
+        expect(await unbound(bash(command), { cwd: worktree }), command).toMatchObject({ block: true });
+        expect(await towerBashGuard(bash(command), worktree), command).toMatchObject({ block: true });
+      }
+      expect(await bound(write('../../../README.md'), { cwd: worktree })).toMatchObject({ block: true });
+    },
+  );
+
+  it('guards a session in a repository nested under a worktree for the outer workspace too, without blocking work inside it', async () => {
+    await store.init('session-guard');
+    const nested = join(worktree, 'tmp', 'repo');
+    await mkdir(nested, { recursive: true });
+    await git(nested, 'init', '-q');
+
+    expect(await towerBashGuard(bash('rm -rf ../../../../comms'), nested)).toMatchObject({ block: true });
+    expect(await towerBashGuard(bash(`git -C ${repo} reset --hard`), nested)).toMatchObject({ block: true });
+    expect(await towerBashGuard(bash('rm -rf build && git clean -fdx && git reset --hard'), nested)).toBeUndefined();
   });
 });

@@ -627,6 +627,10 @@ export interface SentMessage {
   readonly options?: { readonly triggerTurn?: boolean; readonly deliverAs?: string };
 }
 
+export interface SendAttempt extends SentMessage {
+  readonly failure?: Error;
+}
+
 export class FakePi implements TowerExtensionApi {
   activeTools: string[] = ['read', 'bash', 'edit', 'write'];
   readonly sent: SentMessage[] = [];
@@ -640,6 +644,7 @@ export class FakePi implements TowerExtensionApi {
   session: FakeSessionManager | undefined;
   context: FakeContext | undefined;
   sendFailure: Error | undefined;
+  private readonly sendWatchers = new Set<(attempt: SendAttempt) => void>();
 
   appendEntry: TowerExtensionApi['appendEntry'] = (customType, data) => {
     this.appended.push({ customType, data });
@@ -673,15 +678,15 @@ export class FakePi implements TowerExtensionApi {
   };
 
   sendMessage: TowerExtensionApi['sendMessage'] = (message, options) => {
-    if (this.sendFailure !== undefined) {
-      const failure = this.sendFailure;
-      this.sendFailure = undefined;
-      throw failure;
-    }
-    this.sent.push({
+    const failure = this.sendFailure;
+    this.sendFailure = undefined;
+    const sent: SentMessage = {
       message: message as SentMessage['message'],
       ...(options === undefined ? {} : { options }),
-    });
+    };
+    for (const watcher of [...this.sendWatchers]) watcher(failure === undefined ? sent : { ...sent, failure });
+    if (failure !== undefined) throw failure;
+    this.sent.push(sent);
     this.session?.append({
       type: 'custom_message',
       customType: message.customType,
@@ -697,6 +702,17 @@ export class FakePi implements TowerExtensionApi {
 
   sentOfType(customType: string): SentMessage[] {
     return this.sent.filter((entry) => entry.message.customType === customType);
+  }
+
+  nextSendAttempt(customType: string): Promise<SendAttempt> {
+    return new Promise((resolve) => {
+      const watcher = (attempt: SendAttempt): void => {
+        if (attempt.message.customType !== customType) return;
+        this.sendWatchers.delete(watcher);
+        resolve(attempt);
+      };
+      this.sendWatchers.add(watcher);
+    });
   }
 }
 

@@ -152,6 +152,7 @@ const SILENT_LOG: TowerLog = { info: () => undefined, warn: () => undefined };
 const AGENT_SETTLE_POLL_MS = 1_000;
 const AGENT_SETTLE_POLL_LIMIT = 1_800;
 const AGENT_REGISTRATION_WAIT_MS = 30_000;
+const SHUTDOWN_RELEASE_GRACE_MS = 5_000;
 
 const DEFAULT_RATE_LIMIT_SNAPSHOT: TowerRateLimitSnapshot = {
   budget: 256,
@@ -173,6 +174,7 @@ export interface TowerControllerOptions {
   readonly models?: TowerModels;
   readonly isProcessAlive?: (pid: number) => boolean;
   readonly log?: TowerLog;
+  readonly shutdownReleaseGraceMs?: number;
 }
 
 export class TowerController implements TowerToolHost {
@@ -182,6 +184,7 @@ export class TowerController implements TowerToolHost {
   private readonly createAutopilot: ((controller: TowerController) => TowerAutopilot) | undefined;
   private readonly alive: (pid: number) => boolean;
   private readonly log: TowerLog;
+  private readonly shutdownReleaseGraceMs: number;
   private spawnDescription: string | undefined;
   private readonly leases = new BranchLeases();
   private readonly wakes = new InboxWakeQueue();
@@ -216,6 +219,7 @@ export class TowerController implements TowerToolHost {
     this.createAutopilot = options.createAutopilot;
     this.alive = options.isProcessAlive ?? isProcessAlive;
     this.log = options.log ?? SILENT_LOG;
+    this.shutdownReleaseGraceMs = options.shutdownReleaseGraceMs ?? SHUTDOWN_RELEASE_GRACE_MS;
   }
 
   get isActive(): boolean {
@@ -721,6 +725,26 @@ export class TowerController implements TowerToolHost {
       ...this.pendingWrites,
       ...(this.autopilot === undefined ? [] : [this.autopilot.whenIdle()]),
     ]);
+    if (!(await settledWithin(this.releaseDisposedValidationWorktrees(), this.shutdownReleaseGraceMs))) {
+      this.log.warn('tower: shutdown stopped waiting for the validation worktrees of disposed validators', {
+        graceMs: this.shutdownReleaseGraceMs,
+      });
+    }
+  }
+
+  private async releaseDisposedValidationWorktrees(): Promise<void> {
+    if (!this.active || this.boundRepoRoot === undefined) return;
+    const store = this.store();
+    const validators = await store.load().then(
+      (state) => (state.sessionId === this.boundSessionId ? validatorWorktrees(state) : []),
+      () => [],
+    );
+    const disposed = validators.filter((entry) => this.runtimeInstance?.get(entry.agentId) === undefined);
+    await Promise.all(
+      disposed.map((entry) =>
+        this.enqueueDeathWork(entry.agentId, () => this.removeValidationWorktrees(store, [entry.worktree])),
+      ),
+    );
   }
 
   async onBeforeAgentStart(
@@ -1072,13 +1096,13 @@ export class TowerController implements TowerToolHost {
   private onRuntimeEvent(event: TowerAgentEvent): void {
     if (event.type === 'started') {
       if (event.resumed) {
-        this.enqueueDeathWork(event.agentId, () => this.clearTowerAgentDeath(event.agentId));
+        void this.enqueueDeathWork(event.agentId, () => this.clearTowerAgentDeath(event.agentId));
       }
       this.noteStateChange('agent started');
       return;
     }
     if (event.type !== 'finished') return;
-    this.enqueueDeathWork(event.agentId, async () => {
+    void this.enqueueDeathWork(event.agentId, async () => {
       await this.recordTowerAgentDeath(event);
       this.requestAutopilotTick('agent-end');
     });
@@ -1087,7 +1111,7 @@ export class TowerController implements TowerToolHost {
     this.noteStateChange('agent finished');
   }
 
-  private enqueueDeathWork(agentId: string, work: () => Promise<void>): void {
+  private enqueueDeathWork(agentId: string, work: () => Promise<void>): Promise<void> {
     const previous = this.deathChains.get(agentId) ?? Promise.resolve();
     const next = previous.then(work, work).catch(() => undefined);
     this.deathChains.set(agentId, next);
@@ -1096,6 +1120,7 @@ export class TowerController implements TowerToolHost {
         if (this.deathChains.get(agentId) === next) this.deathChains.delete(agentId);
       }),
     );
+    return next;
   }
 
   private track(promise: Promise<unknown>): void {
@@ -1256,7 +1281,7 @@ export class TowerController implements TowerToolHost {
     if (kind !== 'validator') return;
     this.track(
       disposed.then(() => {
-        this.enqueueDeathWork(agentId, () => this.releaseValidationWorktree(agentId));
+        void this.enqueueDeathWork(agentId, () => this.releaseValidationWorktree(agentId));
       }),
     );
   }
@@ -1359,6 +1384,27 @@ function agentBaseTools(kind: TowerAgentKind): readonly string[] {
 
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+async function settledWithin(promise: Promise<unknown>, ms: number): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<boolean>((resolve) => {
+    timer = setTimeout(() => {
+      resolve(false);
+    }, ms);
+    timer.unref();
+  });
+  try {
+    return await Promise.race([
+      promise.then(
+        () => true,
+        () => true,
+      ),
+      expired,
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function describeSessionModel(model: { readonly provider: string; readonly id: string } | undefined): string {

@@ -1,6 +1,6 @@
-import { mkdtemp, readdir, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 
 import { getAgentDir, type ExtensionAPI } from '@earendil-works/pi-coding-agent';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -9,7 +9,14 @@ import { TOWER_MODEL_FLAGS } from '../../src/config/index.ts';
 import towerExtension from '../../src/index.ts';
 import { MISSION_COMMAND, MISSION_COMMAND_ALIAS } from '../../src/mission/constants.ts';
 import { TOWER_MODE_USER_ENABLED_ONLY, todoToolDenied } from '../../src/prompts/index.ts';
-import { TowerStore } from '../../src/protocol/index.ts';
+import {
+  ACTIVITY_LOG,
+  STATE_FILE,
+  TOWER_ROOT,
+  TowerStore,
+  WORKTREES_DIR,
+  type TowerState,
+} from '../../src/protocol/index.ts';
 import {
   TOWER_COMMAND,
   TOWER_MODE_ENTRY,
@@ -17,7 +24,8 @@ import {
   TOWER_REMINDER_MESSAGE,
   TOWER_STATUS_KEY,
 } from '../../src/tower/constants.ts';
-import { FakeContext, FakeSessionManager, createRepo, removeDir } from './fakes.ts';
+import { MissionContext } from '../mission/fakes.ts';
+import { FakeContext, FakeSessionManager, commitFile, createRepo, git, removeDir } from './fakes.ts';
 
 const EVENTS = [
   'session_start',
@@ -138,6 +146,12 @@ class RecordingPi {
     const tool = this.tools.get(name);
     if (tool === undefined) throw new Error(`${name} is not registered`);
     return tool;
+  }
+
+  command(name: string): RecordedCommand {
+    const command = this.commands.get(name);
+    if (command === undefined) throw new Error(`/${name} is not registered`);
+    return command;
   }
 
   get api(): ExtensionAPI {
@@ -291,5 +305,141 @@ describe('tower extension factory', () => {
 
     await pi.emit('session_shutdown', { type: 'session_shutdown' }, ctx);
     expect(pi.unexpected).toEqual([]);
+  });
+});
+
+describe('a repository nested under a tower worktree', () => {
+  const OUTER_SESSION = 'session-outer';
+  const NESTED_SESSION = 'session-nested';
+
+  interface NestedSetup {
+    readonly outer: string;
+    readonly nested: string;
+    readonly ctx: MissionContext;
+    readonly pi: RecordingPi;
+    readonly storeRoots: Set<string>;
+  }
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  async function nestedUnderWorktree(outerOwnerPid?: number): Promise<NestedSetup> {
+    const outer = await createRepo('tower-index-outer-');
+    cleanups.push(outer);
+    const store = new TowerStore(outer);
+    await store.init(OUTER_SESSION, 'main');
+    for (const name of ['agent-mission-e2e', 'agent-mission-docs']) {
+      await store.registerAgent({
+        name,
+        agentId: `${name}-id`,
+        sessionId: OUTER_SESSION,
+        kind: 'worker',
+        spawnedAt: new Date().toISOString(),
+      });
+    }
+    if (outerOwnerPid !== undefined) {
+      const state = JSON.parse(await readFile(join(outer, STATE_FILE), 'utf8')) as TowerState;
+      await writeFile(join(outer, STATE_FILE), `${JSON.stringify({ ...state, ownerPid: outerOwnerPid }, null, 2)}\n`);
+    }
+    const worktree = join(outer, WORKTREES_DIR, 'wt-x');
+    await git(outer, 'worktree', 'add', '-q', '-b', 'feat/x', worktree);
+    const nested = join(worktree, 'tmp', 'repo');
+    await mkdir(nested, { recursive: true });
+    await git(nested, 'init', '-q', '-b', 'main');
+    await git(nested, 'config', 'user.email', 'tower-test@example.com');
+    await git(nested, 'config', 'user.name', 'Tower Test');
+    await commitFile(nested, 'README.md', '# nested\n', 'initial');
+
+    const ctx = new MissionContext(nested, new FakeSessionManager(NESTED_SESSION));
+    ctx.model = ctx.modelRegistry.add('prov', 'session-model');
+    const pi = new RecordingPi();
+    towerExtension(pi.api);
+    return { outer, nested, ctx, pi, storeRoots: recordStoreRoots() };
+  }
+
+  function recordStoreRoots(): Set<string> {
+    const roots = new Set<string>();
+    const load = TowerStore.prototype.load;
+    const isInitialized = TowerStore.prototype.isInitialized;
+    vi.spyOn(TowerStore.prototype, 'load').mockImplementation(function (this: TowerStore) {
+      roots.add(this.repoRoot);
+      return load.call(this);
+    });
+    vi.spyOn(TowerStore.prototype, 'isInitialized').mockImplementation(function (this: TowerStore) {
+      roots.add(this.repoRoot);
+      return isInitialized.call(this);
+    });
+    return roots;
+  }
+
+  async function towerFiles(repo: string): Promise<Record<string, string>> {
+    const files: Record<string, string> = {};
+    const walk = async (dir: string): Promise<void> => {
+      for (const entry of await readdir(dir, { withFileTypes: true })) {
+        const path = join(dir, entry.name);
+        if (path === join(repo, WORKTREES_DIR)) continue;
+        if (entry.isDirectory()) await walk(path);
+        else files[relative(repo, path)] = await readFile(path, 'utf8');
+      }
+    };
+    await walk(join(repo, TOWER_ROOT));
+    return files;
+  }
+
+  async function liveOuterFiles(outer: string): Promise<Record<string, string>> {
+    const files = await towerFiles(outer);
+    expect(JSON.parse(files[STATE_FILE] ?? '{}')).toMatchObject({
+      sessionId: OUTER_SESSION,
+      roster: { agents: [{ name: 'agent-mission-e2e' }, { name: 'agent-mission-docs' }] },
+    });
+    expect(files[ACTIVITY_LOG]).toContain('tower init');
+    return files;
+  }
+
+  it('/mission and /mission exit set up and release its own workspace and leave the outer one untouched', async () => {
+    const { outer, nested, ctx, pi, storeRoots } = await nestedUnderWorktree();
+    const outerFiles = await liveOuterFiles(outer);
+
+    await pi.emit('session_start', { type: 'session_start', reason: 'startup' }, ctx);
+    await pi.command(MISSION_COMMAND).handler('', ctx);
+
+    expect(ctx.ui.notices.at(-1)?.message).toMatch(/^Mission mode\n/);
+    expect(ctx.ui.notices.at(-1)?.message).toContain('(tower workspace initialized now)');
+    expect(await new TowerStore(nested).load()).toMatchObject({ sessionId: NESTED_SESSION, roster: { agents: [] } });
+
+    await pi.command(MISSION_COMMAND).handler('exit', ctx);
+    await pi.emit('session_shutdown', { type: 'session_shutdown' }, ctx);
+
+    expect((await new TowerStore(nested).load()).sessionId).toBeUndefined();
+    expect(await towerFiles(outer)).toEqual(outerFiles);
+    expect([...storeRoots]).toEqual([nested]);
+  });
+
+  it('/tower on, /tower main and /tower off keep to its own workspace while a live session owns the outer one', async () => {
+    const { outer, nested, ctx, pi, storeRoots } = await nestedUnderWorktree(process.ppid);
+    const outerFiles = await liveOuterFiles(outer);
+    expect(JSON.parse(outerFiles[STATE_FILE] ?? '{}')).toMatchObject({ ownerPid: process.ppid });
+    const tower = pi.command(TOWER_COMMAND);
+
+    await pi.emit('session_start', { type: 'session_start', reason: 'startup' }, ctx);
+    await tower.handler('on', ctx);
+    expect(ctx.ui.notices).toContainEqual({ message: 'Tower mode: ON', level: 'info' });
+    expect(await new TowerStore(nested).isInitialized()).toBe(false);
+
+    await tower.handler('main', ctx);
+    expect(ctx.ui.notices).toContainEqual({ message: 'Tower base: main', level: 'info' });
+    expect(await new TowerStore(nested).load()).toMatchObject({
+      base: 'main',
+      sessionId: NESTED_SESSION,
+      roster: { agents: [] },
+    });
+
+    await tower.handler('off', ctx);
+    await pi.emit('session_shutdown', { type: 'session_shutdown' }, ctx);
+
+    expect((await new TowerStore(nested).load()).sessionId).toBeUndefined();
+    expect(await towerFiles(outer)).toEqual(outerFiles);
+    expect([...storeRoots]).toEqual([nested]);
   });
 });

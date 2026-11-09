@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs';
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { mkdtemp, readdir, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -37,7 +37,7 @@ import type { TowerAgentSessionRequest } from '../../src/runtime/index.ts';
 import { createTowerSpawnTool } from '../../src/tools/spawn/spawnTool.ts';
 import { ORCHESTRATOR_CALLER } from '../../src/tools/support.ts';
 import { createTowerAgentRuntime } from '../../src/tower/agentRuntime.ts';
-import { AutopilotRunner } from '../../src/tower/autopilot/index.ts';
+import { AutopilotRunner, autoTeardown } from '../../src/tower/autopilot/index.ts';
 import { towerAutopilotEffects, towerAutopilotObservations } from '../../src/tower/autopilotHost.ts';
 import { commandUi, handleTowerCommand, type TowerCommandDeps } from '../../src/tower/command.ts';
 import {
@@ -113,6 +113,7 @@ interface HarnessOptions {
   readonly createRuntime?: (controller: TowerController) => TowerRuntime;
   readonly createAutopilot?: (controller: TowerController) => TowerAutopilot;
   readonly alive?: (pid: number) => boolean;
+  readonly shutdownReleaseGraceMs?: number;
 }
 
 const cleanups: string[] = [];
@@ -150,6 +151,7 @@ async function harness(options: HarnessOptions = {}): Promise<Harness> {
     pi,
     ...(models === undefined ? {} : { models }),
     isProcessAlive: options.alive ?? (() => true),
+    ...(options.shutdownReleaseGraceMs === undefined ? {} : { shutdownReleaseGraceMs: options.shutdownReleaseGraceMs }),
     ...(options.runtime === false ? {} : { createRuntime: options.createRuntime ?? (() => runtime) }),
     createAutopilot:
       options.createAutopilot ??
@@ -971,6 +973,96 @@ describe('validation worktrees', () => {
     expect(existsSync(prepared.path)).toBe(true);
     h.runtime.finish(agentId, 'idle');
     await vi.waitFor(() => expect(existsSync(prepared.path)).toBe(false), WAIT);
+  });
+
+  async function validationWorktreesLeft(h: Harness): Promise<string[]> {
+    const listed = (await git(h.repo, 'worktree', 'list')).split('\n').filter((line) => line.includes('/val-'));
+    const dirs = (await readdir(h.store.abs(WORKTREES_DIR))).filter((name) => name.startsWith('val-'));
+    return [...listed, ...dirs];
+  }
+
+  it('removes the worktree of a validator still running when its verdict completed the objective, once the session shuts down', async () => {
+    const h = await harness({ prepare: validatingObjective });
+    await h.controller.enter();
+    const { agentId, prepared } = await launchValidator(h);
+    const settings = { skipScrutiny: false, skipUserTesting: true };
+    await h.store.submitValidation(
+      'ap-v-MS1-scrutiny-1',
+      { milestone: 'MS1', kind: 'scrutiny', verdict: 'pass', failures: [], checks: ['typecheck'], evidence: 'green' },
+      settings,
+    );
+    expect((await h.store.completeObjective(settings)).status).toBe('completed');
+    const teardown = await autoTeardown(h.store, (entry) => h.controller.autopilotAgent(entry.agentId)?.status === 'running');
+    expect(teardown).toMatchObject({ finishing: 1, failed: 0 });
+    expect(existsSync(prepared.path)).toBe(true);
+
+    await h.controller.onSessionShutdown();
+
+    expect(await validationWorktreesLeft(h)).toEqual([]);
+    const log = await activityLog(h);
+    expect(log).toContain(`worktree.keep worktree=${prepared.worktree} reason=live-agent`);
+    const died = log.indexOf(`died name=ap-v-MS1-scrutiny-1 agent=${agentId} kind=validator status=stopped`);
+    expect(died).toBeGreaterThanOrEqual(0);
+    expect(log.indexOf(`worktree.remove worktree=${prepared.worktree}`)).toBeGreaterThan(died);
+    expect(h.warnings).toEqual([]);
+  });
+
+  it('survives a failing worktree removal on shutdown and removes the worktree on a repeated shutdown', async () => {
+    const h = await harness({ prepare: validatingObjective });
+    await h.controller.enter();
+    const { prepared } = await launchValidator(h);
+    const removal = vi.spyOn(TowerStore.prototype, 'removeValidationWorktree').mockRejectedValue(new Error('worktree is locked'));
+    try {
+      await expect(h.controller.onSessionShutdown()).resolves.toBeUndefined();
+      expect(removal).toHaveBeenCalledWith(prepared.worktree);
+    } finally {
+      removal.mockRestore();
+    }
+    expect(h.warnings).toEqual(['tower: failed to remove a validation worktree']);
+    expect(existsSync(prepared.path)).toBe(true);
+
+    await h.controller.onSessionShutdown();
+    await h.controller.onSessionShutdown();
+
+    expect(await validationWorktreesLeft(h)).toEqual([]);
+    expect((await activityLog(h)).match(new RegExp(`worktree\\.remove worktree=${prepared.worktree}`, 'g'))).toHaveLength(1);
+  });
+
+  it('stops waiting for a hanging worktree removal after the shutdown grace', async () => {
+    const h = await harness({ prepare: validatingObjective, shutdownReleaseGraceMs: 50 });
+    await h.controller.enter();
+    await launchValidator(h);
+    let finish: () => void = () => undefined;
+    const removal = vi.spyOn(TowerStore.prototype, 'removeValidationWorktree').mockImplementation(
+      () =>
+        new Promise<boolean>((resolve) => {
+          finish = () => {
+            resolve(false);
+          };
+        }),
+    );
+    try {
+      await h.controller.onSessionShutdown();
+      expect(removal).toHaveBeenCalledOnce();
+      expect(h.warnings).toEqual(['tower: shutdown stopped waiting for the validation worktrees of disposed validators']);
+    } finally {
+      finish();
+      removal.mockRestore();
+    }
+  });
+
+  it('leaves the validation worktrees alone on shutdown when another session owns the workspace', async () => {
+    const h = await harness({ prepare: validatingObjective });
+    await h.controller.enter();
+    const { prepared } = await launchValidator(h);
+    await mutateState(h.store, (state) => {
+      state.sessionId = 'session-other';
+    });
+
+    await h.controller.onSessionShutdown();
+
+    expect(existsSync(prepared.path)).toBe(true);
+    expect(await activityLog(h)).not.toContain('worktree.remove');
   });
 });
 

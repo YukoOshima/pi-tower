@@ -1,4 +1,4 @@
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 
 import {
   isToolCallEventType,
@@ -15,7 +15,13 @@ import {
   VALIDATOR_WRITE_VETO,
   writeGuardVeto,
 } from '../guards/index.ts';
-import { STATE_FILE, TowerStore, WORKTREES_DIR, resolveTowerRepoRoot } from '../protocol/index.ts';
+import {
+  STATE_FILE,
+  TowerStore,
+  WORKTREES_DIR,
+  lexicalTowerRepoRoot,
+  resolveTowerRepoRoot,
+} from '../protocol/index.ts';
 
 export const TOWER_AGENT_GUARDS_EXTENSION = 'pi-tower-guards';
 
@@ -29,14 +35,23 @@ export interface TowerAgentGuardTarget {
 export async function towerBashGuard(
   event: ToolCallEvent,
   cwd: string,
+  mainCheckout?: string,
 ): Promise<ToolCallEventResult | undefined> {
   if (!isToolCallEventType('bash', event)) return undefined;
   const command: unknown = event.input.command;
   if (typeof command !== 'string' || !commandNeedsTowerGuard(command)) return undefined;
-  const mainCheckout = resolveTowerRepoRoot(cwd);
-  if (!(await towerWorkspaceOwned(join(mainCheckout, STATE_FILE)))) return undefined;
-  const reason = analyzeTowerBashCommand({ command, cwd, mainCheckout });
-  return reason === undefined ? undefined : { block: true, reason };
+  for (const checkout of guardedCheckouts(cwd, mainCheckout)) {
+    if (!(await towerWorkspaceOwned(join(checkout, STATE_FILE)))) continue;
+    const reason = analyzeTowerBashCommand({ command, cwd, mainCheckout: checkout });
+    if (reason !== undefined) return { block: true, reason };
+  }
+  return undefined;
+}
+
+function guardedCheckouts(cwd: string, mainCheckout: string | undefined): readonly string[] {
+  const primary = mainCheckout ?? resolveTowerRepoRoot(cwd);
+  const lexical = lexicalTowerRepoRoot(cwd);
+  return resolve(lexical) === resolve(primary) ? [primary] : [primary, lexical];
 }
 
 export async function towerWriteGuard(
@@ -60,10 +75,21 @@ export function towerAgentGuards(target: TowerAgentGuardTarget): InlineExtension
     hidden: true,
     factory: (pi) => {
       pi.on('tool_call', async (event, ctx) => {
-        return (await towerBashGuard(event, ctx.cwd)) ?? (await towerWriteGuard(event, ctx.cwd, target));
+        return (
+          (await towerBashGuard(event, ctx.cwd, boundRepoRoot(target))) ??
+          (await towerWriteGuard(event, ctx.cwd, target))
+        );
       });
     },
   };
+}
+
+function boundRepoRoot(target: TowerAgentGuardTarget): string | undefined {
+  try {
+    return target.repoRoot();
+  } catch {
+    return undefined;
+  }
 }
 
 async function rosterWorktree(target: TowerAgentGuardTarget): Promise<string | undefined> {

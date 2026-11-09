@@ -563,14 +563,32 @@ describe('roster death marks', () => {
     return { ...h, agentId: launched.agentId, store };
   }
 
+  function nextDeathWrite(method: 'markAgentDied' | 'clearAgentDied'): Promise<void> {
+    const original = TowerStore.prototype[method] as (this: TowerStore, ...args: unknown[]) => Promise<unknown>;
+    return new Promise((resolve) => {
+      const spy = vi.spyOn(TowerStore.prototype, method).mockImplementation(async function (this: TowerStore, ...args: unknown[]) {
+        spy.mockRestore();
+        try {
+          return await original.apply(this, args);
+        } finally {
+          resolve();
+        }
+      } as never);
+    });
+  }
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   it('records a death from a non-completed finished run', async () => {
     const h = await activeWithAgent();
+    const marked = nextDeathWrite('markAgentDied');
 
     h.runtime.finish(h.agentId, 'failed', { stopReason: 'provider blew up' });
+    await marked;
 
-    await vi.waitFor(async () => {
-      expect((await h.store.load()).roster.agents[0]?.deathStatus).toBe('failed');
-    });
+    expect((await h.store.load()).roster.agents[0]?.deathStatus).toBe('failed');
     expect((await h.store.load()).roster.agents[0]?.deathReason).toBe('provider blew up');
     const activity = await readFile(join(h.repo, '.tower/comms/log/activity.log'), 'utf8');
     expect(activity).toContain(' died ');
@@ -598,16 +616,16 @@ describe('roster death marks', () => {
 
   it('clears the death mark when the agent starts again', async () => {
     const h = await activeWithAgent();
+    const marked = nextDeathWrite('markAgentDied');
     h.runtime.finish(h.agentId, 'failed', { stopReason: 'lost contact' });
-    await vi.waitFor(async () => {
-      expect((await h.store.load()).roster.agents[0]?.diedAt).toBeDefined();
-    });
+    await marked;
+    expect((await h.store.load()).roster.agents[0]?.diedAt).toBeDefined();
 
+    const cleared = nextDeathWrite('clearAgentDied');
     await h.runtime.resume(h.agentId, 'retry');
+    await cleared;
 
-    await vi.waitFor(async () => {
-      expect((await h.store.load()).roster.agents[0]?.diedAt).toBeUndefined();
-    });
+    expect((await h.store.load()).roster.agents[0]?.diedAt).toBeUndefined();
     expect(await readFile(join(h.repo, '.tower/comms/log/activity.log'), 'utf8')).toContain('revived');
   });
 
@@ -915,13 +933,17 @@ describe('inbox wakes', () => {
   it('requeues the batch when delivery fails and retries after the next settle', async () => {
     const h = await activeHarness();
     h.pi.sendFailure = new Error('session is busy');
+    const failed = h.pi.nextSendAttempt(TOWER_INBOX_WAKE_MESSAGE);
 
     h.controller.publishInboxSent({ from: 'w1', to: 'tower', subject: 'retry me', messageId: 'msg-retry' });
+    expect((await failed).failure?.message).toBe('session is busy');
     await settle();
     expect(wakes(h)).toEqual([]);
 
+    const retried = h.pi.nextSendAttempt(TOWER_INBOX_WAKE_MESSAGE);
     h.controller.onAgentSettled(settled, h.ctx.asContext);
-    await vi.waitFor(() => expect(wakes(h)).toHaveLength(1));
+    expect((await retried).failure).toBeUndefined();
+    expect(wakes(h)).toHaveLength(1);
     expect(sentText(wakes(h)[0])).toContain('messageId=msg-retry');
   });
 });
