@@ -2,7 +2,6 @@ import {
   compareIds,
   currentMilestone,
   depsSettled,
-  failedRoundCount,
   finalMilestone,
   isClosed,
   latestRound,
@@ -87,7 +86,7 @@ export function decideAutopilot(snapshot: AutopilotSnapshot): AutopilotDecision 
   if (pause !== undefined) return { actions: [pause], progressKey, stall: restingStall(snapshot) };
 
   const current = currentMilestone(objective);
-  const block = milestoneBlock(snapshot, objective, current);
+  const block = milestoneBlock(objective, current);
   if (block !== undefined) return { actions: [block], progressKey, stall: restingStall(snapshot) };
 
   const draft: Draft = {
@@ -152,26 +151,11 @@ function blockAction(
 }
 
 function milestoneBlock(
-  snapshot: AutopilotSnapshot,
   objective: AutopilotObjective,
   current: AutopilotMilestone | undefined,
 ): AutopilotBlockObjective | undefined {
-  if (current === undefined) return undefined;
-  if (current.status === 'blocked') {
-    return blockAction(objective, 'milestone-blocked', `milestone ${current.id} is blocked`);
-  }
-  const max = objective.limits.maxValidationRounds;
-  for (const kind of milestoneRequiredKinds(objective, current, snapshot.settings)) {
-    const failed = failedRoundCount(current, kind);
-    if (failed >= max) {
-      return blockAction(
-        objective,
-        'validation-rounds-exhausted',
-        `milestone ${current.id} ${kind} failed ${String(failed)} validation round(s) (max ${String(max)})`,
-      );
-    }
-  }
-  return undefined;
+  if (current?.status !== 'blocked') return undefined;
+  return blockAction(objective, 'milestone-blocked', `milestone ${current.id} is blocked`);
 }
 
 function milestoneOrder(objective: AutopilotObjective, id: string | undefined): number | undefined {

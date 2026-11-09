@@ -556,6 +556,7 @@ table('start-validation', [
 ]);
 
 const FAIL_ROUNDS = [round('scrutiny', 1, BASE, 'fail'), round('user-testing', 1, BASE, 'pass')];
+const THREE_FAILS = [round('scrutiny', 1, 'a', 'fail'), round('scrutiny', 2, 'b', 'fail'), round('scrutiny', 3, BASE, 'fail')];
 
 table('validation failure, fix and block', [
   {
@@ -605,12 +606,30 @@ table('validation failure, fix and block', [
     actions: [validate('MS1', 'base-1', ['scrutiny', 'user-testing'])],
   },
   {
-    name: 'maxValidationRounds failed rounds of a kind block the objective alone',
+    name: 'a resumed milestone with maxValidationRounds failed rounds asks for a fix instead of re-blocking',
+    snap: snapshot({ objective: { milestones: [milestone('MS1', 1, { status: 'failed', rounds: THREE_FAILS })] }, missions: DONE_MS1 }),
+    actions: [wakeOf('validation-failed', 'MS1', 'scrutiny-r3')],
+  },
+  {
+    name: 'fix planning after a resume from a rounds block proceeds',
     snap: snapshot({
-      objective: { milestones: [milestone('MS1', 1, { status: 'validating', rounds: [round('scrutiny', 1, 'a', 'fail'), round('scrutiny', 2, 'b', 'fail'), round('scrutiny', 3, BASE, 'fail')] })] },
-      missions: [merged('M1'), feature('M4')],
+      objective: { milestones: [milestone('MS1', 1, { status: 'active', rounds: THREE_FAILS })] },
+      missions: [merged('M1'), feature('M9')],
+      memory: { wakeKeys: ['validation-failed:MS1:scrutiny-r3'] },
     }),
-    actions: [blockOf('validation-rounds-exhausted')],
+    actions: [spawn('M9')],
+  },
+  {
+    name: 'old failed rounds on stale commits do not block a fresh round running on the tip',
+    snap: snapshot({
+      objective: { milestones: [milestone('MS1', 1, { status: 'validating', rounds: [round('scrutiny', 1, 'a', 'fail'), round('scrutiny', 2, 'b', 'fail'), round('scrutiny', 3, 'c', 'fail')] })] },
+      validators: [
+        { milestone: 'MS1', kind: 'scrutiny', commit: BASE },
+        { milestone: 'MS1', kind: 'user-testing', commit: BASE },
+      ],
+      missions: DONE_MS1,
+    }),
+    actions: [],
   },
   {
     name: 'fewer failed rounds than the limit keep looping',
@@ -618,7 +637,7 @@ table('validation failure, fix and block', [
     actions: [wakeOf('validation-failed', 'MS1', 'scrutiny-r2')],
   },
   {
-    name: 'failed rounds of a kind that is no longer required do not count',
+    name: 'failed rounds of a kind that is no longer required are ignored',
     snap: snapshot({
       settings: { skipScrutiny: true },
       objective: { milestones: [milestone('MS1', 1, { status: 'active', rounds: [round('scrutiny', 1, 'a', 'fail'), round('scrutiny', 2, 'b', 'fail'), round('scrutiny', 3, 'c', 'fail')] })] },
@@ -627,7 +646,7 @@ table('validation failure, fix and block', [
     actions: [validate('MS1', BASE, ['user-testing'])],
   },
   {
-    name: 'a blocked milestone blocks the objective',
+    name: 'a milestone the store blocked (e.g. maxValidationRounds) blocks the objective',
     snap: snapshot({ objective: { milestones: [milestone('MS1', 1, { status: 'blocked' })] }, missions: [feature('M1')] }),
     actions: [blockOf('milestone-blocked')],
   },
@@ -896,13 +915,9 @@ table('manual mode (autopilot=false)', [
   { name: 'exhausted attempts still wake', snap: snapshot({ settings: MANUAL, missions: [working('M1', { attempts: 3, worker: DEAD })] }), actions: [wakeOf('feature-attempts-exhausted', 'M1', '3')] },
   { name: 'merge blocks still wake', snap: snapshot({ settings: MANUAL, missions: [SCOPE_BLOCKED] }), actions: [wakeOf('merge-blocked', 'M1', 'tip-M1:out-of-scope')] },
   {
-    name: 'exhausted validation rounds still block',
-    snap: snapshot({
-      settings: MANUAL,
-      objective: { milestones: [milestone('MS1', 1, { status: 'failed', rounds: [round('user-testing', 1, 'a', 'fail'), round('user-testing', 2, 'b', 'fail'), round('user-testing', 3, BASE, 'fail')] })] },
-      missions: DONE_MS1,
-    }),
-    actions: [blockOf('validation-rounds-exhausted')],
+    name: 'a milestone the store blocked still blocks the objective',
+    snap: snapshot({ settings: MANUAL, objective: { milestones: [milestone('MS1', 1, { status: 'blocked', rounds: THREE_FAILS })] }, missions: DONE_MS1 }),
+    actions: [blockOf('milestone-blocked')],
   },
 ]);
 

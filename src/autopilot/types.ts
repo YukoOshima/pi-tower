@@ -203,7 +203,7 @@ export type AutopilotWakeReason =
 
 export type AutopilotResumeReason = 'review-findings' | 'rebase-conflict';
 
-export type AutopilotBlockReason = 'stalled' | 'validation-rounds-exhausted' | 'milestone-blocked';
+export type AutopilotBlockReason = 'stalled' | 'milestone-blocked';
 
 export type AutopilotPauseReason = 'max-wall-time' | 'max-cost';
 

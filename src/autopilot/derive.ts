@@ -86,10 +86,6 @@ export function validationAttemptsOn(
   return attempts;
 }
 
-export function failedRoundCount(milestone: AutopilotMilestone, kind: AutopilotValidationKind): number {
-  return milestone.rounds.filter((round) => round.kind === kind && round.verdict === 'fail').length;
-}
-
 export function isClosed(mission: AutopilotMission): boolean {
   return mission.status === 'merged' || mission.status === 'abandoned';
 }
