@@ -3721,9 +3721,10 @@ describe('teardown', () => {
   });
 
   it('removes mission worktrees when the tower runs inside a linked git worktree', async () => {
-    const linked = join(await mkdtemp(join(tmpdir(), 'tower-store-linked-')), 'linked');
-    await git(repo, 'worktree', 'add', linked, '-b', 'linked-checkout');
+    const linkedParent = await mkdtemp(join(tmpdir(), 'tower-store-linked-'));
+    const linked = join(linkedParent, 'linked');
     try {
+      await git(repo, 'worktree', 'add', linked, '-b', 'linked-checkout');
       const linkedStore = new TowerStore(linked);
       await linkedStore.init();
       const [mission] = await linkedStore.plan([{ title: 'feature x', scope: ['src/x/**'] }]);
@@ -3736,6 +3737,7 @@ describe('teardown', () => {
     } finally {
       await git(repo, 'worktree', 'remove', '--force', linked).catch(() => {});
       await git(repo, 'branch', '-D', 'linked-checkout').catch(() => {});
+      await rm(linkedParent, { recursive: true, force: true });
     }
   });
 

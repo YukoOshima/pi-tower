@@ -1,5 +1,5 @@
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -111,14 +111,14 @@ describe('checkAutopilotPromptness', () => {
     writeActivityLog(repo, [mergeLine('2026-11-09T09:37:32.844Z', 'feat/a', merged), '2026-11-09T09:37:32.853Z autopilot start-validation milestone=MS1 result=done detail=status=validating']);
     const check = promptness(repo);
     expect(check?.ok).toBe(false);
-    expect(check?.evidence).toEqual(['MS1 on (no commit field): UNMEASURED start at 2026-11-09T09:37:32.853Z — the commit does not resolve in the repository']);
+    expect(check?.evidence).toEqual(['MS1 on (no commit field): UNMEASURED start at 2026-11-09T09:37:32.853Z — the commit does not resolve in the repository', '(no start could be measured)']);
   });
 
   it('leaves a start on a commit that no merge produced out of the measurement, but needs at least one measured start', () => {
     const repo = unitRepo();
     const initial = git(repo, ['rev-parse', 'HEAD']).slice(0, 7);
     writeActivityLog(repo, [startLine('2026-11-09T09:30:00.000Z', 'MS1', initial)]);
-    expect(promptness(repo)).toEqual(expect.objectContaining({ ok: false, evidence: [`MS1 on ${initial}: no merge produced this commit`] }));
+    expect(promptness(repo)).toEqual(expect.objectContaining({ ok: false, evidence: [`MS1 on ${initial}: no merge produced this commit`, '(no start could be measured)'] }));
     const merged = mergeFeature(repo, 'feat/a');
     writeActivityLog(repo, [startLine('2026-11-09T09:30:00.000Z', 'MS1', initial), mergeLine('2026-11-09T09:37:32.844Z', 'feat/a', merged), startLine('2026-11-09T09:37:33.000Z', 'MS2', merged.slice(0, 7))]);
     expect(promptness(repo)?.ok).toBe(true);
@@ -127,7 +127,7 @@ describe('checkAutopilotPromptness', () => {
   it('fails when nothing started a validation', () => {
     const repo = unitRepo();
     writeActivityLog(repo, [mergeLine('2026-11-09T09:37:32.844Z', 'feat/a', mergeFeature(repo, 'feat/a'))]);
-    expect(promptness(repo)).toEqual(expect.objectContaining({ ok: false, evidence: ['(no autopilot start-validation line)'] }));
+    expect(promptness(repo)).toEqual(expect.objectContaining({ ok: false, evidence: ['(no autopilot start-validation line)', '(no start could be measured)'] }));
   });
 });
 
@@ -171,6 +171,28 @@ describe('processesUnder', () => {
     expect([...scan.processes].sort((a, b) => a.pid - b.pid)).toEqual([
       { pid: 101, cwd: join(dir, 'repo'), command: 'node cli.js' },
       { pid: 102, cwd: '/elsewhere', command: `pi --session-dir ${join(dir, 'sessions')}` },
+    ]);
+  });
+
+  it('matches the real path of a symlinked run dir as well, since procfs reports working directories with symlinks resolved', () => {
+    const root = tempDir();
+    mkdirSync(join(root, 'real', 'S16'), { recursive: true });
+    symlinkSync(join(root, 'real'), join(root, 'link'));
+    const dir = join(root, 'link', 'S16');
+    const resolved = realpathSync(dir);
+    const proc = fakeProcfs(root, [
+      { pid: String(process.pid), cwd: resolved, argv: ['node', 'vitest', dir] },
+      { pid: '101', cwd: join(resolved, 'repo'), argv: ['node', 'cli.js'] },
+      { pid: '102', cwd: '/elsewhere', argv: ['pi', '--session-dir', join(dir, 'sessions')] },
+      { pid: '103', cwd: '/elsewhere', argv: ['pi', '--session-dir', join(resolved, 'sessions')] },
+      { pid: '104', cwd: '/elsewhere', argv: ['sleep', '300'] },
+    ]);
+    const scan = processesUnder(dir, { procRoot: proc, ps: join(root, 'no-ps') });
+    expect(scan.method).toBe(`the working directory and command line of every process in ${proc}`);
+    expect([...scan.processes].sort((a, b) => a.pid - b.pid)).toEqual([
+      { pid: 101, cwd: join(resolved, 'repo'), command: 'node cli.js' },
+      { pid: 102, cwd: '/elsewhere', command: `pi --session-dir ${join(dir, 'sessions')}` },
+      { pid: 103, cwd: '/elsewhere', command: `pi --session-dir ${join(resolved, 'sessions')}` },
     ]);
   });
 

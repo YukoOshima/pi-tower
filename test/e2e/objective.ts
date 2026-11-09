@@ -276,10 +276,12 @@ export function validationStarts(repo: string): ValidationStart[] {
 
 export function checkAutopilotPromptness(ctx: Pick<ScenarioContext, 'report'>, repo: string): void {
   const starts = validationStarts(repo);
+  const measured = starts.some((start) => start.latencyMs !== undefined);
+  const lines = starts.length === 0 ? ['(no autopilot start-validation line)'] : starts.map((start) => start.line);
   ctx.report.check(
     `every milestone validation starts within ${String(VALIDATION_START_LATENCY_LIMIT_MS / 1000)}s of the merge that produced its commit`,
-    starts.some((start) => start.latencyMs !== undefined) && starts.every((start) => !start.unmeasured && (start.latencyMs === undefined || start.latencyMs <= VALIDATION_START_LATENCY_LIMIT_MS)),
-    starts.length === 0 ? '(no autopilot start-validation line)' : starts.map((start) => start.line),
+    measured && starts.every((start) => !start.unmeasured && (start.latencyMs === undefined || start.latencyMs <= VALIDATION_START_LATENCY_LIMIT_MS)),
+    measured ? lines : [...lines, '(no start could be measured)'],
   );
   const unusual = autopilotEntries(repo).filter((entry) => ['refused', 'duplicate', 'skipped'].includes(entry.fields.result ?? ''));
   const duplicates = unusual.filter((entry) => entry.fields.result === 'duplicate' || (entry.fields.result === 'refused' && /already registered/.test(entry.line)));
@@ -374,7 +376,7 @@ export interface ProcessScanOptions {
   readonly lsof?: string;
 }
 
-function procfsProcesses(dir: string, procRoot: string): ProcessInfo[] | undefined {
+function procfsProcesses(roots: readonly string[], procRoot: string): ProcessInfo[] | undefined {
   let names: string[];
   try {
     readlinkSync(`${procRoot}/${String(process.pid)}/cwd`);
@@ -388,7 +390,7 @@ function procfsProcesses(dir: string, procRoot: string): ProcessInfo[] | undefin
     try {
       const cwd = readlinkSync(`${procRoot}/${name}/cwd`);
       const command = readFileSync(`${procRoot}/${name}/cmdline`, 'utf8').replaceAll('\0', ' ').trim();
-      if (cwd.startsWith(dir) || command.includes(dir)) found.push({ pid: Number(name), cwd, command });
+      if (roots.some((root) => cwd.startsWith(root) || command.includes(root))) found.push({ pid: Number(name), cwd, command });
     } catch {
       continue;
     }
@@ -428,14 +430,14 @@ function realpathOr(path: string): string {
 
 export function processesUnder(dir: string, options: ProcessScanOptions = {}): ProcessScan {
   const procRoot = options.procRoot ?? '/proc';
-  const fromProcfs = procfsProcesses(dir, procRoot);
+  const roots = distinct([dir, realpathOr(dir)]);
+  const fromProcfs = procfsProcesses(roots, procRoot);
   if (fromProcfs !== undefined) return { applicable: true, method: `the working directory and command line of every process in ${procRoot}`, processes: fromProcfs };
   const ps = options.ps ?? 'ps';
   const listing = runListing(ps, ['-ww', '-axo', 'pid=,command=']);
   if (listing.failure !== undefined) return { applicable: false, method: `no usable ${procRoot}, and \`${ps} -ww -axo pid=,command=\` failed (${listing.failure})`, processes: [] };
   const lsof = options.lsof ?? 'lsof';
   const cwds = lsofCwds(lsof);
-  const roots = distinct([dir, realpathOr(dir)]);
   const processes = listing.stdout.split('\n').flatMap((line): ProcessInfo[] => {
     const match = /^\s*(\d+)\s+(.*)$/.exec(line);
     if (match === null || Number(match[1]) === process.pid) return [];
