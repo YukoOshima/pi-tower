@@ -27,6 +27,7 @@ export interface TowerValidationRound {
   failures: string[];
   file: string;
   date: string;
+  contractRevision?: number;
 }
 
 export interface TowerMilestone {
@@ -62,6 +63,7 @@ export interface TowerObjective {
   goal: string;
   definitionOfDone: string[];
   acceptanceCommands: string[];
+  contractRevision?: number;
   status: TowerObjectiveStatus;
   milestones: TowerMilestone[];
   removedMilestones?: string[];

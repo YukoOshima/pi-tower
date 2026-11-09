@@ -53,6 +53,7 @@ import {
   applyObjectiveUpdate,
   applyValidationRound,
   buildObjective,
+  contractRevisionOf,
   currentMilestone,
   estimateObjectiveRuns,
   evaluateObjective,
@@ -3602,6 +3603,7 @@ export class TowerStore {
         failures,
         file,
         date,
+        ...(contractRevisionOf(objective) > 0 ? { contractRevision: contractRevisionOf(objective) } : {}),
       };
       const outcome = applyValidationRound(objective, milestone, record, settings);
       await this.save(state);

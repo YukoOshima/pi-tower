@@ -167,15 +167,25 @@ export function requiredValidationKinds(
   return kinds;
 }
 
+export function contractRevisionOf(objective: TowerObjective): number {
+  return objective.contractRevision ?? 0;
+}
+
+export function roundContractRevision(round: TowerValidationRound): number {
+  return round.contractRevision ?? 0;
+}
+
 export function latestValidationRound(
   milestone: TowerMilestone,
   kind: TowerValidationKind,
   commit?: string,
+  revision?: number,
 ): TowerValidationRound | undefined {
   let latest: TowerValidationRound | undefined;
   for (const round of milestone.rounds) {
     if (round.kind !== kind) continue;
     if (commit !== undefined && round.validatedCommit !== commit) continue;
+    if (revision !== undefined && roundContractRevision(round) !== revision) continue;
     if (latest === undefined || round.round >= latest.round) latest = round;
   }
   return latest;
@@ -197,7 +207,7 @@ export function milestonePassesOn(
   settings: TowerValidationSettings = {},
 ): boolean {
   return requiredValidationKinds(objective, milestone, settings).every(
-    (kind) => latestValidationRound(milestone, kind, commit)?.verdict === 'pass',
+    (kind) => latestValidationRound(milestone, kind, commit, contractRevisionOf(objective))?.verdict === 'pass',
   );
 }
 
@@ -207,9 +217,14 @@ export function failedRoundsOn(
   commit: string,
   settings: TowerValidationSettings = {},
 ): TowerValidationRound[] {
+  const revision = contractRevisionOf(objective);
   return requiredValidationKinds(objective, milestone, settings).flatMap((kind) =>
     milestone.rounds.filter(
-      (round) => round.kind === kind && round.verdict === 'fail' && round.validatedCommit === commit,
+      (round) =>
+        round.kind === kind &&
+        round.verdict === 'fail' &&
+        round.validatedCommit === commit &&
+        roundContractRevision(round) === revision,
     ),
   );
 }
@@ -221,7 +236,7 @@ export function latestFailingKinds(
   settings: TowerValidationSettings = {},
 ): TowerValidationKind[] {
   return requiredValidationKinds(objective, milestone, settings).filter(
-    (kind) => latestValidationRound(milestone, kind, commit)?.verdict === 'fail',
+    (kind) => latestValidationRound(milestone, kind, commit, contractRevisionOf(objective))?.verdict === 'fail',
   );
 }
 
@@ -249,7 +264,7 @@ export function deriveMilestoneStatus(
   if (commit === undefined) return milestone.status;
   const required = requiredValidationKinds(objective, milestone, settings);
   const failing = required.filter(
-    (kind) => latestValidationRound(milestone, kind, commit)?.verdict === 'fail',
+    (kind) => latestValidationRound(milestone, kind, commit, contractRevisionOf(objective))?.verdict === 'fail',
   );
   if (failing.length > 0) {
     return failing.some(
@@ -288,7 +303,7 @@ function milestoneProgress(
       latest:
         milestone.validationCommit === undefined
           ? undefined
-          : latestValidationRound(milestone, kind, milestone.validationCommit),
+          : latestValidationRound(milestone, kind, milestone.validationCommit, contractRevisionOf(objective)),
     }),
   );
   return {
@@ -848,6 +863,7 @@ export function applyObjectiveUpdate(
   }
 
   const reopened = reopenChangedMilestones(before, next);
+  if (contractChanged) next.contractRevision = contractRevisionOf(next) + 1;
   if (contractChanged && next.approvedAt !== undefined) {
     next.status = 'awaiting-approval';
     next.approvalReason = 'contract-changed';
@@ -1000,7 +1016,7 @@ export function applyValidationRound(
     const exhausted = TOWER_VALIDATION_KINDS.filter(
       (kind) =>
         failedValidationRounds(milestone, kind) >= max &&
-        latestValidationRound(milestone, kind, milestone.validationCommit)?.verdict === 'fail',
+        latestValidationRound(milestone, kind, milestone.validationCommit, contractRevisionOf(objective))?.verdict === 'fail',
     );
     objective.status = 'blocked';
     objective.blockedReason = `milestone ${milestone.id} "${milestone.title}" failed ${exhausted.map((kind) => `${kind} validation ${String(failedValidationRounds(milestone, kind))} times`).join(' and ')} — maxValidationRounds is ${String(max)}`;

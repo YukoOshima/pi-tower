@@ -249,6 +249,16 @@ describe('deriveMilestoneStatus', () => {
     expect(deriveMilestoneStatus(exhausted.obj, exhausted.ms)).toBe('blocked');
   });
 
+  it('decides only on rounds of the current contract revision', () => {
+    const { obj, ms } = validating([round('scrutiny', 1, 'fail'), round('user-testing', 1, 'pass')]);
+    obj.contractRevision = 1;
+    expect(deriveMilestoneStatus(obj, ms)).toBe('validating');
+    ms.rounds.push({ ...round('scrutiny', 2, 'pass'), contractRevision: 1 });
+    expect(deriveMilestoneStatus(obj, ms)).toBe('validating');
+    ms.rounds.push({ ...round('user-testing', 2, 'pass'), contractRevision: 1 });
+    expect(deriveMilestoneStatus(obj, ms)).toBe('passed');
+  });
+
   it('passes immediately when no kind is required', () => {
     const { obj, ms } = validating([], { validation: { scrutiny: false, userTesting: false, commands: [] } });
     expect(deriveMilestoneStatus(obj, ms)).toBe('passed');
@@ -584,6 +594,17 @@ describe('applyObjectiveUpdate', () => {
     expect(result.objective.notes).toEqual(['assumed X']);
     expect(result.objective.limits.maxFeatureAttempts).toBe(5);
     expect(result.changes).toEqual(['title', 'limits', 'MS1.title', 'MS1.description', 'appended:MS3', 'notes']);
+  });
+
+  it('counts a contract revision for contract changes only', () => {
+    const s = state(objective({ status: 'planning' }));
+    const first = applyObjectiveUpdate(s, { goal: 'another goal' });
+    expect(first.objective.contractRevision).toBe(1);
+    s.objective = first.objective;
+    const cosmetic = applyObjectiveUpdate(s, { title: 'Renamed', notes: ['n'], milestones: [{ title: 'More' }] });
+    expect(cosmetic.objective.contractRevision).toBe(1);
+    expect(applyObjectiveUpdate(s, { acceptanceCommands: ['npm test'] }).objective.contractRevision).toBe(2);
+    expect(applyObjectiveUpdate(state(objective()), { notes: ['n'] }).objective.contractRevision).toBeUndefined();
   });
 
   it('treats an unchanged value as no change', () => {

@@ -1565,3 +1565,102 @@ describe('a passed final milestone whose pass no longer holds', () => {
     expect((await readState()).objective!.milestones[0]!.status).toBe('active');
   });
 });
+
+describe('contract revisions', () => {
+  async function finalOnly(validation: {
+    readonly scrutiny?: boolean;
+    readonly userTesting?: boolean;
+    readonly commands?: readonly string[];
+  }): Promise<string> {
+    await store.draftObjective({
+      title: 'Ship',
+      goal: 'g',
+      definitionOfDone: ['works'],
+      milestones: [{ title: 'Core', validation }],
+    });
+    await store.plan([{ title: 'Core work', scope: ['src/core/**'], milestone: 'MS1' }]);
+    await store.requestObjectiveApproval();
+    await store.approveObjective('human');
+    await mutateState((state) => {
+      state.missions[0]!.status = 'merged';
+    });
+    const tip = await git(repo, 'rev-parse', 'main');
+    await store.startMilestoneValidation('MS1', tip);
+    return tip;
+  }
+
+  async function commands(verdict: 'pass' | 'fail', commit: string) {
+    return store.submitValidation('tower', {
+      milestone: 'MS1',
+      kind: 'commands',
+      verdict,
+      ...(verdict === 'fail' ? { failures: ['npm tst: command not found'] } : {}),
+      validatedCommit: commit,
+    });
+  }
+
+  it('re-validates the same tip only after a re-approved contract change (R3)', async () => {
+    const tip = await finalOnly({ scrutiny: false, userTesting: false, commands: ['npm tst'] });
+    expect((await commands('fail', tip)).milestone.status).toBe('failed');
+    await expect(store.startMilestoneValidation('MS1', tip)).rejects.toThrow(/already failed commands r1/);
+    await store.updateObjective({ title: 'Ship it', notes: ['the command looks wrong'] });
+    const before = await readFile(store.abs(STATE_FILE), 'utf8');
+    await expect(store.startMilestoneValidation('MS1', tip)).rejects.toThrow(/already failed commands r1/);
+    expect(await readFile(store.abs(STATE_FILE), 'utf8')).toBe(before);
+    expect((await readState()).objective!.contractRevision).toBeUndefined();
+
+    const corrected = await store.updateObjective({ milestones: [{ id: 'MS1', validation: { commands: ['npm test'] } }] });
+    expect(corrected.objective).toMatchObject({ status: 'awaiting-approval', contractRevision: 1 });
+    expect(corrected.objective.milestones[0]!.status).toBe('active');
+    await store.approveObjective('human');
+    const restarted = await store.startMilestoneValidation('MS1', tip);
+    expect(restarted.milestone).toMatchObject({ status: 'validating', validationCommit: tip });
+    const passed = await commands('pass', tip);
+    expect(passed.round).toMatchObject({ round: 2, verdict: 'pass', contractRevision: 1 });
+    expect(passed.milestone.status).toBe('passed');
+    expect((await store.completeObjective()).status).toBe('completed');
+  });
+
+  it('never leaves a multi-kind milestone stuck failed on an old-revision round', async () => {
+    const tip = await finalOnly({ userTesting: false, commands: ['npm tst'] });
+    expect((await commands('fail', tip)).milestone.status).toBe('failed');
+    await store.updateObjective({ milestones: [{ id: 'MS1', validation: { commands: ['npm test'] } }] });
+    await store.approveObjective('human');
+    await store.startMilestoneValidation('MS1', tip);
+    await store.registerAgent({
+      name: 'val-scrutiny',
+      agentId: 'agent-val-scrutiny',
+      kind: 'validator',
+      milestoneId: 'MS1',
+      validationKind: 'scrutiny',
+      validatedCommit: tip,
+      spawnedAt: '2026-04-04T00:00:00.000Z',
+    });
+    const scrutiny = await store.submitValidation('val-scrutiny', { milestone: 'MS1', kind: 'scrutiny', verdict: 'pass' });
+    expect(scrutiny.milestone.status).toBe('validating');
+    const corrected = await commands('pass', tip);
+    expect(corrected.milestone.status).toBe('passed');
+    expect((await store.completeObjective()).status).toBe('completed');
+  });
+
+  it('does not let an old-revision pass satisfy completion after a contract change', async () => {
+    const tip = await finalOnly({ scrutiny: false, userTesting: false, commands: ['npm test'] });
+    expect((await commands('pass', tip)).milestone.status).toBe('passed');
+    await store.updateObjective({ definitionOfDone: ['works', 'documented'] });
+    await store.approveObjective('human');
+    const refused = await store.completeObjective().catch((caught: unknown) => caught);
+    expect((refused as TowerObjectiveCompletionError).blocks.map((block) => block.code)).toEqual([
+      'final-validation-stale',
+    ]);
+    await store.startMilestoneValidation('MS1', tip);
+    expect((await commands('pass', tip)).round.contractRevision).toBe(1);
+    expect((await store.completeObjective()).status).toBe('completed');
+  });
+
+  it('writes no revision at all while the contract never changes', async () => {
+    const tip = await finalOnly({ scrutiny: false, userTesting: false, commands: ['npm test'] });
+    const passed = await commands('pass', tip);
+    expect('contractRevision' in passed.round).toBe(false);
+    expect(await readFile(store.abs(STATE_FILE), 'utf8')).not.toContain('contractRevision');
+  });
+});
