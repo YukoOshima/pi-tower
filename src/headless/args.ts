@@ -27,7 +27,7 @@ export const HEADLESS_USAGE = [
   '  --auto-approve      approve the plan without a human (sends /tower approve)',
   '  --timeout <ms>      give up after this many milliseconds (exit 2)',
   '  --cwd <dir>         repository to run in (default: the current directory)',
-  '  --pi <path>         pi executable (default: pi)',
+  '  --pi <path>         pi executable: a path, or a command looked up on PATH (default: pi)',
   '  -- <args>           everything after -- is passed to pi unchanged',
   '  -h, --help          show this help',
   '  --version           print the pi-tower version',
@@ -108,7 +108,7 @@ export function parseHeadlessArgs(argv: readonly string[], baseDir: string): Hea
       autoApprove,
       timeoutMs,
       cwd: resolve(baseDir, values.cwd ?? '.'),
-      piBin: values.pi ?? 'pi',
+      piBin: values.pi === undefined ? 'pi' : /[\\/]/.test(values.pi) ? resolve(baseDir, values.pi) : values.pi,
       piArgs,
     },
   };

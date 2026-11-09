@@ -34,8 +34,16 @@ afterEach(() => {
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
-function startCli(args: readonly string[], options: { readonly cwd?: string; readonly env?: NodeJS.ProcessEnv; readonly bin?: string } = {}): CliRun {
-  const child = spawn(process.execPath, [options.bin ?? BIN, ...args], { cwd: options.cwd ?? CHECKOUT, env: options.env ?? process.env, stdio: ['ignore', 'pipe', 'pipe'] });
+function startCli(
+  args: readonly string[],
+  options: { readonly cwd?: string; readonly env?: NodeJS.ProcessEnv; readonly bin?: string; readonly detached?: boolean } = {},
+): CliRun {
+  const child = spawn(process.execPath, [options.bin ?? BIN, ...args], {
+    cwd: options.cwd ?? CHECKOUT,
+    env: options.env ?? process.env,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    detached: options.detached === true,
+  });
   let stdout = '';
   let stderr = '';
   child.stdout.on('data', (chunk: Buffer) => {
@@ -232,6 +240,18 @@ describe('pi-tower CLI (bin/pi-tower.js)', () => {
     expect(result.stderr).toContain(`received ${signal} — stopping pi`);
     expect(result.stderr).toContain(`interrupted by ${signal}; pi was stopped (objective O1 was executing)`);
     expect(fake.log().some((entry) => entry.kind === 'signal' && entry.signal === 'SIGTERM')).toBe(true);
+    expect(isAlive(pid)).toBe(false);
+  });
+
+  it('exits 130 when Ctrl-C reaches the whole process group and pi dies of the SIGINT itself', { timeout: 20_000 }, async () => {
+    const fake = world();
+    const run = startCli(runArgs(fake, { commands: [TOWER_ON, DRAFT, approve()] }, ['--auto-approve']), { detached: true });
+    await waitUntil(() => run.stdout().includes('] O1 executing'), 'the runner to see the objective executing');
+    const pid = fakePid(fake);
+    process.kill(-Number(run.pid), 'SIGINT');
+    const result = await run.done;
+    expect(result.code).toBe(130);
+    expect(result.stderr).toContain('interrupted by SIGINT; pi was stopped (objective O1 was executing)');
     expect(isAlive(pid)).toBe(false);
   });
 

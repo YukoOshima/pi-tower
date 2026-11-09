@@ -39,6 +39,11 @@ describe('parseHeadlessArgs', () => {
     expect(parsed).toMatchObject({ kind: 'run', options: { timeoutMs: 5, cwd: '/r', piBin: 'pi2' } });
   });
 
+  it('resolves a path-like --pi against the base directory and keeps a bare command for the PATH lookup', () => {
+    expect(parseHeadlessArgs(['run', '-f', 'g.md', '--pi', './tools/pi'], BASE)).toMatchObject({ options: { piBin: '/work/here/tools/pi' } });
+    expect(parseHeadlessArgs(['run', '-f', 'g.md', '--pi', 'pi-nightly'], BASE)).toMatchObject({ options: { piBin: 'pi-nightly' } });
+  });
+
   it('answers --help and --version before validating anything else', () => {
     expect(parseHeadlessArgs(['--help'], BASE)).toEqual({ kind: 'help' });
     expect(parseHeadlessArgs(['run', '-h'], BASE)).toEqual({ kind: 'help' });
