@@ -247,7 +247,7 @@ autopilot 会：
 - 为当前里程碑中依赖已合并或已放弃的每个 feature 启动 worker，数量上限为 `maxRunningAgents`；
 - 为 branch 当前最新提交上的每个 review 请求派发 reviewer；
 - 恢复收到 review 意见或需要解决 rebase 冲突的空闲 worker；
-- 当 worker 在完成 feature 之前就空闲下来（既没有调用 `TowerComplete`，也没有报告 blocker）时，提醒它完成任务或说明受阻原因，每个 branch 最新提交只提醒一次；
+- 当 worker 在完成 feature 之前就空闲下来（既没有调用 `TowerComplete`，也没有报告 blocker，并且没有在等待自己所发消息的回复）时，提醒它完成任务、报告受阻原因或提出问题，每个 branch 最新提交只提醒一次；
 - 用同一 branch 上的新 worker 替换失败或超时的 worker，每个 feature 最多 `maxFeatureAttempts` 个 worker；没有给出结果就结束的 reviewer 或 validator 也会同样被替换；但绝不替换你停止的 Agent；
 - rebase 落后的 branch，合并通过检查的 branch；
 - 启动验证：派发 validator 并运行命令；
@@ -260,7 +260,7 @@ autopilot 会：
 - `validation-failed`：根据失败项规划修复 feature；
 - `blocker`：某个 worker 报告了 blocker 或提出了问题；
 - `feature-attempts-exhausted`：某个 feature 用完了 worker 尝试次数；
-- `worker-idle`：worker 被提醒之后，再次没有完成就空闲下来；
+- `worker-idle`：worker 被提醒之后，再次没有完成就空闲下来（手动模式下没有人提醒，所以会立即唤醒）；
 - `worker-stopped`：你停止了某个 feature 的 worker，orchestrator 会询问你如何继续；
 - `merge-blocked`：合并检查因需要判断的原因而受阻，例如改动了 feature 范围之外的文件；
 - `rebase-conflict`：没有 worker 能接手的冲突；
@@ -346,14 +346,14 @@ pi-tower run -f <objective.md> [--auto-approve] [--timeout <ms>] [--cwd <dir>] [
 1. 在仓库中启动 `pi --mode rpc`，后面接上你的额外参数。当前检出的 branch 会成为 base，所以请先检出一个 branch。
 2. 发送 `/tower on`，再发送 `/tower objective --headless @<文件的绝对路径>`。如果工作区中已经有一个等待批准或正在执行的 objective，就改为跟进它，不再重复发送文件。如果已有的 objective 处于暂停状态，运行会立即以退出码 1 结束：请先在 pi 中用 `/tower resume` 恢复它，再重新运行 `pi-tower run` 来跟进。
 3. 每秒读取一次 `.tower/comms/state.json`，objective 或它的某个里程碑状态发生变化时打印一行。
-4. objective 等待批准时打印计划。带 `--auto-approve` 时批准并继续，不带时以退出码 3 退出。
+4. objective 等待批准时打印计划。带 `--auto-approve` 时批准并继续。不带时，它会再给 Tower 两次轮询的时间自行批准计划（通过 `objective.autoApprove`）：Tower 批准了就继续跟随该 objective，否则以退出码 3 退出。
 5. objective 完成、被阻塞或暂停时，或者 pi 退出、超时、收到信号时，运行结束。退出之前总会先停止 pi。
 
 运行器会把你的环境变量传给 pi，因此 `PI_TOWER_CONFIG` 和 `PI_TOWER_*_MODEL` 照常有效，例如可以为某次运行单独指定一个 `tower.json`。无人能回答的对话框会被自动取消。运行器自己不写任何文件，只读取状态文件。进度输出到 stdout，警告和错误输出到 stderr。
 
 如果你在 pi 中接手一个 headless objective，不带参数的 `/tower approve` 或 `/tower resume` 会把它切回交互模式，orchestrator 会重新向你提问，而不是自己做决定。
 
-无人值守运行时，请在 [objective 配置](#objective-配置段)中设置 `maxWallTimeMs` 和 `maxCostUsd`，再用 `--timeout` 作为最外层的限制。请用 `--auto-approve` 批准，并让 `objective.autoApprove` 保持关闭：这个选项只在本次运行期间生效；两者同时开启时，它们可能同时去批准同一份计划，导致运行失败。
+无人值守运行时，请在 [objective 配置](#objective-配置段)中设置 `maxWallTimeMs` 和 `maxCostUsd`，再用 `--timeout` 作为最外层的限制。请用 `--auto-approve` 批准，并让 `objective.autoApprove` 保持关闭：这个选项只在本次运行期间生效，而该配置会批准每一份计划，在你的交互会话中也是如此（见[已知限制](#已知限制)）。两者同时开启时，运行会在先到的那次批准之后继续跟随该 objective。
 
 下面是一个端到端的例子。objective 文件请放在仓库之外，因为主 checkout 中未跟踪的文件可能会进入 worker branch：
 
@@ -926,13 +926,19 @@ npm test
 | S4 | 审查返工循环 | optional（可选） |
 | S7 | 通过 `/tower stop` 进行人工停止 | optional（可选） |
 | S13 | `maxRunningAgents=1` 的并发预算 | optional（可选） |
+| S15 | 端到端的 Objective 模式：人工批准计划，两个 feature 并行执行，一条失败的验收检查迫使 orchestrator 规划修复 feature，里程碑在新的 base 最新提交上重新验证，之后 objective 才完成 | mandatory（必选） |
+| S16 | 无人值守的 `pi-tower run --auto-approve`：退出码为 0，objective 已完成，agent 目录中没有任何文件被改动，没有遗留进程 | mandatory（必选） |
+| S17 | 重启后继续执行：worker 运行期间 pi 被强行终止；在新的 pi 中执行 `/tower on` 后，autopilot 在原 branch 上为该 feature 启动新的 worker，objective 最终完成 | optional（可选） |
 
-默认运行全部七个场景。任一选中的场景失败或你的 pi 设置被改动时，退出码为 1；达到全局超时时退出码为 2。
+默认运行 S1 到 S13 这七个场景。Objective 场景 S15、S16 和 S17 只在被选中时运行，可以按编号选择，也可以用关键字 `objective`：`--scenarios=objective` 运行这三个，`--scenarios=all,objective` 运行全部十个。任一选中的场景失败或你的 pi 设置被改动时，退出码为 1；达到全局超时时退出码为 2。
+
+Objective 场景使用一个小型的 Node CLI 仓库，只依据持久化的证据做断言：`state.json`、活动日志、验证文件和 roster。在 S15 中，验收命令是仓库之外的一个脚本：它在 Tower 的 `commands` 验证中第一次运行时失败，并指出缺少的交付物（`docs/USAGE.md`）；之后只有修复交付了它，脚本才会通过。因此每次运行都会走完修复循环。三个场景还会检查：每次里程碑验证都在产生其 commit 的合并之后 15 秒内开始，并且 autopilot 从不重复启动同一个 Agent。
 
 ```sh
 npm run test:e2e:pi -- --selfcheck
 npm run test:e2e:pi
 PI_TOWER_E2E_SCENARIOS=S1,S2,S3,S8 npm run test:e2e:pi -- --report=e2e-report.md
+npm run test:e2e:pi -- --scenarios=objective --report=e2e-objective.md
 ```
 
 `--selfcheck` 只执行离线检查，不启动任何会话。它仍会调用 `pi --version`，所以 `pi` 必须在 `PATH` 中。它会基于本 checkout 检查 wake 解析器，并输出每个角色的模型能否与 pi 的默认模型以及起始会话模型区分开。
@@ -944,19 +950,20 @@ PI_TOWER_E2E_SCENARIOS=S1,S2,S3,S8 npm run test:e2e:pi -- --report=e2e-report.md
 | `PI_TOWER_E2E_ORCHESTRATOR_MODEL` | `byteplus-gateway/claude-sonnet-5-5:low` | orchestrator 模型 |
 | `PI_TOWER_E2E_WORKER_MODEL` | `byteplus-gateway/claude-haiku-5-5:low` | worker 模型 |
 | `PI_TOWER_E2E_REVIEWER_MODEL` | `byteplus-gateway/claude-opus-5-5:low` | reviewer 模型 |
+| `PI_TOWER_E2E_VALIDATOR_MODEL` | reviewer 模型 | Objective 场景使用的 validator 模型 |
 | `PI_TOWER_E2E_SESSION_MODEL` | `byteplus-gateway/claude-haiku-5-5:low` | `/tower on` 之前的会话模型。必须与 orchestrator 模型不同，才能观察到模型切换。 |
-| `PI_TOWER_E2E_SCENARIOS` | `all` | 逗号分隔的场景编号，例如 `S1,S3`。`--scenarios=S1,S3` 的效果相同。 |
-| `PI_TOWER_E2E_TIMEOUT_MS` | `4500000`（75 分钟） | 整次运行的超时时间 |
-| `PI_TOWER_E2E_SCENARIO_TIMEOUT_MS` | `1200000`（20 分钟） | 每个场景的超时时间 |
+| `PI_TOWER_E2E_SCENARIOS` | `all` | 逗号分隔的场景编号，例如 `S1,S3`，或者关键字 `all`（S1 到 S13）和 `objective`（S15 到 S17）。`--scenarios=S1,S3` 的效果相同。 |
+| `PI_TOWER_E2E_TIMEOUT_MS` | `4500000`（75 分钟），再加上选中的 objective 场景各自的超时时间 | 整次运行的超时时间 |
+| `PI_TOWER_E2E_SCENARIO_TIMEOUT_MS` | `1200000`（20 分钟）；S15、S16 和 S17 分别为 55、40 和 45 分钟 | 每个场景的超时时间。设置后对所有场景生效。 |
 | `PI_TOWER_E2E_KEEP` | 未设置 | 设为 `1` 时保留运行目录及其中的仓库和日志。`--keep` 的效果相同。 |
 | `PI_TOWER_E2E_VERBOSE` | 未设置 | 设为 `1` 时回显各 pi 进程的输出。`--verbose` 的效果相同。 |
 | `PI_TOWER_E2E_REPORT` | 未设置 | 把 Markdown 报告写到该路径。`--report=<path>` 的效果相同。 |
 
-模型采用 `provider/modelId[:thinking]` 格式。orchestrator、worker 和 reviewer 的模型必须是三个不同的 provider/model id，否则运行不会开始。默认值使用名为 `byteplus-gateway` 的 provider，请把这些模型变量设成你的 pi 配置能访问的模型；运行时使用该配置中的 provider 和凭据。
+模型采用 `provider/modelId[:thinking]` 格式。orchestrator、worker 和 reviewer 的模型必须是三个不同的 provider/model id，否则运行不会开始；validator 模型可以与其中之一相同。默认值使用名为 `byteplus-gateway` 的 provider，请把这些模型变量设成你的 pi 配置能访问的模型；运行时使用该配置中的 provider 和凭据。
 
-每次运行都会消耗真实的 token：使用默认的 sonnet、haiku 和 opus 模型（low thinking）时，一次完整运行约需 6 分钟，花费约 1.1–1.3 美元。
+每次运行都会消耗真实的 token：使用默认的 sonnet、haiku 和 opus 模型（low thinking）时，一次完整运行约需 6 分钟，花费约 1.1–1.3 美元。三个 objective 场景另需约 5 分钟、约 1.4 美元。每个场景都在自己的 `tower.json` 中用 `maxCostUsd` 和 `maxWallTimeMs` 限制其 objective（分别为 6、4 和 5 美元），报告会列出每个场景的耗时和花费。
 
-端到端实测不会修改你的 pi 设置。每个 pi 进程都在运行目录中拥有自己的 `tower.json`（通过 `PI_TOWER_CONFIG` 指定）和会话目录，并以 `--no-extensions`、`--no-skills`、`--no-prompt-templates`、`--no-context-files` 和 `--offline` 启动。运行前后，runner 会记录 agent 目录（`~/.pi/agent`，或 `PI_CODING_AGENT_DIR`）中 `settings.json` 和 `tower.json` 的指纹；任一文件发生变化，本次运行即判为失败。
+端到端实测不会修改你的 pi 设置。每个 pi 进程都在运行目录中拥有自己的 `tower.json`（通过 `PI_TOWER_CONFIG` 指定）和会话目录，并以 `--no-extensions`、`--no-skills`、`--no-prompt-templates`、`--no-context-files` 和 `--offline` 启动。运行前后，runner 会记录 agent 目录（`~/.pi/agent`，或 `PI_CODING_AGENT_DIR`）中 `settings.json` 和 `tower.json` 的指纹；任一文件发生变化，本次运行即判为失败。S16 在其无人值守运行的前后检查得更严格：它对 agent 目录中的每个文件计算哈希，并检查没有任何进程的工作目录或命令行仍位于该场景的运行目录下。
 
 ## 许可证与致谢
 

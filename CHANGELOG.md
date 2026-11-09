@@ -24,6 +24,7 @@ Objective mode: the tower keeps working on a plan you approved until every miles
 - **Commands.** `/tower objective`, `/tower objective status`, `/tower approve [--auto]`, `/tower pause [reason]` and `/tower resume`, with tab completion and near-miss hints.
 - **Configuration.** A `tower.json` `"objective"` section with `autopilot`, `autoApprove`, `maxValidationRounds`, `maxFeatureAttempts`, `watchdogIntervalMs`, `stallTimeoutMs`, `maxStallWakes`, `maxWallTimeMs`, `maxCostUsd`, `skipScrutiny`, `skipUserTesting` and `autoTeardown`. The project file wins key by key. `/tower models` shows the validator and every objective setting with its source.
 - **Docs.** README sections in English and Simplified Chinese on objective mode, headless runs, a comparison with Droid Missions and the known limitations, `examples/objective.md`, and an `examples/tower.json` with a validator and an objective section.
+- **Live end-to-end scenarios for objective mode.** `npm run test:e2e:pi -- --scenarios=objective` runs three new scenarios against real models: S15 (a failing acceptance check drives a fix feature until the objective completes), S16 (a headless `pi-tower run --auto-approve`) and S17 (restart continuation after pi is killed mid-feature). `PI_TOWER_E2E_VALIDATOR_MODEL` sets their validator model, the objective scenarios get their own timeouts, and the report shows the wall time and cost of every scenario. The default selection stays the seven 0.1.0 scenarios.
 
 ### Compatibility
 
