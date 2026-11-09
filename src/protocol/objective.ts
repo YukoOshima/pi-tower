@@ -4,6 +4,8 @@ import type {
   TowerMilestoneStatus,
   TowerMilestoneValidationSpec,
   TowerMission,
+  TowerMissionKind,
+  TowerMissionOrigin,
   TowerObjective,
   TowerObjectiveAutopilotState,
   TowerObjectiveLimits,
@@ -797,4 +799,72 @@ export function applyAutopilotPatch(
     if (!autopilot.wakeKeys.includes(key)) autopilot.wakeKeys.push(key);
   }
   return autopilot;
+}
+
+export interface TowerPlanPlacementInput {
+  readonly title: string;
+  readonly kind?: TowerMissionKind;
+  readonly milestone?: string;
+  readonly origin?: TowerMissionOrigin;
+}
+
+export interface TowerPlanPlacement {
+  readonly milestone?: TowerMilestone;
+  readonly origin?: TowerMissionOrigin;
+  readonly reopens: boolean;
+}
+
+function describeMilestones(objective: TowerObjective): string {
+  const milestones = sortedMilestones(objective);
+  return milestones.length > 0
+    ? milestones.map((milestone) => `${milestone.id} ${milestone.status}`).join(', ')
+    : 'none yet — add one with TowerObjective update';
+}
+
+export function planPlacement(state: TowerState, item: TowerPlanPlacementInput): TowerPlanPlacement {
+  const objective = state.objective;
+  if (item.origin !== undefined && item.origin !== 'plan' && item.origin !== 'fix') {
+    throw new TowerProtocolError(
+      `mission "${item.title}" origin must be plan | fix, got "${String(item.origin)}"`,
+    );
+  }
+  const milestoneId = item.milestone?.trim() ?? '';
+  if (milestoneId.length === 0) {
+    if (item.origin !== undefined) {
+      throw new TowerProtocolError(
+        `mission "${item.title}" sets origin "${item.origin}" without a milestone — origin applies only to features planned into a milestone`,
+      );
+    }
+    if (isObjectiveOpen(objective) && (item.kind ?? 'build') === 'build') {
+      throw new TowerProtocolError(
+        `objective ${objective.id} is ${objective.status} — build mission "${item.title}" must name the milestone it belongs to (milestones: ${describeMilestones(objective)}); plan it with milestone=<id>`,
+      );
+    }
+    return { reopens: false };
+  }
+  if (objective === undefined) {
+    throw new TowerProtocolError(
+      `mission "${item.title}" names milestone "${milestoneId}" but there is no objective — omit the milestone, or draft an objective first`,
+    );
+  }
+  if (objective.status === 'completed') {
+    throw new TowerProtocolError(
+      `objective ${objective.id} is completed — mission "${item.title}" cannot join milestone "${milestoneId}"; plan it without a milestone or draft a new objective`,
+    );
+  }
+  const milestone = findMilestone(objective, milestoneId);
+  if (milestone === undefined) {
+    throw new TowerProtocolError(
+      `objective ${objective.id} has no milestone "${milestoneId}" (milestones: ${describeMilestones(objective)})`,
+    );
+  }
+  if (milestone.status === 'passed') {
+    const current = currentMilestone(objective);
+    throw new TowerProtocolError(
+      `milestone ${milestone.id} "${milestone.title}" already passed validation — plan "${item.title}" into ${current === undefined ? 'a new milestone' : `the current milestone ${current.id} "${current.title}"`}, or append a milestone with TowerObjective update if the work belongs after it`,
+    );
+  }
+  const reopens =
+    milestone.status === 'failed' || milestone.status === 'validating' || milestone.status === 'blocked';
+  return { milestone, origin: item.origin ?? (reopens ? 'fix' : 'plan'), reopens };
 }

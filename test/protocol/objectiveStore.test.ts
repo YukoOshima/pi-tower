@@ -368,3 +368,117 @@ describe('milestone progression and bookkeeping', () => {
     await expect(store.updateObjectiveAutopilot({ stallWakes: -1 })).rejects.toThrow(/non-negative integer/);
   });
 });
+
+describe('plan with milestones', () => {
+  it('plans exactly as before without an objective', async () => {
+    const [mission] = await store.plan([{ title: 'Plain work', scope: ['src/plain/**'] }]);
+    expect(Object.keys(mission!)).toEqual([
+      'id',
+      'title',
+      'slug',
+      'kind',
+      'scope',
+      'branch',
+      'worktree',
+      'deps',
+      'status',
+      'context',
+      'tasks',
+      'notes',
+      'blockers',
+    ]);
+    const raw = await readFile(store.abs(STATE_FILE), 'utf8');
+    expect(raw).not.toMatch(/milestone|origin|attempts|objective/);
+    expect(await activityLog()).toMatch(/ tower plan missions=M1 ref=\.tower\/comms\/MISSIONS\.md\n$/);
+    await expect(store.plan([{ title: 'Other', scope: ['src/other/**'], milestone: 'MS1' }])).rejects.toThrow(
+      /names milestone "MS1" but there is no objective/,
+    );
+    await expect(store.plan([{ title: 'Other', scope: ['src/other/**'], origin: 'fix' }])).rejects.toThrow(
+      /without a milestone/,
+    );
+  });
+
+  it('requires an existing milestone for build missions while the objective is open', async () => {
+    await store.draftObjective({ title: 'Ship', milestones: [{ title: 'Core' }, { title: 'Polish' }] });
+    await expect(store.plan([{ title: 'Loose work', scope: ['src/loose/**'] }])).rejects.toThrow(
+      /O1 is planning — build mission "Loose work" must name the milestone it belongs to \(milestones: MS1 pending, MS2 pending\)/,
+    );
+    await expect(store.plan([{ title: 'Lost work', scope: ['src/lost/**'], milestone: 'MS9' }])).rejects.toThrow(
+      /has no milestone "MS9"/,
+    );
+    await expect(
+      store.plan([{ title: 'Odd work', scope: ['src/odd/**'], milestone: 'MS1', origin: 'other' as 'fix' }]),
+    ).rejects.toThrow(/origin must be plan \| fix/);
+    const [survey] = await store.plan([{ title: 'Look around', scope: ['src/**'], kind: 'survey' }]);
+    expect(survey!.milestone).toBeUndefined();
+    const [core, polish] = await store.plan([
+      { title: 'Core work', scope: ['src/core/**'], milestone: 'MS1' },
+      { title: 'Polish work', scope: ['src/polish/**'], milestone: ' MS2 ', origin: 'fix' },
+    ]);
+    expect(core).toMatchObject({ milestone: 'MS1', origin: 'plan' });
+    expect(polish).toMatchObject({ milestone: 'MS2', origin: 'fix' });
+    expect(Object.keys(core!).slice(-3)).toEqual(['blockers', 'milestone', 'origin']);
+    expect(await activityLog()).toContain('plan missions=M2,M3 milestones=MS1,MS2 ref=');
+  });
+
+  it('refuses a passed milestone with guidance towards the current one', async () => {
+    await store.draftObjective({ title: 'Ship', milestones: [{ title: 'Core' }, { title: 'Polish' }] });
+    await mutateState((state) => {
+      state.objective!.milestones[0]!.status = 'passed';
+    });
+    await expect(store.plan([{ title: 'Late work', scope: ['src/late/**'], milestone: 'MS1' }])).rejects.toThrow(
+      /milestone MS1 "Core" already passed validation — plan "Late work" into the current milestone MS2 "Polish"/,
+    );
+  });
+
+  it('reactivates a failed, validating or blocked milestone and defaults the origin to fix', async () => {
+    await store.draftObjective({
+      title: 'Ship',
+      milestones: [{ title: 'Core' }, { title: 'Polish' }, { title: 'Docs' }],
+    });
+    await mutateState((state) => {
+      state.objective!.milestones[0]!.status = 'failed';
+      state.objective!.milestones[1]!.status = 'validating';
+      state.objective!.milestones[2]!.status = 'blocked';
+    });
+    const planned = await store.plan([
+      { title: 'Fix core', scope: ['src/core/**'], milestone: 'MS1' },
+      { title: 'Fix polish', scope: ['src/polish/**'], milestone: 'MS2', origin: 'plan' },
+      { title: 'Fix docs', scope: ['docs/**'], milestone: 'MS3' },
+    ]);
+    expect(planned.map((mission) => mission.origin)).toEqual(['fix', 'plan', 'fix']);
+    const state = await readState();
+    expect(state.objective!.milestones.map((milestone) => milestone.status)).toEqual(['active', 'active', 'active']);
+    expect(await activityLog()).toContain('milestones=MS1,MS2,MS3 reactivated=MS1,MS2,MS3');
+  });
+
+  it('leaves milestones untouched when the plan is refused', async () => {
+    await store.draftObjective({ title: 'Ship', milestones: [{ title: 'Core' }] });
+    await store.plan([{ title: 'Core work', scope: ['src/core/**'], milestone: 'MS1' }]);
+    await mutateState((state) => {
+      state.objective!.milestones[0]!.status = 'failed';
+    });
+    await expect(
+      store.plan([
+        { title: 'Fix core', scope: ['src/fix/**'], milestone: 'MS1' },
+        { title: 'Bad dep', scope: ['src/bad/**'], milestone: 'MS1', deps: ['M42'] },
+      ]),
+    ).rejects.toThrow(/unknown mission "M42"/);
+    expect((await readState()).objective!.milestones[0]!.status).toBe('failed');
+  });
+
+  it('plans without milestones again once the objective is blocked, and refuses a completed objective', async () => {
+    await store.draftObjective({ title: 'Ship', milestones: [{ title: 'Core' }] });
+    await store.blockObjective('cannot converge');
+    const [loose] = await store.plan([{ title: 'Loose work', scope: ['src/loose/**'] }]);
+    expect(loose!.milestone).toBeUndefined();
+    const [fix] = await store.plan([{ title: 'Fix core', scope: ['src/core/**'], milestone: 'MS1' }]);
+    expect(fix).toMatchObject({ milestone: 'MS1', origin: 'plan' });
+    await mutateState((state) => {
+      state.objective!.status = 'completed';
+    });
+    await expect(store.plan([{ title: 'After', scope: ['src/after/**'], milestone: 'MS1' }])).rejects.toThrow(
+      /O1 is completed/,
+    );
+  });
+});

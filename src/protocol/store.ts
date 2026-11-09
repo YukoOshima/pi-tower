@@ -58,6 +58,7 @@ import {
   isTerminalObjectiveStatus,
   milestoneMissions,
   objectiveApprovalProblems,
+  planPlacement,
   requiredValidationKinds,
   sortedMilestones,
   TowerObjectiveCompletionError,
@@ -101,6 +102,7 @@ import type {
   TowerMilestone,
   TowerMission,
   TowerMissionKind,
+  TowerMissionOrigin,
   TowerMissionStatus,
   TowerObjective,
   TowerObjectiveAutopilotState,
@@ -147,6 +149,8 @@ export interface TowerPlanInput {
   readonly context?: string;
   readonly deps?: readonly string[];
   readonly kind?: TowerMissionKind;
+  readonly milestone?: string;
+  readonly origin?: TowerMissionOrigin;
 }
 
 export interface TowerSendInput {
@@ -1540,10 +1544,12 @@ export class TowerStore {
     return this.withStateLock(async () => {
       const state = await this.load();
       const startIndex = state.missions.length;
+      const placements = input.map((item) => planPlacement(state, item));
 
       const missions: TowerMission[] = input.map((item, index) => {
         const n = startIndex + index + 1;
         const slug = slugify(item.title, 40);
+        const placement = placements[index]!;
         return {
           id: `M${n}`,
           title: item.title,
@@ -1559,6 +1565,9 @@ export class TowerStore {
           tasks: (item.tasks ?? []).map((text) => ({ text, done: false })),
           notes: [],
           blockers: [],
+          ...(placement.milestone === undefined
+            ? {}
+            : { milestone: placement.milestone.id, origin: placement.origin }),
         };
       });
 
@@ -1597,13 +1606,29 @@ export class TowerStore {
       }
       this.assertScopesDisjoint([...openExisting, ...missions]);
 
+      const reactivated = new Set<string>();
+      for (const placement of placements) {
+        if (placement.milestone === undefined || !placement.reopens) continue;
+        placement.milestone.status = 'active';
+        reactivated.add(placement.milestone.id);
+      }
+      const milestones = new Set(missions.flatMap((m) => (m.milestone === undefined ? [] : [m.milestone])));
       state.missions.push(...missions);
       await this.save(state);
       await this.renderMissionsIndex(state);
       for (const mission of missions) {
         await this.renderMissionFile(mission);
       }
-      await this.appendLog(TOWER_NAME, 'plan', { missions: missions.map((m) => m.id).join(',') }, MISSIONS_INDEX);
+      await this.appendLog(
+        TOWER_NAME,
+        'plan',
+        {
+          missions: missions.map((m) => m.id).join(','),
+          milestones: milestones.size > 0 ? [...milestones].join(',') : undefined,
+          reactivated: reactivated.size > 0 ? [...reactivated].join(',') : undefined,
+        },
+        MISSIONS_INDEX,
+      );
       return missions;
     });
   }
