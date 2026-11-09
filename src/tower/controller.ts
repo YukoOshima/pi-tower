@@ -63,6 +63,13 @@ import { BranchLeases } from './leases.ts';
 import { isForeignLiveOwner, isOwnerLive, isProcessAlive } from './liveness.ts';
 import { latestTowerModeRecord, type TowerModeRecord, type TowerSessionModel } from './modeRecord.ts';
 import { towerPrimaryModel, type TowerModels } from './models.ts';
+import {
+  autopilotSettings,
+  objectiveSettingValues,
+  objectiveSettingsView,
+  type TowerAutopilotSettings,
+  type TowerObjectiveSettingsView,
+} from './objectiveSettings.ts';
 import { selectReminderForContext } from './reminders.ts';
 import type {
   TowerAgentEvent,
@@ -286,6 +293,17 @@ export class TowerController implements TowerToolHost {
 
   modelsContext(ctx: ExtensionContext): { readonly cwd: string; readonly projectTrusted: boolean } {
     return { cwd: ctx.cwd, projectTrusted: ctx.isProjectTrusted() };
+  }
+
+  objectiveSettings(): TowerObjectiveSettingsView {
+    return objectiveSettingsView(objectiveSettingValues(this.models?.objectiveSettings));
+  }
+
+  autopilotSettings(): TowerAutopilotSettings {
+    return autopilotSettings(
+      objectiveSettingValues(this.models?.objectiveSettings),
+      this.rateLimitSnapshot().budget,
+    );
   }
 
   async reloadModels(): Promise<void> {
