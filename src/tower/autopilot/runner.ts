@@ -148,6 +148,7 @@ export class AutopilotRunner {
   private readonly commandRuns = new Map<string, CommandsRun>();
   private readonly background = new Set<Promise<void>>();
   private readonly refusals = new Map<string, Refusal>();
+  private readonly refusedWakeKeys = new Set<string>();
   private cost: { readonly objectiveId: string; readonly total: number } | undefined;
   private planning: { readonly objectiveId: string; readonly key: string; readonly since: number } | undefined;
 
@@ -385,7 +386,11 @@ export class AutopilotRunner {
       },
       runCommands: (milestoneId, commit) => {
         commandsByCurrent = true;
-        this.startCommands(store, world, milestoneId, commit, launchedByCurrent);
+        this.startCommands(store, world, milestoneId, commit, launchedByCurrent, {
+          identity: autopilotActionIdentity(current!),
+          subject: autopilotActionSubject(current!),
+          tick,
+        });
       },
     };
     let stopped = false;
@@ -441,25 +446,56 @@ export class AutopilotRunner {
     existing.tick = tick;
   }
 
+  private async wakeRefused(
+    store: TowerStore,
+    identity: string,
+    persisted: readonly string[],
+  ): Promise<string | undefined> {
+    const refusal = this.refusals.get(identity);
+    if (refusal === undefined || refusal.count < REFUSED_ACTION_WAKE_THRESHOLD || !this.active) return undefined;
+    const key = `refused:${identity}:${digest(refusal.error.replaceAll(/\d+/g, '#'))}`;
+    if (this.refusedWakeKeys.has(key) || persisted.includes(key)) return undefined;
+    this.refusedWakeKeys.add(key);
+    this.effects.wakeOrchestrator(
+      refusedActionWake({ type: refusal.type, subject: refusal.subject, error: refusal.error, attempts: refusal.count }),
+    );
+    await this.activity(store, 'wake-orchestrator', { reason: 'refused', subject: identity, attempts: refusal.count });
+    return key;
+  }
+
   private async refusedWakes(
     store: TowerStore,
     snapshot: AutopilotSnapshot,
     sentThisTick: readonly string[],
   ): Promise<string[]> {
-    const sent = new Set([...snapshot.memory.wakeKeys, ...sentThisTick]);
+    const persisted = [...snapshot.memory.wakeKeys, ...sentThisTick];
     const keys: string[] = [];
-    for (const [identity, refusal] of this.refusals) {
-      if (refusal.count < REFUSED_ACTION_WAKE_THRESHOLD) continue;
-      const key = `refused:${identity}:${digest(refusal.error.replaceAll(/\d+/g, '#'))}`;
-      if (sent.has(key)) continue;
-      sent.add(key);
-      keys.push(key);
-      this.effects.wakeOrchestrator(
-        refusedActionWake({ type: refusal.type, subject: refusal.subject, error: refusal.error, attempts: refusal.count }),
-      );
-      await this.activity(store, 'wake-orchestrator', { reason: 'refused', subject: identity, attempts: refusal.count });
+    for (const identity of [...this.refusals.keys()]) {
+      const key = await this.wakeRefused(store, identity, persisted);
+      if (key !== undefined) keys.push(key);
     }
     return keys;
+  }
+
+  private async refusedInBackground(
+    store: TowerStore,
+    identity: string,
+    type: string,
+    subject: string,
+    error: string,
+    tick: number,
+  ): Promise<void> {
+    this.refuse(identity, type, subject, error, tick);
+    try {
+      const persisted = (await store.load()).objective?.autopilot?.wakeKeys ?? [];
+      const key = await this.wakeRefused(store, identity, persisted);
+      if (key !== undefined) await store.updateObjectiveAutopilot({ addWakeKeys: [key] });
+    } catch (failure) {
+      this.log?.warn('tower autopilot could not wake the orchestrator about a refused action', {
+        identity,
+        error: errorMessage(failure),
+      });
+    }
   }
 
   private async persistMemory(
@@ -513,7 +549,7 @@ export class AutopilotRunner {
           }
         }
       } else {
-        this.refuse(launch.identity, pending.type, pending.subject, result.error, tick);
+        await this.refusedInBackground(store, launch.identity, pending.type, pending.subject, result.error, tick);
       }
       await this.activity(store, action.type, {
         ...actionDetails(action),
@@ -537,6 +573,7 @@ export class AutopilotRunner {
     milestoneId: string,
     commit: string,
     after: readonly Promise<void>[],
+    origin: { readonly identity: string; readonly subject: string; readonly tick: number },
   ): void {
     if (!this.active || this.commandRuns.has(milestoneId)) return;
     const controller = new AbortController();
@@ -555,6 +592,7 @@ export class AutopilotRunner {
           ...(this.deps.commandEnv === undefined ? {} : { env: this.deps.commandEnv }),
         });
         if (outcome.cleanupError !== undefined) this.log?.warn(outcome.cleanupError);
+        if (outcome.status === 'submitted') this.refusals.delete(origin.identity);
         await this.activity(store, 'commands', {
           milestone: milestoneId,
           commit: outcome.commit.slice(0, 7),
@@ -573,6 +611,16 @@ export class AutopilotRunner {
           result: 'failed',
           error: errorMessage(error).slice(0, 300),
         });
+        if (!controller.signal.aborted && this.active) {
+          await this.refusedInBackground(
+            store,
+            origin.identity,
+            'start-validation',
+            origin.subject,
+            errorMessage(error),
+            origin.tick,
+          );
+        }
       } finally {
         this.commandRuns.delete(milestoneId);
       }

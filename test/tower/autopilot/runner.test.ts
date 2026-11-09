@@ -343,6 +343,57 @@ describe('executing', () => {
     expect(refusedWakes()).toHaveLength(1);
   });
 
+  it('a commands run failing before it records a round counts toward the refused-action wake', async () => {
+    await draft({ commands: ['true'] });
+    await store.approveObjective('human');
+    await store.updateMission('tower', 'M1', { status: 'abandoned' });
+    const { runner, tower } = setup();
+    const error = `fatal: '${repo}/.tower/worktrees/val-ms1-commands-r1' is a missing but already registered worktree; use 'add -f' to override, or 'prune' or 'remove' to clear`;
+    let prepares = 0;
+    store.prepareValidationWorktree = async () => {
+      prepares += 1;
+      throw new Error(error);
+    };
+    const refused = (): string[] => tower.wakes.filter((text) => text.startsWith('autopilot-refused:'));
+    await settle(runner);
+    tower.clock += 10_000;
+    await settle(runner);
+    tower.clock += 10_000;
+    expect(refused()).toEqual([]);
+    await settle(runner);
+    expect(prepares).toBe(3);
+    expect(refused()).toHaveLength(1);
+    expect(refused()[0]).toContain('`start-validation` for milestone MS1 on 3 consecutive ticks');
+    expect(refused()[0]).toContain(`> ${error}`);
+    expect(refused()[0]).toContain('git worktree prune');
+    tower.clock += 10_000;
+    await settle(runner);
+    await settle(runner);
+    expect(prepares).toBe(5);
+    expect(refused()).toHaveLength(1);
+    expect((await objectiveOf()).autopilot?.wakeKeys).toContainEqual(
+      expect.stringMatching(/^refused:start-validation:MS1:[0-9a-f]{40}:commands:[0-9a-f]{16}$/),
+    );
+    const activity = await readFile(store.abs(ACTIVITY_LOG), 'utf8');
+    expect(activity).toMatch(/ autopilot commands milestone=MS1 commit=\w{7} result=failed error=fatal: /);
+  });
+
+  it('a refused validator launch wakes as soon as its third refusal settles', async () => {
+    await draft({ scrutiny: true });
+    await store.approveObjective('human');
+    await store.updateMission('tower', 'M1', { status: 'abandoned' });
+    const { runner, tower } = setup();
+    tower.refuse.set('spawnValidator', 'validator model not configured');
+    for (let tick = 0; tick < 3; tick += 1) {
+      await settle(runner);
+      tower.clock += 10_000;
+    }
+    const refused = tower.wakes.filter((text) => text.startsWith('autopilot-refused:'));
+    expect(tower.calls.filter((call) => call.startsWith('spawnValidator'))).toHaveLength(3);
+    expect(refused).toHaveLength(1);
+    expect(refused[0]).toContain('> validator model not configured');
+  });
+
   it('wakes on a stall and blocks the objective after maxStallWakes', async () => {
     await draft();
     await store.approveObjective('human');
