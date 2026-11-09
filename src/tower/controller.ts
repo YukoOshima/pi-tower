@@ -1282,8 +1282,11 @@ function validatorWorktrees(state: TowerState): { readonly agentId: string; read
 }
 
 function observedAgent(info: TowerAgentInfo, disposed: boolean): AutopilotAgentObservation {
-  const status = observedStatus(info, disposed);
-  return info.stopReason === undefined ? { status } : { status, stopReason: info.stopReason };
+  return {
+    status: observedStatus(info, disposed),
+    ...(info.stopReason === undefined ? {} : { stopReason: info.stopReason }),
+    ...(info.lastAssistantText === undefined ? {} : { lastAssistantText: info.lastAssistantText }),
+  };
 }
 
 function observedStatus(info: TowerAgentInfo, disposed: boolean): AutopilotAgentStatus {
