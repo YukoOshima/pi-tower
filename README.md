@@ -297,7 +297,7 @@ A paused objective stays paused until `/tower resume`, and an objective awaiting
 | --- | --- |
 | `/tower objective [--headless] <text \| @file>` | Hands an objective to the orchestrator, as text or from a file (`@path`, relative to pi's working directory), and returns at once while the orchestrator plans. Tower mode must be on. With `--headless`, the orchestrator plans without asking questions: it decides open points itself, records each assumption as a note on the objective, and requests approval. `pi-tower run` uses this. |
 | `/tower objective status` | Shows the objective dashboard without a model turn |
-| `/tower approve [--auto]` | Approves the plan of the objective that awaits approval. The first milestone becomes active and the autopilot starts. `--auto` records the approval as automatic instead of human; this is what `pi-tower run --auto-approve` sends. After a contract change while the objective was blocked or paused, only a plain `/tower approve` is accepted. |
+| `/tower approve [--auto]` | Approves the plan of the objective that awaits approval. Its current milestone becomes active, and the autopilot starts. `--auto` records the approval as automatic instead of human; this is what `pi-tower run --auto-approve` sends. After a contract change while the objective was blocked or paused, only a plain `/tower approve` is accepted. |
 | `/tower pause [reason]` | Pauses the executing objective. Running agents finish their current turn, and nothing new starts. |
 | `/tower resume` | Resumes a paused or blocked objective, after reloading its limits from the current objective settings |
 

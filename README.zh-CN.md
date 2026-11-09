@@ -297,7 +297,7 @@ objective 保存在 git 和 `.tower/comms/state.json` 中，因此能跨 pi 重�
 | --- | --- |
 | `/tower objective [--headless] <text \| @file>` | 把 objective 交给 orchestrator，可以直接给出文本，也可以从文件读取（`@path`，相对于 pi 的工作目录）。命令会立即返回，随后由 orchestrator 规划。Tower 模式必须已开启。使用 `--headless` 时，orchestrator 规划时不会提问：它自己决定未明确的问题，把每个假设记为 objective 的备注，然后请求批准。`pi-tower run` 使用的就是这个选项。 |
 | `/tower objective status` | 显示 objective 状态面板，不触发模型轮次 |
-| `/tower approve [--auto]` | 批准正在等待批准的 objective 的计划。第一个里程碑变为 active，autopilot 开始工作。`--auto` 会把这次批准记录为自动批准而不是人工批准，`pi-tower run --auto-approve` 发送的就是它。如果契约是在 objective 被阻塞或暂停期间修改的，则只接受不带参数的 `/tower approve`。 |
+| `/tower approve [--auto]` | 批准正在等待批准的 objective 的计划。它的当前里程碑变为 active，autopilot 开始工作。`--auto` 会把这次批准记录为自动批准而不是人工批准，`pi-tower run --auto-approve` 发送的就是它。如果契约是在 objective 被阻塞或暂停期间修改的，则只接受不带参数的 `/tower approve`。 |
 | `/tower pause [reason]` | 暂停执行中的 objective。正在运行的 Agent 会完成当前轮次，不再启动新工作。 |
 | `/tower resume` | 先按当前 objective 配置重新载入限额，再恢复已暂停或已阻塞的 objective |
 
