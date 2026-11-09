@@ -26,6 +26,7 @@ export const TOWER_MODE_TOOLS: readonly TowerToolName[] = [
   'TowerTasks',
   'TowerTaskOutput',
   'TowerTaskStop',
+  'TowerObjective',
 ];
 
 export const TOWER_AGENT_TOOLS: readonly TowerToolName[] = [

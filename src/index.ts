@@ -1,7 +1,7 @@
 import { CONFIG_DIR_NAME, getAgentDir, type ExtensionAPI } from '@earendil-works/pi-coding-agent';
 
 import { TOWER_MODEL_ENV, TOWER_MODEL_FLAGS, TOWER_ROLES } from './config/index.ts';
-import { createOrchestratorTools, toToolDefinition } from './tools/index.ts';
+import { createObjectiveOrchestratorTools, createOrchestratorTools, toToolDefinition } from './tools/index.ts';
 import { createTowerAgentRuntime } from './tower/agentRuntime.ts';
 import {
   TOWER_COMMAND_DESCRIPTION,
@@ -33,7 +33,7 @@ export default function towerExtension(pi: ExtensionAPI): void {
   });
   const observe = { onContext: controller.observe.bind(controller) };
 
-  for (const tool of createOrchestratorTools(controller)) {
+  for (const tool of [...createOrchestratorTools(controller), ...createObjectiveOrchestratorTools(controller)]) {
     pi.registerTool(toToolDefinition(tool, { ...observe, defaultActive: false }));
   }
 

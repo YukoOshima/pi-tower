@@ -3,17 +3,7 @@ import {
   type TowerObjectiveSettingValues,
   type TowerObjectiveSettings,
 } from '../config/index.ts';
-
-export interface TowerObjectiveSettingsView {
-  readonly autopilot: boolean;
-  readonly autoApprove: boolean;
-  readonly maxValidationRounds: number;
-  readonly maxFeatureAttempts: number;
-  readonly skipScrutiny: boolean;
-  readonly skipUserTesting: boolean;
-  readonly maxWallTimeMs?: number;
-  readonly maxCostUsd?: number;
-}
+import type { TowerObjectiveSettingsView } from '../tools/index.ts';
 
 export interface TowerAutopilotSettings extends TowerObjectiveSettingsView {
   readonly maxRunningAgents: number;

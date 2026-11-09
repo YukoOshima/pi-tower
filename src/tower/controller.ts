@@ -43,6 +43,7 @@ import {
   toToolDefinition,
   type TowerInboxSentPayload,
   type TowerLaunchRequest,
+  type TowerObjectiveSettingsView,
   type TowerOwner,
   type TowerSpawnModelResolution,
   type TowerToolHost,
@@ -74,7 +75,6 @@ import {
   objectiveSettingValues,
   objectiveSettingsView,
   type TowerAutopilotSettings,
-  type TowerObjectiveSettingsView,
 } from './objectiveSettings.ts';
 import { selectReminderForContext } from './reminders.ts';
 import type {

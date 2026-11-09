@@ -656,7 +656,10 @@ describe('autopilot effects', () => {
       ok: false,
       error: 'unknown mission "M9" — known missions: M1, M2',
     });
-    expect(await h.effects.spawnReviewer('M9', 'ap-r-M9-1')).toEqual({ ok: false, error: 'unknown mission "M9"' });
+    expect(await h.effects.spawnReviewer('M9', 'ap-r-M9-1')).toEqual({
+      ok: false,
+      error: 'unknown mission "M9" — known missions: M1, M2',
+    });
     await h.effects.spawnWorker('M1', 'ap-w-M1-1');
     const resumed = await h.effects.resumeWorker('ap-w-M1-1', 'address the review findings');
     expect(resumed.ok).toBe(false);

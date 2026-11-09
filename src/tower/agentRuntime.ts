@@ -8,7 +8,7 @@ import {
   type TowerAgentSessionFactory,
   type TowerAgentSessionRequest,
 } from '../runtime/index.ts';
-import { createAgentTools, toToolDefinition } from '../tools/index.ts';
+import { createAgentTools, createValidatorTools, toToolDefinition } from '../tools/index.ts';
 import { DEFAULT_AGENT_TIMEOUT_MS } from './constants.ts';
 import type { TowerController } from './controller.ts';
 import { towerAgentGuards } from './guards.ts';
@@ -48,7 +48,10 @@ export function createTowerAgentRuntime(
   };
   const sessionFactory: TowerAgentSessionFactory = (request) => {
     controller.expectAgentRegistration(request.agentId);
-    const agentTools = createAgentTools(controller, { agentId: request.agentId }).map((tool) => {
+    const caller = { agentId: request.agentId };
+    const tools =
+      request.spec.kind === 'validator' ? createValidatorTools(controller, caller) : createAgentTools(controller, caller);
+    const agentTools = tools.map((tool) => {
       const definition = toToolDefinition(tool);
       return defineTool({
         ...definition,

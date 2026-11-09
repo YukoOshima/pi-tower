@@ -1,9 +1,5 @@
-import { TowerProtocolError } from '../protocol/index.ts';
-import { createTowerMergeTool } from '../tools/merge/mergeTool.ts';
-import { createTowerRebaseTool } from '../tools/rebase/rebaseTool.ts';
-import { createTowerResumeTool } from '../tools/resume/resumeTool.ts';
-import { createTowerSpawnTool } from '../tools/spawn/spawnTool.ts';
-import { ORCHESTRATOR_CALLER, type TowerToolCall, type TowerToolResult } from '../tools/support.ts';
+import type { TowerState } from '../protocol/index.ts';
+import { createOrchestratorOperations, type TowerToolResult, type TowerValidatorKind } from '../tools/index.ts';
 import type { TowerController } from './controller.ts';
 
 const DETAIL_MAX_CHARS = 300;
@@ -12,31 +8,33 @@ export type TowerEffectResult =
   | { readonly ok: true; readonly detail?: string }
   | { readonly ok: false; readonly error: string };
 
-export function towerAutopilotEffects(controller: TowerController) {
-  const spawn = createTowerSpawnTool(controller, ORCHESTRATOR_CALLER);
-  const resume = createTowerResumeTool(controller, ORCHESTRATOR_CALLER);
-  const rebase = createTowerRebaseTool(controller, ORCHESTRATOR_CALLER);
-  const merge = createTowerMergeTool(controller, ORCHESTRATOR_CALLER);
-  let calls = 0;
-  const call = (): TowerToolCall => {
-    calls += 1;
-    return { toolCallId: `autopilot-${String(calls)}` };
+export function towerAutopilotObservations(controller: TowerController) {
+  return {
+    now: (): number => Date.now(),
+    store: () => controller.store(),
+    settings: () => controller.autopilotSettings(),
+    agent: (agentId: string) => controller.autopilotAgent(agentId),
+    orchestratorBusy: (): boolean => controller.orchestratorBusy(),
+    headless: (state: TowerState): boolean => state.objectiveMode === 'headless',
+    totalCostUsd: (): number => controller.totalCostUsd(),
   };
+}
+
+export function towerAutopilotEffects(controller: TowerController) {
+  const operations = createOrchestratorOperations(controller);
   return {
     spawnWorker: (missionId: string, name: string): Promise<TowerEffectResult> =>
-      effect(() => spawn.run({ name, kind: 'worker', mission_id: missionId }, call())),
+      effect(() => operations.spawnWorker(missionId, name)),
     respawnWorker: (missionId: string, name: string, reason: string): Promise<TowerEffectResult> =>
-      effect(() => spawn.run({ name, kind: 'worker', mission_id: missionId, instructions: reason }, call())),
+      effect(() => operations.spawnWorker(missionId, name, reason)),
     resumeWorker: (agentName: string, prompt: string): Promise<TowerEffectResult> =>
-      effect(() => resume.run({ agent: agentName, prompt }, call())),
+      effect(() => operations.resume(agentName, prompt)),
     spawnReviewer: (missionId: string, name: string): Promise<TowerEffectResult> =>
-      effect(async () =>
-        spawn.run({ name, kind: 'reviewer', review_target: await missionBranch(controller, missionId) }, call()),
-      ),
-    rebase: (missionId: string): Promise<TowerEffectResult> =>
-      effect(() => rebase.run({ mission: missionId }, call())),
-    merge: (missionId: string): Promise<TowerEffectResult> =>
-      effect(async () => merge.run({ branch: await missionBranch(controller, missionId) }, call())),
+      effect(() => operations.spawnReviewer(missionId, name)),
+    rebase: (missionId: string): Promise<TowerEffectResult> => effect(() => operations.rebase(missionId)),
+    merge: (missionId: string): Promise<TowerEffectResult> => effect(() => operations.merge(missionId)),
+    spawnValidator: (milestoneId: string, kind: TowerValidatorKind, name: string): Promise<TowerEffectResult> =>
+      effect(() => operations.spawnValidator(milestoneId, kind, name)),
     wakeOrchestrator: (text: string): void => {
       controller.wakeOrchestrator(text);
     },
@@ -58,11 +56,4 @@ async function effect(execute: () => Promise<TowerToolResult>): Promise<TowerEff
 function summary(output: string): string {
   const line = (output.trim().split(/\n\s*\n/, 1)[0] ?? '').replaceAll(/\s+/g, ' ');
   return line.length > DETAIL_MAX_CHARS ? `${line.slice(0, DETAIL_MAX_CHARS - 1)}…` : line;
-}
-
-async function missionBranch(controller: TowerController, missionId: string): Promise<string> {
-  const state = await controller.store().load();
-  const mission = state.missions.find((candidate) => candidate.id === missionId);
-  if (mission === undefined) throw new TowerProtocolError(`unknown mission "${missionId}"`);
-  return mission.branch;
 }
