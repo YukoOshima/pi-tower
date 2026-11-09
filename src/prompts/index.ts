@@ -66,6 +66,22 @@ export {
   type WorkerBriefingInput,
   type WorkerHistoryInput,
 } from './briefings.ts';
+export type { ValidatorBriefingInput } from './validatorBriefing.ts';
+export type {
+  PromptAgentKind,
+  PromptFeature,
+  PromptFeatureOrigin,
+  PromptMilestone,
+  PromptMilestoneStatus,
+  PromptMilestoneValidationSpec,
+  PromptMissionTask,
+  PromptObjectiveContract,
+  PromptObjectiveStatus,
+  PromptValidationKind,
+  PromptValidationRound,
+  PromptValidationVerdict,
+  PromptValidatorKind,
+} from './objectiveTypes.ts';
 export {
   AGENT_RESULT_PREVIEW_MAX_CHARS,
   REVIEWER_SPAWN_GUIDANCE,
