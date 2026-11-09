@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -28,8 +28,11 @@ interface CliRun {
 
 const worlds: FakeWorld[] = [];
 const dirs: string[] = [];
+const running = new Set<ChildProcess>();
 
 afterEach(() => {
+  for (const child of running) child.kill('SIGKILL');
+  running.clear();
   for (const world of worlds.splice(0)) world.cleanup();
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
@@ -44,13 +47,19 @@ function startCli(
     stdio: ['ignore', 'pipe', 'pipe'],
     detached: options.detached === true,
   });
+  running.add(child);
+  child.on('exit', () => {
+    running.delete(child);
+  });
   let stdout = '';
   let stderr = '';
-  child.stdout.on('data', (chunk: Buffer) => {
-    stdout += chunk.toString('utf8');
+  child.stdout.setEncoding('utf8');
+  child.stderr.setEncoding('utf8');
+  child.stdout.on('data', (chunk: string) => {
+    stdout += chunk;
   });
-  child.stderr.on('data', (chunk: Buffer) => {
-    stderr += chunk.toString('utf8');
+  child.stderr.on('data', (chunk: string) => {
+    stderr += chunk;
   });
   return {
     pid: child.pid,
