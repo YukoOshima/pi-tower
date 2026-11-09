@@ -417,3 +417,264 @@ table('blocker and merge-blocked wakes', [
     actions: [],
   },
 ]);
+
+type Kind = 'scrutiny' | 'user-testing' | 'commands';
+
+function round(kind: Kind, n: number, commit: string, verdict: 'pass' | 'fail') {
+  return { kind, round: n, commit, verdict } as const;
+}
+
+function validate(ms: string, commit: string, kinds: Kind[]): AutopilotAction {
+  return { type: 'start-validation', milestone: ms, commit, kinds };
+}
+
+const PASSED_MS1 = milestone('MS1', 1, { status: 'passed' });
+const DONE_MS1 = [merged('M1'), feature('M2', { status: 'abandoned' })];
+const NO_KINDS = { scrutiny: false, userTesting: false, commands: 0 };
+
+table('milestone activation and advance', [
+  {
+    name: 'activates a pending current milestone before its features start',
+    snap: snapshot({ objective: { milestones: [milestone('MS1', 1), milestone('MS2', 2)] }, missions: [feature('M1')] }),
+    actions: [{ type: 'advance-milestone', milestone: 'MS1' }],
+  },
+  {
+    name: 'advances to the next milestone after a pass',
+    snap: snapshot({ objective: { milestones: [PASSED_MS1, milestone('MS2', 2)] }, missions: [merged('M1'), feature('M3', { milestone: 'MS2' })] }),
+    actions: [{ type: 'advance-milestone', milestone: 'MS2', from: 'MS1' }],
+  },
+  {
+    name: 'orders milestones by order, not by position',
+    snap: snapshot({ objective: { milestones: [milestone('MS2', 2), PASSED_MS1] }, missions: [merged('M1'), feature('M3', { milestone: 'MS2' })] }),
+    actions: [{ type: 'advance-milestone', milestone: 'MS2', from: 'MS1' }],
+  },
+  {
+    name: 'an empty current milestone wakes the orchestrator to plan it',
+    snap: snapshot(),
+    actions: [wakeOf('plan-milestone', 'MS1', BASE)],
+  },
+  {
+    name: 'activating an empty milestone also asks for its plan',
+    snap: snapshot({ objective: { milestones: [PASSED_MS1, milestone('MS2', 2)] }, missions: [merged('M1')] }),
+    actions: [{ type: 'advance-milestone', milestone: 'MS2', from: 'MS1' }, wakeOf('plan-milestone', 'MS2', BASE)],
+  },
+]);
+
+table('start-validation', [
+  { name: 'validates once every feature is merged or abandoned', snap: snapshot({ missions: DONE_MS1 }), actions: [validate('MS1', BASE, ['scrutiny', 'user-testing'])] },
+  { name: 'does not validate while a feature is open', snap: snapshot({ missions: [merged('M1'), working('M2')] }), actions: [] },
+  {
+    name: 'milestone validation.scrutiny=false drops scrutiny',
+    snap: snapshot({ objective: { milestones: [milestone('MS1', 1, { status: 'active', validation: { scrutiny: false, userTesting: true, commands: 0 } })] }, missions: DONE_MS1 }),
+    actions: [validate('MS1', BASE, ['user-testing'])],
+  },
+  { name: 'skipUserTesting drops user-testing', snap: snapshot({ settings: { skipUserTesting: true }, missions: DONE_MS1 }), actions: [validate('MS1', BASE, ['scrutiny'])] },
+  { name: 'skipScrutiny drops scrutiny', snap: snapshot({ settings: { skipScrutiny: true }, missions: DONE_MS1 }), actions: [validate('MS1', BASE, ['user-testing'])] },
+  {
+    name: 'milestone commands add the commands kind',
+    snap: snapshot({ objective: { milestones: [milestone('MS1', 1, { status: 'active', validation: { scrutiny: true, userTesting: true, commands: 2 } })] }, missions: DONE_MS1 }),
+    actions: [validate('MS1', BASE, ['scrutiny', 'user-testing', 'commands'])],
+  },
+  {
+    name: 'acceptance commands run on the final milestone',
+    snap: snapshot({
+      objective: { acceptanceCommands: 1, milestones: [PASSED_MS1, milestone('MS2', 2, { status: 'active', validation: NO_KINDS })] },
+      missions: [merged('M1'), merged('M3', { milestone: 'MS2' })],
+    }),
+    actions: [validate('MS2', BASE, ['commands'])],
+  },
+  {
+    name: 'acceptance commands do not run on an earlier milestone; nothing required passes at once',
+    snap: snapshot({ objective: { acceptanceCommands: 2, milestones: [milestone('MS1', 1, { status: 'active', validation: NO_KINDS }), milestone('MS2', 2)] }, missions: DONE_MS1 }),
+    actions: [validate('MS1', BASE, [])],
+  },
+  {
+    name: 'LLM validators respect the slot cap; the commands kind needs no slot',
+    snap: snapshot({
+      settings: { maxRunningAgents: 1 },
+      objective: { milestones: [milestone('MS1', 1, { status: 'active', validation: { scrutiny: true, userTesting: true, commands: 1 } })] },
+      missions: DONE_MS1,
+    }),
+    actions: [validate('MS1', BASE, ['scrutiny', 'commands'])],
+  },
+  {
+    name: 'with no free slot only the commands kind starts',
+    snap: snapshot({
+      settings: { maxRunningAgents: 1 },
+      otherRunningAgents: 1,
+      objective: { milestones: [milestone('MS1', 1, { status: 'active', validation: { scrutiny: true, userTesting: true, commands: 1 } })] },
+      missions: DONE_MS1,
+    }),
+    actions: [validate('MS1', BASE, ['commands'])],
+  },
+  { name: 'with no free slot and no commands nothing starts', snap: snapshot({ settings: { maxRunningAgents: 1 }, otherRunningAgents: 1, missions: DONE_MS1 }), actions: [] },
+  {
+    name: 'a kind already in flight on the tip is not started again',
+    snap: snapshot({ validators: [{ milestone: 'MS1', kind: 'scrutiny', commit: BASE }], missions: DONE_MS1 }),
+    actions: [validate('MS1', BASE, ['user-testing'])],
+  },
+  {
+    name: 'nothing starts while every kind is in flight',
+    snap: snapshot({
+      objective: { milestones: [milestone('MS1', 1, { status: 'validating' })] },
+      validators: [
+        { milestone: 'MS1', kind: 'scrutiny', commit: BASE },
+        { milestone: 'MS1', kind: 'user-testing', commit: BASE },
+      ],
+      missions: DONE_MS1,
+    }),
+    actions: [],
+  },
+  {
+    name: 'a validator on a stale commit does not cover the tip',
+    snap: snapshot({ validators: [{ milestone: 'MS1', kind: 'scrutiny', commit: 'base-old' }], missions: DONE_MS1 }),
+    actions: [validate('MS1', BASE, ['scrutiny', 'user-testing'])],
+  },
+  {
+    name: 'continues a partial validation with the missing kind',
+    snap: snapshot({ objective: { milestones: [milestone('MS1', 1, { status: 'validating', rounds: [round('scrutiny', 1, BASE, 'pass')] })] }, missions: DONE_MS1 }),
+    actions: [validate('MS1', BASE, ['user-testing'])],
+  },
+  {
+    name: 're-runs validation on the new tip when the base moved while validating',
+    snap: snapshot({
+      objective: { milestones: [milestone('MS1', 1, { status: 'validating', rounds: [round('scrutiny', 1, 'base-old', 'pass'), round('user-testing', 1, 'base-old', 'pass')] })] },
+      missions: DONE_MS1,
+    }),
+    actions: [validate('MS1', BASE, ['scrutiny', 'user-testing'])],
+  },
+  {
+    name: 'every kind passed on the tip: the store records the pass, autopilot waits',
+    snap: snapshot({
+      objective: { milestones: [milestone('MS1', 1, { status: 'validating', rounds: [round('scrutiny', 1, BASE, 'pass'), round('user-testing', 1, BASE, 'pass')] }), milestone('MS2', 2)] },
+      missions: DONE_MS1,
+    }),
+    actions: [],
+  },
+]);
+
+const FAIL_ROUNDS = [round('scrutiny', 1, BASE, 'fail'), round('user-testing', 1, BASE, 'pass')];
+
+table('validation failure, fix and block', [
+  {
+    name: 'a fail on the tip wakes the orchestrator and starts nothing else',
+    snap: snapshot({
+      objective: { milestones: [milestone('MS1', 1, { status: 'validating', rounds: [round('scrutiny', 1, BASE, 'fail')] })] },
+      validators: [{ milestone: 'MS1', kind: 'user-testing', commit: BASE }],
+      missions: DONE_MS1,
+    }),
+    actions: [wakeOf('validation-failed', 'MS1', 'scrutiny-r1')],
+  },
+  {
+    name: 'a failed milestone wakes the orchestrator with the failing rounds',
+    snap: snapshot({ objective: { milestones: [milestone('MS1', 1, { status: 'failed', rounds: FAIL_ROUNDS })] }, missions: DONE_MS1 }),
+    actions: [wakeOf('validation-failed', 'MS1', 'scrutiny-r1')],
+  },
+  {
+    name: 'every failing kind is part of the wake revision',
+    snap: snapshot({
+      objective: { milestones: [milestone('MS1', 1, { status: 'failed', rounds: [round('scrutiny', 1, BASE, 'fail'), round('user-testing', 1, BASE, 'fail')] })] },
+      missions: DONE_MS1,
+    }),
+    actions: [wakeOf('validation-failed', 'MS1', 'scrutiny-r1+user-testing-r1')],
+  },
+  {
+    name: 'a failed milestone is not re-validated just because the base moved',
+    snap: snapshot({ baseTip: 'base-1', objective: { milestones: [milestone('MS1', 1, { status: 'failed', rounds: FAIL_ROUNDS })] }, missions: DONE_MS1 }),
+    actions: [wakeOf('validation-failed', 'MS1', 'scrutiny-r1')],
+  },
+  {
+    name: 'fix features run without a repeated wake',
+    snap: snapshot({
+      objective: { milestones: [milestone('MS1', 1, { status: 'active', rounds: FAIL_ROUNDS })] },
+      missions: [merged('M1'), working('M3')],
+      memory: { wakeKeys: ['validation-failed:MS1:scrutiny-r1'] },
+    }),
+    actions: [],
+  },
+  {
+    name: 'merged fixes trigger a new validation round on the new tip',
+    snap: snapshot({
+      baseTip: 'base-1',
+      objective: { milestones: [milestone('MS1', 1, { status: 'active', rounds: FAIL_ROUNDS })] },
+      missions: [merged('M1'), merged('M3')],
+      memory: { wakeKeys: ['validation-failed:MS1:scrutiny-r1'] },
+    }),
+    actions: [validate('MS1', 'base-1', ['scrutiny', 'user-testing'])],
+  },
+  {
+    name: 'maxValidationRounds failed rounds of a kind block the objective alone',
+    snap: snapshot({
+      objective: { milestones: [milestone('MS1', 1, { status: 'validating', rounds: [round('scrutiny', 1, 'a', 'fail'), round('scrutiny', 2, 'b', 'fail'), round('scrutiny', 3, BASE, 'fail')] })] },
+      missions: [merged('M1'), feature('M4')],
+    }),
+    actions: [blockOf('validation-rounds-exhausted')],
+  },
+  {
+    name: 'fewer failed rounds than the limit keep looping',
+    snap: snapshot({ objective: { milestones: [milestone('MS1', 1, { status: 'failed', rounds: [round('scrutiny', 1, 'a', 'fail'), round('scrutiny', 2, BASE, 'fail')] })] }, missions: DONE_MS1 }),
+    actions: [wakeOf('validation-failed', 'MS1', 'scrutiny-r2')],
+  },
+  {
+    name: 'failed rounds of a kind that is no longer required do not count',
+    snap: snapshot({
+      settings: { skipScrutiny: true },
+      objective: { milestones: [milestone('MS1', 1, { status: 'active', rounds: [round('scrutiny', 1, 'a', 'fail'), round('scrutiny', 2, 'b', 'fail'), round('scrutiny', 3, 'c', 'fail')] })] },
+      missions: DONE_MS1,
+    }),
+    actions: [validate('MS1', BASE, ['user-testing'])],
+  },
+  {
+    name: 'a blocked milestone blocks the objective',
+    snap: snapshot({ objective: { milestones: [milestone('MS1', 1, { status: 'blocked' })] }, missions: [feature('M1')] }),
+    actions: [blockOf('milestone-blocked')],
+  },
+]);
+
+const FINAL_PASSED = milestone('MS2', 2, { status: 'passed', rounds: [round('scrutiny', 1, BASE, 'pass'), round('user-testing', 1, BASE, 'pass')] });
+const ALL_MERGED = [merged('M1'), merged('M3', { milestone: 'MS2' })];
+
+table('completion', [
+  {
+    name: 'completes when every milestone passed and the final rounds are on the tip',
+    snap: snapshot({ objective: { milestones: [PASSED_MS1, FINAL_PASSED] }, missions: ALL_MERGED }),
+    actions: [{ type: 'complete-objective', objective: 'O1' }],
+  },
+  {
+    name: 're-validates the final milestone when the base moved after its pass',
+    snap: snapshot({ baseTip: 'base-1', objective: { milestones: [PASSED_MS1, FINAL_PASSED] }, missions: ALL_MERGED }),
+    actions: [validate('MS2', 'base-1', ['scrutiny', 'user-testing'])],
+  },
+  {
+    name: 'waits for an in-flight final re-validation',
+    snap: snapshot({
+      baseTip: 'base-1',
+      validators: [
+        { milestone: 'MS2', kind: 'scrutiny', commit: 'base-1' },
+        { milestone: 'MS2', kind: 'user-testing', commit: 'base-1' },
+      ],
+      objective: { milestones: [PASSED_MS1, FINAL_PASSED] },
+      missions: ALL_MERGED,
+    }),
+    actions: [],
+  },
+  {
+    name: 'a fail on the tip never completes',
+    snap: snapshot({
+      objective: { milestones: [PASSED_MS1, { ...FINAL_PASSED, rounds: [...FINAL_PASSED.rounds, round('user-testing', 2, BASE, 'fail')] }] },
+      missions: ALL_MERGED,
+    }),
+    actions: [],
+  },
+  {
+    name: 'an open feature holds the completion',
+    snap: snapshot({ objective: { milestones: [PASSED_MS1, FINAL_PASSED] }, missions: [...ALL_MERGED, working('M9', { milestone: 'MS2' })] }),
+    actions: [],
+  },
+  {
+    name: 'a final milestone that requires nothing completes at once',
+    snap: snapshot({ objective: { milestones: [PASSED_MS1, milestone('MS2', 2, { status: 'passed', validation: NO_KINDS })] }, missions: ALL_MERGED }),
+    actions: [{ type: 'complete-objective', objective: 'O1' }],
+  },
+  { name: 'an objective without milestones does nothing', snap: snapshot({ objective: { milestones: [] } }), actions: [] },
+]);
