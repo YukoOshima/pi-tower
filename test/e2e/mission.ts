@@ -126,7 +126,7 @@ export function missionGoal(script: string): string {
   return [
     'Add two commands to the textkit CLI in this repository: `lower`, which prints its arguments in lower case, and `chars`, which prints how many characters its arguments have.',
     `The acceptance commands are exactly \`npm test\` and \`node ${script}\`.`,
-    'Before you plan, ask me what you need to know.',
+    'Before you draft anything, ask me at least one question about the details and wait for my answer.',
   ].join(' ');
 }
 
