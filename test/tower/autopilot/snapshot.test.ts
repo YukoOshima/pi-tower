@@ -41,6 +41,7 @@ const SETTINGS: AutopilotRuntimeSettings = {
   watchdogIntervalMs: 60_000,
   stallTimeoutMs: 180_000,
   maxStallWakes: 3,
+  autoTeardown: true,
 };
 
 function mission(id: string, overrides: Partial<TowerMission> = {}): TowerMission {
@@ -200,7 +201,9 @@ describe('buildAutopilotSnapshot — objective, settings and memory', () => {
       maxStallWakes: 3,
       skipScrutiny: false,
       skipUserTesting: false,
+      autoTeardown: true,
     });
+    expect(buildAutopilotSnapshot(world({ settings: { ...SETTINGS, autoTeardown: false } })).settings.autoTeardown).toBe(false);
   });
 
   it('keeps only rounds of the current contract revision and passes validationCommit through', () => {

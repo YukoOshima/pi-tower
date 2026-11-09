@@ -58,6 +58,7 @@ const spawn = (mission: string): AutopilotAction => ({ type: 'spawn-worker', mis
 const reviewer = (mission: string): AutopilotAction => ({ type: 'spawn-reviewer', mission });
 const rebase = (mission: string): AutopilotAction => ({ type: 'rebase', mission });
 const merge = (mission: string): AutopilotAction => ({ type: 'merge', mission });
+const complete = (teardown = true): AutopilotAction => ({ type: 'complete-objective', objective: 'O1', teardown });
 
 const ALL_ROWS: Row[] = [];
 
@@ -948,7 +949,12 @@ table('completion', [
   {
     name: 'completes when every milestone passed and the final rounds are on the tip',
     snap: snapshot({ objective: { milestones: [PASSED_MS1, FINAL_PASSED] }, missions: ALL_MERGED }),
-    actions: [{ type: 'complete-objective', objective: 'O1' }],
+    actions: [complete()],
+  },
+  {
+    name: 'with autoTeardown off it completes without tearing the worktrees down',
+    snap: snapshot({ settings: { autoTeardown: false }, objective: { milestones: [PASSED_MS1, FINAL_PASSED] }, missions: ALL_MERGED }),
+    actions: [complete(false)],
   },
   {
     name: 're-validates the final milestone when the base moved after its pass',
@@ -1054,7 +1060,7 @@ table('completion', [
       },
       missions: ALL_MERGED,
     }),
-    actions: [{ type: 'complete-objective', objective: 'O1' }],
+    actions: [complete()],
   },
   {
     name: 'a failing final round on an older commit re-validates on the moved tip instead',
@@ -1064,7 +1070,7 @@ table('completion', [
   {
     name: 'a failing round of a kind the final no longer requires is ignored',
     snap: snapshot({ settings: { skipUserTesting: true }, objective: { milestones: [PASSED_MS1, FINAL_FAILED_ON_TIP] }, missions: ALL_MERGED }),
-    actions: [{ type: 'complete-objective', objective: 'O1' }],
+    actions: [complete()],
   },
   {
     name: 'an open feature holds the completion',
@@ -1074,7 +1080,7 @@ table('completion', [
   {
     name: 'a zero-kind final milestone stamped on the tip completes',
     snap: snapshot({ objective: { milestones: [PASSED_MS1, ZERO_KIND_FINAL] }, missions: ALL_MERGED }),
-    actions: [{ type: 'complete-objective', objective: 'O1' }],
+    actions: [complete()],
   },
   {
     name: 'a zero-kind final milestone passed on an older commit is re-validated, not completed',
@@ -1387,9 +1393,14 @@ table('manual mode (autopilot=false)', [
     actions: [validate('MS2', 'base-1', ['scrutiny', 'user-testing'])],
   },
   {
-    name: 'the objective still completes',
+    name: 'the objective still completes, and autoTeardown still tears the worktrees down',
     snap: snapshot({ settings: MANUAL, objective: { milestones: [PASSED_MS1, FINAL_PASSED] }, missions: ALL_MERGED }),
-    actions: [{ type: 'complete-objective', objective: 'O1' }],
+    actions: [complete()],
+  },
+  {
+    name: 'with autoTeardown off the objective completes without the teardown',
+    snap: snapshot({ settings: { ...MANUAL, autoTeardown: false }, objective: { milestones: [PASSED_MS1, FINAL_PASSED] }, missions: ALL_MERGED }),
+    actions: [complete(false)],
   },
   {
     name: 'validation failures still wake',
@@ -1431,7 +1442,7 @@ table('features attached to the objective', [
       objective: { milestones: [milestone('MS3', 1, { status: 'passed' }), { ...FINAL_PASSED, id: 'MS4' }] },
       missions: [...EARLIER_OBJECTIVE_MISSIONS, merged('M5', { milestone: 'MS3' }), merged('M6', { milestone: 'MS4' })],
     }),
-    actions: [{ type: 'complete-objective', objective: 'O1' }],
+    actions: [complete()],
   },
 ]);
 

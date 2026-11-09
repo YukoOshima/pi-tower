@@ -1,6 +1,7 @@
 import type {
   AutopilotAction,
   AutopilotBlockObjective,
+  AutopilotCompleteObjective,
   AutopilotDecision,
   AutopilotPauseObjective,
   AutopilotResumeReason,
@@ -19,6 +20,7 @@ import {
 } from '../../protocol/index.ts';
 import { budgetPausedNotice } from '../../prompts/objectiveWakes.ts';
 import { missionReviewerEntries, validationSettings, type AutopilotWorld } from './snapshot.ts';
+import { failedTeardown, type AutopilotTeardownOutcome } from './teardown.ts';
 import {
   blockedNoticeKey,
   blockedNoticeText,
@@ -53,6 +55,8 @@ export interface AutopilotExecution {
   readonly reserved: ReadonlySet<string>;
   launch(launch: AutopilotLaunch): void;
   runCommands(milestoneId: string, commit: string): void;
+  /** Tears the workspace of the completed objective down and records the outcome. */
+  teardown(objectiveId: string): Promise<AutopilotTeardownOutcome>;
 }
 
 export type AutopilotActionOutcome =
@@ -305,7 +309,7 @@ async function execute(execution: AutopilotExecution, action: AutopilotAction): 
         : { status: 'done', detail: `activated=${activated.id}`, followUp: true };
     }
     case 'complete-objective':
-      return completeObjective(execution);
+      return completeObjective(execution, action);
     case 'block-objective':
       return blockObjective(execution, action);
     case 'pause-objective':
@@ -362,15 +366,33 @@ function elapsedSince(objective: TowerObjective, now: number): number | undefine
   return Number.isNaN(started) ? undefined : Math.max(0, now - started);
 }
 
-async function completeObjective(execution: AutopilotExecution): Promise<AutopilotActionOutcome> {
+async function completeObjective(
+  execution: AutopilotExecution,
+  action: AutopilotCompleteObjective,
+): Promise<AutopilotActionOutcome> {
   const { store, effects, world } = execution;
   const completed = await store.completeObjective(validationSettings(world.settings));
+  const teardown = action.teardown ? await completionTeardown(execution, completed.id) : undefined;
   const state = await store.load();
   effects.notifyHuman(
-    completedNoticeText({ objective: completed, state, baseTip: world.baseTip, now: world.now }),
+    completedNoticeText({
+      objective: completed,
+      state,
+      baseTip: world.baseTip,
+      now: world.now,
+      ...(teardown === undefined ? {} : { teardown }),
+    }),
     'info',
   );
   return { status: 'done', detail: `objective=${completed.id}`, wakeKey: completedNoticeKey(completed), followUp: true };
+}
+
+async function completionTeardown(execution: AutopilotExecution, objectiveId: string): Promise<AutopilotTeardownOutcome> {
+  try {
+    return await execution.teardown(objectiveId);
+  } catch (error) {
+    return failedTeardown(errorMessage(error));
+  }
 }
 
 function blockReason(world: AutopilotWorld, action: AutopilotBlockObjective): string {

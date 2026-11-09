@@ -42,6 +42,7 @@ import {
   type AutopilotPendingWork,
   type AutopilotWorld,
 } from './snapshot.ts';
+import { autoTeardown, type AutopilotTeardownOutcome } from './teardown.ts';
 import {
   blockedNoticeKey,
   blockedNoticeText,
@@ -322,14 +323,16 @@ export class AutopilotRunner {
         case 'completed':
           this.refusals.clear();
           this.planning = undefined;
-          await this.noticeOnce(store, objective, completedNoticeKey(objective), 'info', 'completed', async () =>
-            completedNoticeText({
+          await this.noticeOnce(store, objective, completedNoticeKey(objective), 'info', 'completed', async () => {
+            const teardown = this.observations.settings().autoTeardown ? await this.teardown(store, objective.id) : undefined;
+            return completedNoticeText({
               objective,
               state,
               baseTip: await branchTip(store.repoRoot, state.base),
               now: this.observations.now(),
-            }),
-          );
+              ...(teardown === undefined ? {} : { teardown }),
+            });
+          });
           return;
         default:
           this.refusals.clear();
@@ -357,6 +360,23 @@ export class AutopilotRunner {
       this.log?.warn('tower autopilot could not record a human notice', { key, error: errorMessage(error) });
     }
     await this.activity(store, 'notify-human', { objective: objective.id, reason });
+  }
+
+  private async teardown(store: TowerStore, objectiveId: string): Promise<AutopilotTeardownOutcome> {
+    const outcome = await autoTeardown(store, (entry) => this.observations.agent(entry.agentId)?.status === 'running');
+    if (outcome.error !== undefined) {
+      this.log?.warn('tower autopilot could not tear down the worktrees of the completed objective', {
+        objective: objectiveId,
+        error: outcome.error,
+      });
+    }
+    await this.activity(store, 'teardown', {
+      objective: objectiveId,
+      ...(outcome.error === undefined
+        ? { result: 'done', removed: outcome.removed, kept: outcome.kept, failed: outcome.failed > 0 ? outcome.failed : undefined }
+        : { result: 'failed', error: outcome.error.slice(0, 300) }),
+    });
+    return outcome;
   }
 
   private async awaitingApproval(
@@ -487,6 +507,7 @@ export class AutopilotRunner {
           tick,
         });
       },
+      teardown: (objectiveId) => this.teardown(store, objectiveId),
     };
     let stopped = false;
     for (const action of decision.actions) {

@@ -244,6 +244,7 @@ describe('objective settings', () => {
           watchdogIntervalMs: 5_000,
           stallTimeoutMs: 20_000,
           maxStallWakes: 1,
+          autoTeardown: false,
         },
       },
     });
@@ -264,6 +265,7 @@ describe('objective settings', () => {
       watchdogIntervalMs: 5_000,
       stallTimeoutMs: 20_000,
       maxStallWakes: 1,
+      autoTeardown: false,
     });
   });
 
@@ -284,6 +286,7 @@ describe('objective settings', () => {
       watchdogIntervalMs: TOWER_OBJECTIVE_DEFAULTS.watchdogIntervalMs,
       stallTimeoutMs: TOWER_OBJECTIVE_DEFAULTS.stallTimeoutMs,
       maxStallWakes: TOWER_OBJECTIVE_DEFAULTS.maxStallWakes,
+      autoTeardown: true,
     });
   });
 

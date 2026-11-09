@@ -196,7 +196,7 @@ describe('formatObjectiveSettings', () => {
         row(widths, 'maxCostUsd', '12.5', `${PROJECT_PATH} (project)`),
         row(widths, 'skipScrutiny', 'false', 'default'),
         row(widths, 'skipUserTesting', 'false', 'default'),
-        row(widths, 'autoTeardown', 'false', 'default'),
+        row(widths, 'autoTeardown', 'true', 'default'),
       ].join('\n'),
     );
   });

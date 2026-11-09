@@ -29,7 +29,7 @@ describe('resolveObjectiveSettings', () => {
       maxCostUsd: { value: undefined, source: DEFAULT },
       skipScrutiny: { value: false, source: DEFAULT },
       skipUserTesting: { value: false, source: DEFAULT },
-      autoTeardown: { value: false, source: DEFAULT },
+      autoTeardown: { value: true, source: DEFAULT },
     });
   });
 
@@ -49,10 +49,11 @@ describe('resolveObjectiveSettings', () => {
 
   it('keeps an explicit false or minimal value instead of the default', () => {
     const settings = resolveObjectiveSettings(
-      config([{ value: { autopilot: false, maxStallWakes: 1 }, source: GLOBAL }]),
+      config([{ value: { autopilot: false, maxStallWakes: 1, autoTeardown: false }, source: GLOBAL }]),
     );
     expect(settings.autopilot).toStrictEqual({ value: false, source: GLOBAL });
     expect(settings.maxStallWakes).toStrictEqual({ value: 1, source: GLOBAL });
+    expect(settings.autoTeardown).toStrictEqual({ value: false, source: GLOBAL });
   });
 
   it('lists every objective key once, in the documented order', () => {

@@ -36,6 +36,7 @@ export const SIM_SETTINGS: AutopilotRuntimeSettings = {
   watchdogIntervalMs: 60_000,
   stallTimeoutMs: 180_000,
   maxStallWakes: 3,
+  autoTeardown: true,
 };
 
 export interface SimAgent {

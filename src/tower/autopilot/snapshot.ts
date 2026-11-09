@@ -232,6 +232,7 @@ function autopilotSettings(settings: AutopilotRuntimeSettings): AutopilotSetting
     maxStallWakes: settings.maxStallWakes,
     skipScrutiny: settings.skipScrutiny,
     skipUserTesting: settings.skipUserTesting,
+    autoTeardown: settings.autoTeardown,
   };
 }
 

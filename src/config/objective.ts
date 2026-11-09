@@ -33,7 +33,7 @@ export const TOWER_OBJECTIVE_DEFAULTS: TowerObjectiveSettingValues = {
   maxCostUsd: undefined,
   skipScrutiny: false,
   skipUserTesting: false,
-  autoTeardown: false,
+  autoTeardown: true,
 };
 
 export function resolveObjectiveSettings(config: TowerConfig): TowerObjectiveSettings {
