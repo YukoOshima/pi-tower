@@ -56,11 +56,13 @@ import {
   currentMilestone,
   estimateObjectiveRuns,
   evaluateObjective,
+  finalMilestone,
   findMilestone,
   isObjectiveOpen,
   isTerminalObjectiveStatus,
   latestValidationRound,
   milestoneMissions,
+  milestonePassesOn,
   nextValidationRound,
   objectiveApprovalProblems,
   planPlacement,
@@ -1482,7 +1484,12 @@ export class TowerStore {
       }
       if (milestone.status === 'pending' || milestone.status === 'blocked') {
         throw new TowerProtocolError(
-          `milestone ${milestone.id} is ${milestone.status} — only an active, validating, failed or passed milestone can be validated`,
+          `milestone ${milestone.id} is ${milestone.status} — only an active, validating or failed milestone, or a stale final one, can be validated`,
+        );
+      }
+      if (milestone.status === 'passed' && finalMilestone(objective)?.id !== milestone.id) {
+        throw new TowerProtocolError(
+          `milestone ${milestone.id} already passed — only the final milestone is validated again, when the base tip moved after it passed`,
         );
       }
       const earlier = sortedMilestones(objective).filter(
@@ -1503,6 +1510,15 @@ export class TowerStore {
         );
       }
       const resolved = await this.resolveCommit(commit);
+      if (
+        milestone.status === 'passed' &&
+        resolved === milestone.validationCommit &&
+        milestonePassesOn(objective, milestone, resolved, settings)
+      ) {
+        throw new TowerProtocolError(
+          `final milestone ${milestone.id} already passed on ${resolved.slice(0, 7)} — it is validated again only after the base tip moves`,
+        );
+      }
       const now = new Date().toISOString();
       milestone.status = 'validating';
       milestone.validationCommit = resolved;

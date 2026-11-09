@@ -978,3 +978,119 @@ describe('MISSIONS.md and mission files', () => {
     expect(await missionsIndex()).toContain('Status: blocked · approved by human · blocked: needs a human decision\n');
   });
 });
+
+describe('workspace-unique milestone ids', () => {
+  for (const ending of ['blocked', 'completed'] as const) {
+    it(`continues numbering after a ${ending} objective and never inherits its features`, async () => {
+      await store.draftObjective({
+        title: 'First',
+        goal: 'g1',
+        definitionOfDone: ['d1'],
+        milestones: [{ title: 'A' }, { title: 'B' }, { title: 'C' }],
+      });
+      await store.plan([{ title: 'Old work', scope: ['src/old/**'], milestone: 'MS1' }]);
+      if (ending === 'blocked') {
+        await store.blockObjective('replaced by a new objective');
+      } else {
+        await mutateState((state) => {
+          state.objective!.status = 'completed';
+        });
+      }
+      const second = await store.draftObjective({
+        title: 'Second',
+        goal: 'g2',
+        definitionOfDone: ['d2'],
+        milestones: [{ title: 'D' }, { title: 'E' }],
+      });
+      expect(second).toMatchObject({ id: 'O2' });
+      expect(second.milestones.map((milestone) => milestone.id)).toEqual(['MS4', 'MS5']);
+      await expect(
+        store.plan([{ title: 'Misfiled work', scope: ['src/misfiled/**'], milestone: 'MS1' }]),
+      ).rejects.toThrow(/objective O2 has no milestone "MS1" \(milestones: MS4 pending, MS5 pending\)/);
+      const evaluation = await store.objectiveEvaluation();
+      expect(evaluation.milestones.map((milestone) => [milestone.id, milestone.features])).toEqual([
+        ['MS4', []],
+        ['MS5', []],
+      ]);
+      expect(evaluation.completion.blocks.map((block) => block.code)).not.toContain('open-feature');
+      await expect(store.requestObjectiveApproval()).rejects.toThrow(/first milestone MS4 "D" has no build feature/);
+      const appended = await store.updateObjective({ milestones: [{ title: 'F' }] });
+      expect(appended.objective.milestones.map((milestone) => milestone.id)).toEqual(['MS4', 'MS5', 'MS6']);
+      expect((await readState()).objectiveHistory?.map((objective) => objective.id)).toEqual(['O1']);
+    });
+  }
+});
+
+describe('re-validating the final milestone', () => {
+  const skipAll = { skipScrutiny: true, skipUserTesting: true };
+
+  async function passedFinalMilestone(): Promise<string> {
+    await approvedObjective();
+    const tip = await git(repo, 'rev-parse', 'main');
+    await mutateState((state) => {
+      state.missions[0]!.status = 'merged';
+    });
+    await store.startMilestoneValidation('MS1', tip, skipAll);
+    await store.activateNextMilestone();
+    const [polish] = await store.plan([{ title: 'Polish work', scope: ['src/polish/**'], milestone: 'MS2' }]);
+    await mutateState((state) => {
+      state.missions.find((mission) => mission.id === polish!.id)!.status = 'merged';
+    });
+    const final = await store.startMilestoneValidation('MS2', tip, skipAll);
+    expect(final.milestone.status).toBe('passed');
+    return tip;
+  }
+
+  it('refuses a passed non-final milestone and a final one that is still current', async () => {
+    const tip = await passedFinalMilestone();
+    await expect(store.startMilestoneValidation('MS1', tip, skipAll)).rejects.toThrow(
+      /milestone MS1 already passed — only the final milestone is validated again/,
+    );
+    await expect(store.startMilestoneValidation('MS2', tip, skipAll)).rejects.toThrow(
+      new RegExp(`final milestone MS2 already passed on ${tip.slice(0, 7)}`),
+    );
+    expect((await store.objectiveEvaluation(skipAll)).completion.ready).toBe(true);
+  });
+
+  it('validates a stale final milestone again and completes only once it passes on the current tip', async () => {
+    await passedFinalMilestone();
+    await commitFile(repo, 'later.txt', 'later\n', 'base moved after the final pass');
+    const newTip = await git(repo, 'rev-parse', 'main');
+    const stale = await store.completeObjective(skipAll).catch((caught: unknown) => caught);
+    expect((stale as TowerObjectiveCompletionError).blocks.map((block) => block.code)).toEqual([
+      'final-validation-stale',
+    ]);
+
+    const again = await store.startMilestoneValidation('MS2', newTip);
+    expect(again.requiredKinds).toEqual(['scrutiny', 'user-testing']);
+    expect(again.milestone).toMatchObject({ status: 'validating', validationCommit: newTip });
+    expect(again.milestone.passedAt).toBeUndefined();
+    const waiting = await store.completeObjective().catch((caught: unknown) => caught);
+    expect((waiting as TowerObjectiveCompletionError).blocks.map((block) => block.code)).toEqual([
+      'milestone-not-passed',
+    ]);
+
+    for (const kind of ['scrutiny', 'user-testing'] as const) {
+      await store.registerAgent({
+        name: `val-final-${kind}`,
+        agentId: `agent-final-${kind}`,
+        kind: 'validator',
+        milestoneId: 'MS2',
+        validationKind: kind,
+        validatedCommit: newTip,
+        spawnedAt: '2026-04-04T00:00:00.000Z',
+      });
+      await store.submitValidation(`val-final-${kind}`, { milestone: 'MS2', kind, verdict: 'pass' });
+    }
+    const completed = await store.completeObjective();
+    expect(completed.status).toBe('completed');
+    expect(completed.milestones[1]).toMatchObject({ status: 'passed', validationCommit: newTip });
+  });
+
+  it('validates a final milestone again on the same commit when its pass no longer covers the required kinds', async () => {
+    const tip = await passedFinalMilestone();
+    const again = await store.startMilestoneValidation('MS2', tip);
+    expect(again.milestone).toMatchObject({ status: 'validating', validationCommit: tip });
+    expect(again.requiredKinds).toEqual(['scrutiny', 'user-testing']);
+  });
+});
