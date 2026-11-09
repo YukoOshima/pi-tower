@@ -113,6 +113,7 @@ export interface TowerObjectiveSettingsView {
   readonly skipUserTesting: boolean;
   readonly maxWallTimeMs?: number;
   readonly maxCostUsd?: number;
+  readonly autoTeardown?: boolean;
 }
 
 export const DEFAULT_OBJECTIVE_SETTINGS_VIEW: TowerObjectiveSettingsView = {
@@ -122,6 +123,7 @@ export const DEFAULT_OBJECTIVE_SETTINGS_VIEW: TowerObjectiveSettingsView = {
   maxFeatureAttempts: TOWER_OBJECTIVE_DEFAULTS.maxFeatureAttempts,
   skipScrutiny: TOWER_OBJECTIVE_DEFAULTS.skipScrutiny,
   skipUserTesting: TOWER_OBJECTIVE_DEFAULTS.skipUserTesting,
+  autoTeardown: TOWER_OBJECTIVE_DEFAULTS.autoTeardown,
   ...(TOWER_OBJECTIVE_DEFAULTS.maxWallTimeMs === undefined
     ? {}
     : { maxWallTimeMs: TOWER_OBJECTIVE_DEFAULTS.maxWallTimeMs }),

@@ -403,7 +403,7 @@ export class AutopilotRunner {
         const key = `approval-refused:${objective.id}:${digest(`${refusal}\n${request}`)}`;
         if (sent.has(key) || !this.active) return;
         this.effects.notifyHuman(
-          `Automatic approval of objective ${objective.id} "${objective.title}" was refused: ${refusal}\nA human approval is needed.\n\n${request}`,
+          `Automatic approval of mission ${objective.id} "${objective.title}" was refused: ${refusal}\nA human approval is needed.\n\n${request}`,
           'warning',
         );
         await store.updateObjectiveAutopilot({ addWakeKeys: [key] });
@@ -412,7 +412,7 @@ export class AutopilotRunner {
       }
       await this.activity(store, 'approve', { objective: objective.id, by: 'auto' });
       this.effects.notifyHuman(
-        `Objective ${objective.id} "${objective.title}" was approved automatically (autoApprove) — the autopilot starts executing it.`,
+        `Mission ${objective.id} "${objective.title}" was approved automatically (autoApprove) — the autopilot starts executing it.`,
         'info',
       );
       const approved = await store.load();

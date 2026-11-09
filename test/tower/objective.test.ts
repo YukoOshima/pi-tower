@@ -224,6 +224,7 @@ describe('objective settings', () => {
       maxFeatureAttempts: 3,
       skipScrutiny: false,
       skipUserTesting: false,
+      autoTeardown: true,
     });
     expect(
       objectiveSettingsView({ ...TOWER_OBJECTIVE_DEFAULTS, maxWallTimeMs: 60_000, maxCostUsd: 2.5 }),
@@ -257,6 +258,7 @@ describe('objective settings', () => {
       skipScrutiny: true,
       skipUserTesting: false,
       maxCostUsd: 12.5,
+      autoTeardown: false,
     });
     h.runtime.snapshotValue = { budget: 3, inflight: 0, blockedUntil: null };
     expect(h.controller.autopilotSettings()).toEqual({

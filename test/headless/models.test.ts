@@ -7,9 +7,9 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import { formatModelTable, resolveTowerModels } from '../../src/config/index.ts';
 import { parseHeadlessArgs, piRunArgs } from '../../src/headless/args.ts';
-import { towerModelLines } from '../../src/headless/models.ts';
+import { towerModelLines, towerModelProblems } from '../../src/headless/models.ts';
 import { TowerModels } from '../../src/tower/models.ts';
-import { MODEL_LINES, MODELS_REPLY } from './stubs.ts';
+import { MODEL_LINES, MODEL_PROBLEMS, MODELS_REPLY, PROBLEM_MODEL_LINES, modelsReplyWithProblems } from './stubs.ts';
 
 const dirs: string[] = [];
 
@@ -66,6 +66,21 @@ describe('towerModelLines', () => {
   });
 });
 
+describe('towerModelProblems', () => {
+  it('lists every problem of the Problems section in its order, without the bullet', async () => {
+    const reply = await modelsReplyWithProblems();
+    expect(reply).toContain('\nProblems:\n- worker: model "openai/gpt-5.1-codex"');
+    expect(towerModelLines(reply)).toEqual(PROBLEM_MODEL_LINES);
+    expect(towerModelProblems(reply)).toEqual(MODEL_PROBLEMS);
+  });
+
+  it('finds none without a Problems section or without a model table above it', () => {
+    expect(towerModelProblems(MODELS_REPLY)).toEqual([]);
+    expect(towerModelProblems('Tower models\nProblems:\n- not a model table reply')).toEqual([]);
+    expect(towerModelProblems('')).toEqual([]);
+  });
+});
+
 describe('role models from pi-tower flags to the role lines (pi parseArgs and the extension model loading)', () => {
   it('shows the flags given to pi-tower as the effective role models, with the configured roles beside them', async () => {
     const reply = await towerModelsReply(
@@ -108,6 +123,9 @@ describe('role models from pi-tower flags to the role lines (pi parseArgs and th
       'worker model: fake/session-model · thinking: pi default · source: inherited from orchestrator',
       'reviewer model: nowhere/missing-model · thinking: pi default · source: --tower-reviewer-model',
       'validator model: nowhere/missing-model · thinking: pi default · source: inherited from reviewer',
+    ]);
+    expect(towerModelProblems(reply)).toEqual([
+      'reviewer: model "nowhere/missing-model" (set by --tower-reviewer-model) is not in pi\'s model registry — check the provider/modelId (pi --list-models shows them)',
     ]);
   });
 });

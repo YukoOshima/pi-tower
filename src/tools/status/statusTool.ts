@@ -1,3 +1,4 @@
+import { TOWER_OBJECTIVE_DEFAULTS } from '../../config/index.ts';
 import { TOWER_STATUS_DESCRIPTION } from '../../prompts/index.ts';
 import {
   currentMilestone,
@@ -127,14 +128,7 @@ export function renderTowerDashboard(
     state.missions.length > 0 &&
     state.missions.every((mission) => mission.status === 'merged' || mission.status === 'abandoned')
   ) {
-    sections.push(
-      '',
-      '## Done',
-      '',
-      isObjectiveOpen(state.objective)
-        ? `All missions are merged or abandoned, but objective ${state.objective?.id ?? '?'} is still ${state.objective?.status ?? 'open'} — validation, later milestones, or fix features follow; do not run TowerTeardown until the objective completes.`
-        : 'All missions are merged or abandoned. Free the worktree checkouts now: run TowerTeardown (branches and .tower/comms/ are kept; dirty worktrees are protected).',
-    );
+    sections.push('', '## Done', '', doneHint(state.objective, extras.objective?.settings));
   }
   sections.push(
     '',
@@ -151,6 +145,19 @@ export function renderTowerDashboard(
     ...(extras.recentActivity.length > 0 ? extras.recentActivity : ['(activity log is empty)']),
   );
   return sections.join('\n');
+}
+
+function doneHint(
+  objective: TowerObjective | undefined,
+  settings: TowerObjectiveSettingsView | undefined,
+): string {
+  if (objective === undefined || !isObjectiveOpen(objective)) {
+    return 'All missions are merged or abandoned. Free the worktree checkouts now: run TowerTeardown (branches and .tower/comms/ are kept; dirty worktrees are protected).';
+  }
+  const open = `All missions are merged or abandoned, but objective ${objective.id} is still ${objective.status}`;
+  return (settings?.autoTeardown ?? TOWER_OBJECTIVE_DEFAULTS.autoTeardown)
+    ? `${open} — the autopilot validates the current milestone, and later milestones or fix features may follow. With objective.autoTeardown on, the autopilot also tears the worktrees down when the objective completes, so do not run TowerTeardown.`
+    : `${open} — validation, later milestones, or fix features follow; do not run TowerTeardown until the objective completes.`;
 }
 
 export function renderStateLostReport(): string {

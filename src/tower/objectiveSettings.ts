@@ -36,6 +36,7 @@ export function objectiveSettingsView(values: TowerObjectiveSettingValues): Towe
     skipUserTesting: values.skipUserTesting,
     ...(values.maxWallTimeMs === undefined ? {} : { maxWallTimeMs: values.maxWallTimeMs }),
     ...(values.maxCostUsd === undefined ? {} : { maxCostUsd: values.maxCostUsd }),
+    autoTeardown: values.autoTeardown,
   };
 }
 

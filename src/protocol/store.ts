@@ -392,6 +392,38 @@ function depPathExists(fromId: string, toId: string, byId: ReadonlyMap<string, T
   return false;
 }
 
+function dependencyCycle(
+  start: TowerMission,
+  byId: ReadonlyMap<string, TowerMission>,
+): readonly string[] | undefined {
+  const parents = new Map<string, string>();
+  const queue = [start.id];
+  while (queue.length > 0) {
+    const current = queue.shift()!;
+    const mission = byId.get(current);
+    if (mission === undefined || !isOpenMission(mission)) continue;
+    for (const dep of mission.deps) {
+      if (dep === start.id) {
+        const path = [current];
+        while (path[0] !== start.id) path.unshift(parents.get(path[0]!)!);
+        return [...path, start.id];
+      }
+      if (parents.has(dep)) continue;
+      parents.set(dep, current);
+      queue.push(dep);
+    }
+  }
+  return undefined;
+}
+
+function dependencyCycleMessage(id: string, cycle: readonly string[]): string {
+  const path = cycle.join(' -> ');
+  if (cycle.length === 2) {
+    return `mission ${id} depends on itself (${path}) — it would wait for its own merge, so it could never start or merge; remove ${id} from its deps and plan again`;
+  }
+  return `mission dependencies form a cycle: ${path} (each mission depends on the next) — every mission on it waits for another one to merge first, so none of them could ever start or merge; drop one of the deps this plan declares on that cycle, keeping a dep only where a mission needs the other's merged code (missions that need each other belong in one mission), then plan again`;
+}
+
 function autoDepNote(other: TowerMission): string {
   return `auto dependency on ${other.id}: scope overlaps ${other.id} ("${other.scope.join(', ')}") — merges are serialized so shared files land in dependency order instead of colliding`;
 }
@@ -1880,6 +1912,10 @@ export class TowerStore {
           ...missions.filter((m) => missionNumber(m.id) < missionNumber(mission.id)),
         ];
         addAutoDeps(mission, older, byId, orderOf);
+      }
+      for (const mission of missions) {
+        const cycle = dependencyCycle(mission, byId);
+        if (cycle !== undefined) throw new TowerProtocolError(dependencyCycleMessage(mission.id, cycle));
       }
       this.assertScopesDisjoint([...openExisting, ...missions], orderOf);
 

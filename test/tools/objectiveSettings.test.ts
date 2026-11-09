@@ -30,6 +30,7 @@ describe('objective settings seam', () => {
       maxFeatureAttempts: TOWER_OBJECTIVE_DEFAULTS.maxFeatureAttempts,
       skipScrutiny: TOWER_OBJECTIVE_DEFAULTS.skipScrutiny,
       skipUserTesting: TOWER_OBJECTIVE_DEFAULTS.skipUserTesting,
+      autoTeardown: TOWER_OBJECTIVE_DEFAULTS.autoTeardown,
     });
     expect('maxWallTimeMs' in DEFAULT_OBJECTIVE_SETTINGS_VIEW).toBe(false);
     expect('maxCostUsd' in DEFAULT_OBJECTIVE_SETTINGS_VIEW).toBe(false);

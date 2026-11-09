@@ -4,6 +4,20 @@ export const TOWER_MODELS_COMMAND = '/tower models';
 
 const TABLE_HEADER = /^role {2,}model(?: {2,}|$)/;
 const COLUMN_GAP = / {2,}/;
+const PROBLEMS_HEADER = 'Problems:';
+
+export function towerModelProblems(reply: string): string[] {
+  const lines = reply.split('\n');
+  const table = lines.findIndex((line) => TABLE_HEADER.test(line));
+  const start = table === -1 ? -1 : lines.indexOf(PROBLEMS_HEADER, table + 1);
+  if (start === -1) return [];
+  const problems: string[] = [];
+  for (const line of lines.slice(start + 1)) {
+    if (line.trim().length === 0) break;
+    problems.push(line.replace(/^- /, '').trim());
+  }
+  return problems;
+}
 
 export function towerModelLines(reply: string): string[] | undefined {
   const lines = reply.split('\n');

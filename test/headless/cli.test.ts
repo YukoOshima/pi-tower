@@ -8,7 +8,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { HEADLESS_SYNOPSIS, HEADLESS_USAGE } from '../../src/headless/args.ts';
 import type { FakeCommand, FakeScenario } from './fakePi.ts';
 import { CHECKOUT, createWorld, feature, isAlive, milestone, objective, waitDead, type FakeWorld, type Json } from './harness.ts';
-import { MODEL_LINES, MODELS_REPLY } from './stubs.ts';
+import { MODEL_LINES, MODEL_PROBLEMS, MODELS_REPLY, PROBLEM_MODEL_LINES, modelsReplyWithProblems } from './stubs.ts';
 
 const BIN = join(CHECKOUT, 'bin', 'pi-tower.js');
 const VERSION = (JSON.parse(readFileSync(join(CHECKOUT, 'package.json'), 'utf8')) as { version: string }).version;
@@ -255,6 +255,19 @@ describe('pi-tower CLI (bin/pi-tower.js)', () => {
       '> /tower models',
       'role models unavailable (the /tower models reply has no model table: Tower models The tower model configuration is not loaded yet.) — continuing',
     ]);
+  });
+
+  it('warns on stderr about each model problem /tower models lists, after the role lines, and still completes (exit 0)', { timeout: 20_000 }, async () => {
+    const fake = world();
+    const models: FakeCommand = { match: '/tower models', before: [{ notify: { text: await modelsReplyWithProblems() } }] };
+    const result = await cli(runArgs(fake, { commands: [TOWER_ON, models, DRAFT, approve(stage('completed', 'passed', 'passed'))] }, ['--auto-approve']));
+    expect(result.code).toBe(0);
+    expect(progress(result.stderr)).toEqual(MODEL_PROBLEMS.map((problem) => `model warning: ${problem}`));
+    const lines = progress(result.stdout);
+    const handover = lines.indexOf(`> /tower objective --headless @${fake.objectiveFile}`);
+    expect(lines.slice(handover - 5, handover)).toEqual(['> /tower models', ...PROBLEM_MODEL_LINES]);
+    expect(fake.commands()).toEqual(['/tower on', '/tower models', `/tower objective --headless @${fake.objectiveFile}`, '/tower approve --auto']);
+    expect(lines.at(-1)).toBe('objective O1 "Ship the widget" completed');
   });
 
   it('exits 4 with the usage, before starting pi, for exec without --mission, a model flag without a value, a malformed model and an unknown flag', { timeout: 20_000 }, async () => {
