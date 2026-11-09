@@ -48,6 +48,23 @@ import {
 import { evaluateMissionGate } from './missionGate.ts';
 import type { TowerMissionGateResult, TowerMissionGitObservations } from './missionGate.ts';
 import {
+  applyObjectiveUpdate,
+  buildObjective,
+  currentMilestone,
+  estimateObjectiveRuns,
+  evaluateObjective,
+  isTerminalObjectiveStatus,
+  objectiveApprovalProblems,
+  TowerObjectiveCompletionError,
+} from './objective.ts';
+import type {
+  TowerObjectiveDraftInput,
+  TowerObjectiveEvaluation,
+  TowerObjectiveUpdateInput,
+  TowerObjectiveUpdateResult,
+  TowerValidationSettings,
+} from './objective.ts';
+import {
   ACTIVITY_LOG,
   BROADCAST_NAME,
   FINDINGS_DIR,
@@ -75,9 +92,11 @@ import type {
   TowerFindingSeverity,
   TowerFindingType,
   TowerInboxItem,
+  TowerMilestone,
   TowerMission,
   TowerMissionKind,
   TowerMissionStatus,
+  TowerObjective,
   TowerReviewInfo,
   TowerRosterEntry,
   TowerState,
@@ -1156,6 +1175,230 @@ export class TowerStore {
       });
       return true;
     });
+  }
+
+  async draftObjective(input: TowerObjectiveDraftInput): Promise<TowerObjective> {
+    return this.withStateLock(async () => {
+      const state = await this.load();
+      const previous = state.objective;
+      if (previous !== undefined && !isTerminalObjectiveStatus(previous.status)) {
+        throw new TowerProtocolError(
+          `objective ${previous.id} is still ${previous.status} — update it instead, or block it before drafting a new objective`,
+        );
+      }
+      const objective = buildObjective(state, input, new Date().toISOString());
+      if (previous !== undefined) {
+        state.objectiveHistory = [...(state.objectiveHistory ?? []), previous];
+      }
+      state.objective = objective;
+      await this.saveObjective(state, 'objective.draft', {
+        id: objective.id,
+        milestones:
+          objective.milestones.length > 0
+            ? objective.milestones.map((milestone) => milestone.id).join(',')
+            : undefined,
+        archived: previous?.id,
+      });
+      return objective;
+    });
+  }
+
+  async updateObjective(input: TowerObjectiveUpdateInput): Promise<TowerObjectiveUpdateResult> {
+    return this.withStateLock(async () => {
+      const state = await this.load();
+      const result = applyObjectiveUpdate(state, input);
+      if (result.changes.length === 0) return result;
+      state.objective = result.objective;
+      await this.saveObjective(state, 'objective.update', {
+        id: result.objective.id,
+        changes: result.changes.join(','),
+        status: result.objective.status,
+        reopened: result.reopened.length > 0 ? result.reopened.join(',') : undefined,
+      });
+      return result;
+    });
+  }
+
+  async requestObjectiveApproval(): Promise<{
+    readonly objective: TowerObjective;
+    readonly estimatedRuns: number;
+  }> {
+    return this.withStateLock(async () => {
+      const state = await this.load();
+      const objective = this.requireObjective(state);
+      if (objective.status !== 'planning' && objective.status !== 'awaiting-approval') {
+        throw new TowerProtocolError(
+          `objective ${objective.id} is ${objective.status} — only a planning objective can request approval`,
+        );
+      }
+      this.assertApprovable(state, objective, 'request approval');
+      objective.status = 'awaiting-approval';
+      const estimatedRuns = estimateObjectiveRuns(state);
+      await this.saveObjective(state, 'objective.request-approval', {
+        id: objective.id,
+        estimated_runs: estimatedRuns,
+      });
+      return { objective, estimatedRuns };
+    });
+  }
+
+  async approveObjective(by: 'human' | 'auto'): Promise<TowerObjective> {
+    if (by !== 'human' && by !== 'auto') {
+      throw new TowerProtocolError(`an objective is approved by "human" or "auto", got "${String(by)}"`);
+    }
+    return this.withStateLock(async () => {
+      const state = await this.load();
+      const objective = this.requireObjective(state);
+      if (objective.status !== 'awaiting-approval') {
+        throw new TowerProtocolError(
+          `objective ${objective.id} is ${objective.status} — only an objective awaiting approval can be approved; the orchestrator requests approval first`,
+        );
+      }
+      this.assertApprovable(state, objective, 'be approved');
+      const now = new Date().toISOString();
+      objective.status = 'executing';
+      objective.approvedBy = by;
+      objective.approvedAt = now;
+      objective.startedAt ??= now;
+      delete objective.approvalReason;
+      const activated = this.activateCurrentMilestoneLocked(objective, now);
+      await this.saveObjective(state, 'objective.approve', {
+        id: objective.id,
+        by,
+        activated: activated?.id,
+      });
+      return objective;
+    });
+  }
+
+  async pauseObjective(reason: string): Promise<TowerObjective> {
+    return this.withStateLock(async () => {
+      const state = await this.load();
+      const objective = this.requireObjective(state);
+      if (objective.status !== 'executing') {
+        throw new TowerProtocolError(
+          `objective ${objective.id} is ${objective.status} — only an executing objective can be paused`,
+        );
+      }
+      objective.status = 'paused';
+      objective.pausedReason = reason.trim().length > 0 ? reason.trim() : 'paused on request';
+      await this.saveObjective(state, 'objective.pause', {
+        id: objective.id,
+        reason: objective.pausedReason,
+      });
+      return objective;
+    });
+  }
+
+  async resumeObjective(): Promise<TowerObjective> {
+    return this.withStateLock(async () => {
+      const state = await this.load();
+      const objective = this.requireObjective(state);
+      const from = objective.status;
+      if (from !== 'paused' && from !== 'blocked') {
+        throw new TowerProtocolError(
+          `objective ${objective.id} is ${from} — only a paused or blocked objective can be resumed`,
+        );
+      }
+      objective.status = objective.approvedAt !== undefined ? 'executing' : 'planning';
+      delete objective.pausedReason;
+      delete objective.blockedReason;
+      const reopened: string[] = [];
+      for (const milestone of objective.milestones) {
+        if (milestone.status !== 'blocked') continue;
+        milestone.status = 'failed';
+        reopened.push(milestone.id);
+      }
+      if (objective.autopilot !== undefined) {
+        objective.autopilot.stallWakes = 0;
+        objective.autopilot.progressAt = new Date().toISOString();
+      }
+      await this.saveObjective(state, 'objective.resume', {
+        id: objective.id,
+        from,
+        status: objective.status,
+        reopened: reopened.length > 0 ? reopened.join(',') : undefined,
+      });
+      return objective;
+    });
+  }
+
+  async blockObjective(reason: string): Promise<TowerObjective> {
+    const trimmed = reason.trim();
+    if (trimmed.length === 0) {
+      throw new TowerProtocolError('blocking an objective needs a reason — the human is notified with it');
+    }
+    return this.withStateLock(async () => {
+      const state = await this.load();
+      const objective = this.requireObjective(state);
+      if (objective.status === 'completed' || objective.status === 'blocked') {
+        throw new TowerProtocolError(`objective ${objective.id} is already ${objective.status}`);
+      }
+      objective.status = 'blocked';
+      objective.blockedReason = trimmed;
+      delete objective.pausedReason;
+      await this.saveObjective(state, 'objective.block', { id: objective.id, reason: trimmed });
+      return objective;
+    });
+  }
+
+  async completeObjective(settings: TowerValidationSettings = {}): Promise<TowerObjective> {
+    return this.withStateLock(async () => {
+      const state = await this.load();
+      const objective = this.requireObjective(state);
+      const baseTip = await branchTip(this.repoRoot, state.base);
+      const evaluation = evaluateObjective(state, baseTip, settings);
+      if (!evaluation.completion.ready) {
+        throw new TowerObjectiveCompletionError(objective.id, evaluation.completion.blocks);
+      }
+      objective.status = 'completed';
+      objective.completedAt = new Date().toISOString();
+      await this.saveObjective(state, 'objective.complete', {
+        id: objective.id,
+        base_tip: baseTip.slice(0, 7),
+      });
+      return objective;
+    });
+  }
+
+  async objectiveEvaluation(settings: TowerValidationSettings = {}): Promise<TowerObjectiveEvaluation> {
+    const state = await this.load();
+    return evaluateObjective(state, await branchTip(this.repoRoot, state.base), settings);
+  }
+
+  private requireObjective(state: TowerState): TowerObjective {
+    if (state.objective === undefined) {
+      throw new TowerProtocolError('there is no objective — draft one first');
+    }
+    return state.objective;
+  }
+
+  private assertApprovable(state: TowerState, objective: TowerObjective, action: string): void {
+    const problems = objectiveApprovalProblems(state, objective);
+    if (problems.length > 0) {
+      throw new TowerProtocolError(`objective ${objective.id} cannot ${action} — ${problems.join('; ')}`);
+    }
+  }
+
+  private activateCurrentMilestoneLocked(
+    objective: TowerObjective,
+    now: string,
+  ): TowerMilestone | undefined {
+    const milestone = currentMilestone(objective);
+    if (milestone?.status !== 'pending') return undefined;
+    milestone.status = 'active';
+    milestone.startedAt = now;
+    return milestone;
+  }
+
+  private async saveObjective(
+    state: TowerState,
+    action: string,
+    details: Readonly<Record<string, string | number | undefined>>,
+  ): Promise<void> {
+    await this.save(state);
+    await this.renderMissionsIndex(state);
+    await this.appendLog(TOWER_NAME, action, details, MISSIONS_INDEX);
   }
 
   async plan(input: readonly TowerPlanInput[]): Promise<readonly TowerMission[]> {

@@ -549,7 +549,7 @@ describe('applyObjectiveUpdate', () => {
     ]);
     expect(result.objective.notes).toEqual(['assumed X']);
     expect(result.objective.limits.maxFeatureAttempts).toBe(5);
-    expect(result.changes).toEqual(['title', 'limits', 'MS1 title', 'MS1 description', 'appended MS3', 'notes']);
+    expect(result.changes).toEqual(['title', 'limits', 'MS1.title', 'MS1.description', 'appended:MS3', 'notes']);
   });
 
   it('treats an unchanged value as no change', () => {

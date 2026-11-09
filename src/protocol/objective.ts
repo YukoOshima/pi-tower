@@ -78,6 +78,18 @@ export interface TowerObjectiveEvaluation {
   readonly completion: TowerObjectiveCompletion;
 }
 
+export class TowerObjectiveCompletionError extends TowerProtocolError {
+  readonly blocks: readonly TowerObjectiveBlock[];
+
+  constructor(objectiveId: string, blocks: readonly TowerObjectiveBlock[]) {
+    super(
+      `objective ${objectiveId} cannot complete yet — ${blocks.map((block) => `${block.code}: ${block.detail}`).join('; ')}`,
+    );
+    this.name = 'TowerObjectiveCompletionError';
+    this.blocks = blocks;
+  }
+}
+
 export function isTerminalObjectiveStatus(status: TowerObjectiveStatus): boolean {
   return status === 'completed' || status === 'blocked';
 }
@@ -667,7 +679,7 @@ export function applyObjectiveUpdate(
   }
   if (removed.length > 0) {
     next.milestones = next.milestones.filter((milestone) => !removed.includes(milestone.id));
-    changes.push(`removed ${removed.join(',')}`);
+    changes.push(`removed:${removed.join('+')}`);
     contractChanged = true;
   }
 
@@ -687,7 +699,7 @@ export function applyObjectiveUpdate(
       const title = milestoneTitle(item);
       if (title !== milestone.title) {
         milestone.title = title;
-        changes.push(`${milestone.id} title`);
+        changes.push(`${milestone.id}.title`);
       }
     }
     if (item.description !== undefined) {
@@ -695,14 +707,14 @@ export function applyObjectiveUpdate(
       if (description !== (milestone.description ?? '')) {
         if (description.length > 0) milestone.description = description;
         else delete milestone.description;
-        changes.push(`${milestone.id} description`);
+        changes.push(`${milestone.id}.description`);
       }
     }
     if (item.validation !== undefined) {
       const validation = buildValidationSpec(item.validation, milestone.validation);
       if (!sameSpec(validation, milestone.validation)) {
         milestone.validation = validation;
-        changes.push(`${milestone.id} validation`);
+        changes.push(`${milestone.id}.validation`);
         contractChanged = true;
       }
     }
@@ -723,7 +735,7 @@ export function applyObjectiveUpdate(
     }
     if (!sameList(order, known)) {
       sequence = order.map((id) => findMilestone(next, id)!);
-      changes.push(`reordered ${order.join(',')}`);
+      changes.push(`reordered:${order.join('+')}`);
       contractChanged = true;
     }
   }
@@ -732,7 +744,7 @@ export function applyObjectiveUpdate(
     const milestone = newMilestone(`MS${String(number)}`, 0, item);
     number += 1;
     sequence.push(milestone);
-    changes.push(`appended ${milestone.id}`);
+    changes.push(`appended:${milestone.id}`);
   }
   sequence.forEach((milestone, index) => {
     milestone.order = index + 1;
