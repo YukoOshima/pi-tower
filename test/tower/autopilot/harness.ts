@@ -51,6 +51,8 @@ export interface SimAgent {
   stopReason?: string;
   lastText?: string;
   turns: number;
+  /** Submitted its verdict mid-turn: it is still running, but takes no further turn until endValidators(). */
+  finishing?: boolean;
 }
 
 export interface SimScript {
@@ -62,6 +64,11 @@ export interface SimScript {
   asks?(missionTitle: string, turn: number): string | undefined;
   review(missionId: string, reviewNumber: number): string;
   validate(milestone: string, kind: AutopilotValidatorKind, round: number): 'pass' | 'fail';
+  /**
+   * The validator submits its verdict mid-turn and stays running until endValidators(), as a real one
+   * still is when its verdict ticks the autopilot; otherwise it ends and releases its worktree at once.
+   */
+  submitsMidTurn?(milestone: string, kind: AutopilotValidatorKind): boolean;
   orchestrate(text: string, state: TowerState): readonly TowerPlanInput[] | undefined;
 }
 
@@ -302,7 +309,7 @@ export class FakeTower implements AutopilotObservations, AutopilotEffects {
 
   async actAll(): Promise<void> {
     for (const agent of [...this.agents.values()]) {
-      if (agent.status !== 'running') continue;
+      if (agent.status !== 'running' || agent.finishing === true) continue;
       agent.turns += 1;
       if (agent.kind === 'worker') await this.workerTurn(agent);
       else if (agent.kind === 'reviewer') await this.reviewerTurn(agent);
@@ -380,8 +387,25 @@ export class FakeTower implements AutopilotObservations, AutopilotEffects {
       },
       validationSettings(this.settingsValue),
     );
+    if (this.script.submitsMidTurn?.(milestone.id, kind) === true) {
+      agent.finishing = true;
+      return;
+    }
+    await this.endValidator(agent);
+  }
+
+  /** Ends the validators that submitted mid-turn and releases their worktrees, as the controller does once they settle. */
+  async endValidators(): Promise<void> {
+    for (const agent of [...this.agents.values()]) {
+      if (agent.kind !== 'validator' || agent.finishing !== true) continue;
+      agent.finishing = false;
+      await this.endValidator(agent);
+    }
+  }
+
+  private async endValidator(agent: SimAgent): Promise<void> {
     agent.status = 'completed';
-    await store.removeValidationWorktree(agent.worktree!);
+    await this.towerStore.removeValidationWorktree(agent.worktree!);
   }
 
   private async orchestratorTurn(): Promise<void> {

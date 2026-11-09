@@ -101,10 +101,13 @@ export function autoTeardownNotice(outcome: AutopilotTeardownOutcome): string {
     `kept ${String(outcome.kept)}`,
     ...(outcome.failed > 0 ? [`failed to remove ${String(outcome.failed)}`] : []),
   ];
+  const staying = outcome.kept - outcome.finishing + outcome.failed;
   return [
     `Automatic teardown: ${counts.join(', ')}.`,
     ...outcome.lines.map((line) => `- ${line}`),
-    ...(outcome.kept + outcome.failed > 0 ? ['A kept or failed worktree stays until a later /tower teardown removes it.'] : []),
+    ...(staying > 0
+      ? [`${outcome.finishing > 0 ? 'Every other' : 'A'} kept or failed worktree stays until a later /tower teardown removes it.`]
+      : []),
   ].join('\n');
 }
 

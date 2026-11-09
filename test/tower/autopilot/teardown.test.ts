@@ -95,7 +95,9 @@ describe('autoTeardown', () => {
     const [merged, abandoned, dirty, live, open, never] = missions;
     const base = (await store.load()).base;
     for (const mission of [merged!, abandoned!, dirty!, live!, open!]) await store.addWorktree(mission.worktree, mission.branch, base);
-    await git(repo, 'worktree', 'add', '--detach', store.abs(join(WORKTREES_DIR, 'val-ms1-scrutiny-r1')), 'main');
+    for (const name of ['val-ms1-scrutiny-r1', 'val-ms1-user-testing-r1']) {
+      await git(repo, 'worktree', 'add', '--detach', store.abs(join(WORKTREES_DIR, name)), 'main');
+    }
     const statuses: Record<string, TowerMission['status']> = {
       [merged!.id]: 'merged',
       [abandoned!.id]: 'abandoned',
@@ -104,15 +106,24 @@ describe('autoTeardown', () => {
       [open!.id]: 'active',
       [never!.id]: 'abandoned',
     };
+    const spawnedAt = new Date().toISOString();
     await mutateState((state) => {
       for (const mission of state.missions) mission.status = statuses[mission.id] ?? mission.status;
+      state.roster.agents.push({
+        name: 'ap-v-MS1-user-testing-1',
+        agentId: 'agent-validator',
+        kind: 'validator',
+        milestoneId: 'MS1',
+        validationKind: 'user-testing',
+        worktree: 'val-ms1-user-testing-r1',
+        spawnedAt,
+      });
     });
-    const spawnedAt = new Date().toISOString();
     await store.registerAgent({ name: 'w-idle', agentId: 'agent-idle', kind: 'worker', worktree: merged!.worktree, spawnedAt });
     await store.registerAgent({ name: 'w-live', agentId: 'agent-live', kind: 'worker', worktree: live!.worktree, spawnedAt });
     await writeFile(join(worktreeOf(dirty!), 'notes.txt'), 'work in progress\n');
 
-    const outcome = await autoTeardown(store, (entry) => entry.name === 'w-live');
+    const outcome = await autoTeardown(store, (entry) => entry.name === 'w-live' || entry.kind === 'validator');
 
     expect(outcome).toEqual({
       lines: [
@@ -122,13 +133,16 @@ describe('autoTeardown', () => {
         `kept .tower/worktrees/${live!.worktree} (live agent: w-live)`,
         `kept .tower/worktrees/${open!.worktree} (mission ${open!.id} is still active)`,
         'removed .tower/worktrees/val-ms1-scrutiny-r1',
+        'kept .tower/worktrees/val-ms1-user-testing-r1 (validator ap-v-MS1-user-testing-1 is finishing — its worktree is removed when it ends)',
       ],
       removed: 3,
-      kept: 3,
+      kept: 4,
+      finishing: 1,
       failed: 0,
     });
     expect([merged, abandoned].map((mission) => existsSync(worktreeOf(mission!)))).toEqual([false, false]);
     expect([dirty, live, open].map((mission) => existsSync(worktreeOf(mission!)))).toEqual([true, true, true]);
+    expect(existsSync(store.abs(join(WORKTREES_DIR, 'val-ms1-user-testing-r1')))).toBe(true);
     expect(await readFile(join(worktreeOf(dirty!), 'notes.txt'), 'utf8')).toBe('work in progress\n');
     expect(await branches()).toEqual(expect.arrayContaining([merged, abandoned, dirty, live, open].map((mission) => mission!.branch)));
     expect(existsSync(store.abs(STATE_FILE))).toBe(true);
@@ -149,7 +163,7 @@ describe('autoTeardown', () => {
 
     const outcome = await autoTeardown(store, () => false);
 
-    expect(outcome).toMatchObject({ removed: 0, kept: 0, failed: 1 });
+    expect(outcome).toMatchObject({ removed: 0, kept: 0, finishing: 0, failed: 1 });
     expect(outcome.lines).toEqual([expect.stringMatching(new RegExp(`^failed to remove \\.tower/worktrees/${mission!.worktree}: `))]);
     expect(outcome.error).toBeUndefined();
   });
@@ -158,7 +172,7 @@ describe('autoTeardown', () => {
     store.teardown = () => Promise.reject(new Error('disk full'));
 
     await expect(autoTeardown(store, () => false)).resolves.toEqual(failedTeardown('disk full'));
-    expect(failedTeardown('disk full')).toEqual({ lines: [], removed: 0, kept: 0, failed: 0, error: 'disk full' });
+    expect(failedTeardown('disk full')).toEqual({ lines: [], removed: 0, kept: 0, finishing: 0, failed: 0, error: 'disk full' });
   });
 });
 
@@ -167,9 +181,12 @@ describe('the teardown section of the completion notice', () => {
     lines: [],
     removed: 0,
     kept: 0,
+    finishing: 0,
     failed: 0,
     ...overrides,
   });
+  const FINISHING =
+    'kept .tower/worktrees/val-ms1-scrutiny-r1 (validator ap-v-MS1-scrutiny-1 is finishing — its worktree is removed when it ends)';
 
   it('lists what was removed and kept, and says how a kept worktree goes', () => {
     expect(
@@ -204,6 +221,22 @@ describe('the teardown section of the completion notice', () => {
     ).toBe('Automatic teardown: removed 0 worktree(s), kept 0, failed to remove 1.');
   });
 
+  it('sends nobody to /tower teardown for a worktree whose validator is still finishing', () => {
+    expect(autoTeardownNotice(outcome({ lines: ['removed .tower/worktrees/wt-1', FINISHING], removed: 1, kept: 1, finishing: 1 }))).toBe(
+      ['Automatic teardown: removed 1 worktree(s), kept 1.', '- removed .tower/worktrees/wt-1', `- ${FINISHING}`].join('\n'),
+    );
+  });
+
+  it('names the other kept worktrees when a finishing validator keeps one too', () => {
+    const lines = [FINISHING, 'kept .tower/worktrees/wt-2 (uncommitted changes — rerun with force to remove)'];
+    expect(autoTeardownNotice(outcome({ lines, kept: 2, finishing: 1 })).split('\n').at(-1)).toBe(
+      'Every other kept or failed worktree stays until a later /tower teardown removes it.',
+    );
+    expect(autoTeardownNotice(outcome({ lines: [FINISHING, 'failed to remove .tower/worktrees/wt-3: locked'], kept: 1, finishing: 1, failed: 1 })).split('\n').at(-1)).toBe(
+      'Every other kept or failed worktree stays until a later /tower teardown removes it.',
+    );
+  });
+
   it('says so when no worktree was left', () => {
     expect(autoTeardownNotice(outcome({}))).toBe('Automatic teardown: no worktree was left to remove.');
   });
@@ -227,7 +260,7 @@ describe('the teardown section of the completion notice', () => {
 });
 
 describe('the completion decision and its execution', () => {
-  const REMOVED: AutopilotTeardownOutcome = { lines: ['removed .tower/worktrees/wt-1'], removed: 1, kept: 0, failed: 0 };
+  const REMOVED: AutopilotTeardownOutcome = { lines: ['removed .tower/worktrees/wt-1'], removed: 1, kept: 0, finishing: 0, failed: 0 };
   const DONE = { status: 'done', detail: 'objective=O1', wakeKey: 'completed-notice:O1', followUp: true };
 
   async function decided(
@@ -322,8 +355,8 @@ describe('the completion decision and its execution', () => {
 });
 
 describe('the autopilot runner tears down on completion', () => {
-  function setup(settings: Partial<AutopilotRuntimeSettings> = {}) {
-    const tower = new FakeTower(store, SCRIPT, settings);
+  function setup(settings: Partial<AutopilotRuntimeSettings> = {}, script: SimScript = SCRIPT) {
+    const tower = new FakeTower(store, script, settings);
     const log = new RecordingLog();
     const runner = new AutopilotRunner({ observations: tower, effects: tower, timers: new FakeTimers(), log });
     runner.start();
@@ -403,6 +436,59 @@ describe('the autopilot runner tears down on completion', () => {
     expect(count(trail, / autopilot teardown /)).toBe(1);
   }, 60_000);
 
+  it('a validator that delivers the last verdict mid-turn keeps its worktree only until it ends, and no /tower teardown is asked for', async () => {
+    await store.draftObjective({
+      title: 'Ship',
+      goal: 'ship it',
+      definitionOfDone: ['works'],
+      milestones: [{ title: 'Core', validation: { scrutiny: true, userTesting: false, commands: [] } }],
+    });
+    await store.plan([{ title: 'Core A', scope: ['core/a/**'], milestone: 'MS1', tasks: ['write it'] }], validationSettings(SIM_SETTINGS));
+    await store.requestObjectiveApproval();
+    await store.approveObjective('human');
+    const [feature] = (await store.load()).missions;
+    const { tower, log, runner } = setup({}, { ...SCRIPT, submitsMidTurn: () => true });
+    const validationWorktree = store.abs(join(WORKTREES_DIR, 'val-ms1-scrutiny-r1'));
+
+    for (let round = 0; round < 20; round += 1) {
+      await settle(runner);
+      if ((await store.load()).objective!.status === 'completed') break;
+      await tower.actAll();
+      tower.clock += 60_000;
+    }
+
+    const validator = tower.agents.get('agent-ap-v-MS1-scrutiny-1')!;
+    const completed = (await store.load()).objective!;
+    expect(completed.status).toBe('completed');
+    expect(completed.milestones[0]!.rounds.map((round) => `${round.kind}:${round.verdict}:${round.validator}`)).toEqual([
+      'scrutiny:pass:ap-v-MS1-scrutiny-1',
+    ]);
+    expect(validator.status).toBe('running');
+    expect(existsSync(worktreeOf(feature!))).toBe(false);
+    expect(existsSync(validationWorktree)).toBe(true);
+    const completion = tower.notices.filter((notice) => COMPLETE.test(notice.text));
+    expect(completion).toHaveLength(1);
+    expect(completion[0]!.text.split('\n\n').at(-1)).toBe(
+      [
+        'Automatic teardown: removed 1 worktree(s), kept 1.',
+        `- removed .tower/worktrees/${feature!.worktree}`,
+        '- kept .tower/worktrees/val-ms1-scrutiny-r1 (validator ap-v-MS1-scrutiny-1 is finishing — its worktree is removed when it ends)',
+      ].join('\n'),
+    );
+    expect(await activity()).toMatch(/ autopilot teardown objective=O1 result=done removed=1 kept=1\n/);
+
+    await tower.endValidators();
+    await settle(runner);
+    runner.stop();
+    await runner.whenIdle();
+
+    expect(validator.status).toBe('completed');
+    expect(existsSync(validationWorktree)).toBe(false);
+    expect(await git(repo, 'worktree', 'list', '--porcelain')).not.toContain('/.tower/worktrees/');
+    expect(tower.notices.filter((notice) => COMPLETE.test(notice.text))).toHaveLength(1);
+    expect(log.warnings).toEqual([]);
+  }, 60_000);
+
   it('a teardown that fails leaves the objective completed, logs the error and tells the human', async () => {
     const feature = await objectiveWithAbandonedFeature();
     store.teardown = () => Promise.reject(new Error('disk full'));
@@ -477,5 +563,26 @@ describe('the autopilot runner tears down on completion', () => {
       `Automatic teardown: removed 1 worktree(s), kept 0.\n- removed .tower/worktrees/${feature.worktree}`,
     );
     expect(count(await activity(), / autopilot teardown /)).toBe(1);
+  });
+
+  it('with autoTeardown off a completion the runner never announced keeps every worktree and the notice as before', async () => {
+    const feature = await readyToComplete();
+    await store.completeObjective(validationSettings(SIM_SETTINGS));
+    const { tower, runner } = setup({ autoTeardown: false });
+
+    await settle(runner);
+    await settle(runner);
+
+    const state = await store.load();
+    expect(existsSync(worktreeOf(feature))).toBe(true);
+    expect(tower.notices).toEqual([
+      {
+        level: 'info',
+        text: completedNoticeText({ objective: state.objective!, state, baseTip: await git(repo, 'rev-parse', 'main'), now: T0 }),
+      },
+    ]);
+    const trail = await activity();
+    expect(trail).not.toContain(' autopilot teardown ');
+    expect(trail).not.toMatch(/ tower (teardown|worktree\.remove)/);
   });
 });
