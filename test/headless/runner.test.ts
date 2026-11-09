@@ -5,7 +5,7 @@ import { formatElapsed, HEADLESS_EXIT, renderPlan, runHeadless } from '../../src
 import type { HeadlessSnapshot } from '../../src/headless/state.ts';
 import { TOWER_HUMAN_APPROVAL_MARKER } from '../../src/protocol/objective.ts';
 import { feature, milestone, objective, type Json } from './harness.ts';
-import { runOptions, snapshot, stubRun, type StateScript, type StubPi } from './stubs.ts';
+import { MODEL_LINES, runOptions, snapshot, stubRun, type StateScript, type StubPi, type StubReaction } from './stubs.ts';
 
 const OBJECTIVE_COMMAND = '/tower objective --headless @/work/objective.md';
 const FEATURES = [feature('M1', 'MS1'), feature('M2', 'MS1'), feature('M3', 'MS2')];
@@ -66,12 +66,14 @@ describe('runHeadless', () => {
     expect(code).toBe(HEADLESS_EXIT.completed);
     const pi = run.pi();
     expect(pi.options).toEqual({ piBin: 'pi', cwd: '/work/repo', args: ['--model', 'a/b'] });
-    expect(pi.commands).toEqual(['/tower on', OBJECTIVE_COMMAND, '/tower approve --auto']);
+    expect(pi.commands).toEqual(['/tower on', '/tower models', OBJECTIVE_COMMAND, '/tower approve --auto']);
     const plan = renderPlan(snapshot(stage('awaiting-approval', 'pending', 'pending')).objective!, snapshot(undefined, FEATURES).features);
     expect(plain(run.info)).toEqual([
       'started pi (pi --mode rpc) in /work/repo',
       '> /tower on',
       'pi: Tower mode: ON',
+      '> /tower models',
+      ...MODEL_LINES,
       `> ${OBJECTIVE_COMMAND}`,
       'objective handed to the orchestrator: /work/objective.md',
       'waiting for the orchestrator to draft the objective',
@@ -121,7 +123,7 @@ describe('runHeadless', () => {
       executes(pi, state);
     });
     expect(await runHeadless(runOptions(), run.deps)).toBe(HEADLESS_EXIT.approval);
-    expect(run.pi().commands).toEqual(['/tower on', OBJECTIVE_COMMAND]);
+    expect(run.pi().commands).toEqual(['/tower on', '/tower models', OBJECTIVE_COMMAND]);
     expect(run.info.some((line) => line.startsWith('Plan for O1 "Ship the widget" (awaiting-approval):'))).toBe(true);
     expect(plain(run.errors)).toEqual([
       'objective O1 needs approval — re-run with --auto-approve to approve and continue it, or run /tower approve in pi',
@@ -146,7 +148,7 @@ describe('runHeadless', () => {
       };
     });
     expect(await runHeadless(runOptions({ autoApprove: true }), run.deps)).toBe(HEADLESS_EXIT.completed);
-    expect(run.pi().commands).toEqual(['/tower on', OBJECTIVE_COMMAND, '/tower approve --auto', '/tower approve --auto']);
+    expect(run.pi().commands).toEqual(['/tower on', '/tower models', OBJECTIVE_COMMAND, '/tower approve --auto', '/tower approve --auto']);
     expect(run.info.some((line) => line.includes('approval reason: contract-changed'))).toBe(true);
   });
 
@@ -378,6 +380,107 @@ describe('runHeadless', () => {
     expect(plain(run.errors)).toContain('received SIGINT again — killing pi');
   });
 
+  describe('role models', () => {
+    it('passes each role model to pi as --tower-<role>-model after the extra pi args', async () => {
+      const run = stubRun((pi, state) => {
+        towerOn(pi, state);
+        drafts(pi, state);
+      });
+      const models = { validator: 'google/gemini-2.5-pro:low', orchestrator: 'anthropic/claude-opus-4-5:high', worker: 'openai/gpt-5.1-codex' };
+      expect(await runHeadless(runOptions({ piArgs: ['-e', 'ext.ts', '--tower-worker-model', 'old/model'], models }), run.deps)).toBe(HEADLESS_EXIT.approval);
+      expect(run.pi().options).toEqual({
+        piBin: 'pi',
+        cwd: '/work/repo',
+        args: [
+          '-e',
+          'ext.ts',
+          '--tower-worker-model',
+          'old/model',
+          '--tower-orchestrator-model=anthropic/claude-opus-4-5:high',
+          '--tower-worker-model=openai/gpt-5.1-codex',
+          '--tower-validator-model=google/gemini-2.5-pro:low',
+        ],
+      });
+    });
+
+    it('prints the role models before continuing an objective that is already open', async () => {
+      const run = stubRun((pi, state) => {
+        towerOn(pi, state, snapshot(stage('executing', 'active', 'pending')), snapshot(stage('executing', 'active', 'pending')), snapshot(stage('completed', 'passed', 'passed')));
+      });
+      expect(await runHeadless(runOptions(), run.deps)).toBe(HEADLESS_EXIT.completed);
+      expect(run.pi().commands).toEqual(['/tower on', '/tower models']);
+      const lines = plain(run.info);
+      const continuing = lines.findIndex((line) => line.startsWith('continuing existing objective O1'));
+      expect(lines.slice(continuing - 5, continuing)).toEqual(['> /tower models', ...MODEL_LINES]);
+    });
+
+    it.each<[string, StubReaction, string]>([
+      [
+        'pi answers with an error',
+        { notices: [{ level: 'error', text: 'Tower model configuration is not available in this build.' }] },
+        '/tower models failed: Tower model configuration is not available in this build.',
+      ],
+      ['pi rejects the command', { success: false, error: 'pi is busy' }, 'pi rejected /tower models: pi is busy'],
+      ['pi does not run it as a command', { disposition: 'started' }, 'pi did not run /tower models as a pi-tower command (the prompt was started)'],
+      [
+        'the reply has no model table',
+        { notices: [{ level: 'info', text: 'Tower models\nThe tower model configuration could not be loaded:\n/x/tower.json: Unexpected token' }] },
+        'the /tower models reply has no model table: Tower models The tower model configuration could not be loaded: /x/tower.json: Unexpected token',
+      ],
+      ['pi gives no reply', { notices: [] }, '/tower models gave no reply'],
+      [
+        'the command fails',
+        {
+          effect: () => {
+            throw new Error('timeout after 60000ms waiting for the prompt response');
+          },
+        },
+        '/tower models failed: timeout after 60000ms waiting for the prompt response',
+      ],
+    ])('says in one line that the role models are unavailable when %s, then hands over the objective', async (_label, reaction, reason) => {
+      const run = stubRun((pi, state) => {
+        towerOn(pi, state);
+        drafts(pi, state);
+        executes(pi, state);
+        pi.reactions['/tower models'] = reaction;
+      });
+      expect(await runHeadless(runOptions({ autoApprove: true }), run.deps)).toBe(HEADLESS_EXIT.completed);
+      expect(run.pi().commands).toEqual(['/tower on', '/tower models', OBJECTIVE_COMMAND, '/tower approve --auto']);
+      const lines = plain(run.info);
+      expect(lines.slice(lines.indexOf('> /tower models'), lines.indexOf(`> ${OBJECTIVE_COMMAND}`))).toEqual([
+        '> /tower models',
+        `role models unavailable (${reason}) — continuing`,
+      ]);
+      expect(run.errors).toEqual([]);
+    });
+
+    it('reports a warning that comes with the models reply and still prints the role models', async () => {
+      const run = stubRun((pi, state) => {
+        towerOn(pi, state);
+        drafts(pi, state);
+        const models = pi.reactions['/tower models'];
+        pi.reactions['/tower models'] = { notices: [{ level: 'warning', text: 'the project tower.json is ignored until you trust the project' }, ...(models?.notices ?? [])] };
+      });
+      expect(await runHeadless(runOptions(), run.deps)).toBe(HEADLESS_EXIT.approval);
+      const lines = plain(run.info);
+      expect(lines.slice(lines.indexOf('> /tower models') + 1, lines.indexOf(`> ${OBJECTIVE_COMMAND}`))).toEqual(MODEL_LINES);
+      expect(plain(run.errors)[0]).toBe('pi warning: the project tower.json is ignored until you trust the project');
+    });
+
+    it('never hands over the objective when a signal arrives while /tower models runs', async () => {
+      const run = stubRun((pi, state) => {
+        towerOn(pi, state);
+        drafts(pi, state);
+        const models = pi.reactions['/tower models'];
+        pi.reactions['/tower models'] = { ...models, effect: () => run.signal('SIGTERM') };
+      });
+      expect(await runHeadless(runOptions(), run.deps)).toBe(HEADLESS_EXIT.sigterm);
+      expect(run.pi().commands).toEqual(['/tower on', '/tower models']);
+      expect(run.pi().terminated).toBe(true);
+      expect(plain(run.errors)).toEqual(['received SIGTERM — stopping pi', 'interrupted by SIGTERM; pi was stopped']);
+    });
+  });
+
   describe('startup errors exit 4', () => {
     it('when pi cannot be created', async () => {
       const run = stubRun(() => undefined, {
@@ -496,7 +599,7 @@ describe('runHeadless', () => {
         executes(pi, state);
       });
       expect(await runHeadless(runOptions({ autoApprove: true }), run.deps)).toBe(HEADLESS_EXIT.completed);
-      expect(run.pi().commands).toEqual(['/tower on', '/tower approve --auto']);
+      expect(run.pi().commands).toEqual(['/tower on', '/tower models', '/tower approve --auto']);
       expect(plain(run.info)).toContain('continuing existing objective O1 "Ship the widget" (status awaiting-approval) — the -f file is not re-sent');
     });
 
@@ -505,7 +608,7 @@ describe('runHeadless', () => {
         towerOn(pi, state, snapshot(stage('executing', 'active', 'pending')), snapshot(stage('executing', 'active', 'pending')), snapshot(stage('completed', 'passed', 'passed')));
       });
       expect(await runHeadless(runOptions(), run.deps)).toBe(HEADLESS_EXIT.completed);
-      expect(run.pi().commands).toEqual(['/tower on']);
+      expect(run.pi().commands).toEqual(['/tower on', '/tower models']);
     });
 
     it('exits 1 at once when it is paused, never resuming it', async () => {
@@ -513,7 +616,7 @@ describe('runHeadless', () => {
         towerOn(pi, state, snapshot(stage('paused', 'active', 'pending', { pausedReason: 'paused by the human' })));
       });
       expect(await runHeadless(runOptions({ autoApprove: true }), run.deps)).toBe(HEADLESS_EXIT.stopped);
-      expect(run.pi().commands).toEqual(['/tower on']);
+      expect(run.pi().commands).toEqual(['/tower on', '/tower models']);
       expect(plain(run.errors)[0]).toContain('/tower resume');
     });
 
@@ -523,7 +626,7 @@ describe('runHeadless', () => {
         pi.reactions['/tower objective'] = { effect: () => state.push(snapshot(stage('planning', 'pending', 'pending')), snapshot(stage('awaiting-approval', 'pending', 'pending'))) };
       });
       expect(await runHeadless(runOptions(), run.deps)).toBe(HEADLESS_EXIT.approval);
-      expect(run.pi().commands).toEqual(['/tower on', OBJECTIVE_COMMAND]);
+      expect(run.pi().commands).toEqual(['/tower on', '/tower models', OBJECTIVE_COMMAND]);
     });
   });
 
@@ -535,7 +638,7 @@ describe('runHeadless', () => {
       pi.reactions['/tower objective'] = { effect: () => state.push(leftover, leftover, snapshot(fresh)) };
     });
     expect(await runHeadless(runOptions(), run.deps)).toBe(HEADLESS_EXIT.approval);
-    expect(run.pi().commands).toEqual(['/tower on', OBJECTIVE_COMMAND]);
+    expect(run.pi().commands).toEqual(['/tower on', '/tower models', OBJECTIVE_COMMAND]);
     expect(plain(run.info).filter((line) => line.startsWith('O'))).toEqual(['O2 awaiting-approval — MS1 pending · MS2 pending']);
     expect(plain(run.errors)[0]).toContain('objective O2 needs approval');
   });
@@ -607,7 +710,7 @@ describe('runHeadless', () => {
 
     expect(await runHeadless(runOptions({ autoApprove: true, timeoutMs: 60_000 }), run.deps)).toBe(HEADLESS_EXIT.approval);
 
-    expect(run.pi().commands).toEqual(['/tower on', '/tower approve --auto']);
+    expect(run.pi().commands).toEqual(['/tower on', '/tower models', '/tower approve --auto']);
     expect(run.info.some((line) => line.startsWith('Plan for O1 "Ship the widget" (awaiting-approval):'))).toBe(true);
     expect(run.info.some((line) => line.includes('\n  approval reason: contract-changed\n'))).toBe(true);
     expect(plain(run.errors)).toEqual([
@@ -651,7 +754,7 @@ describe('runHeadless', () => {
 
     expect(await runHeadless(runOptions({ autoApprove: true, timeoutMs: 60_000 }), run.deps)).toBe(HEADLESS_EXIT.completed);
 
-    expect(run.pi().commands).toEqual(['/tower on', '/tower approve --auto']);
+    expect(run.pi().commands).toEqual(['/tower on', '/tower models', '/tower approve --auto']);
     expect(plain(run.info)).toContain('objective O1 moved on to executing meanwhile, so pi refused /tower approve --auto — following it');
     expect(plain(run.info)).toContain('objective O1 "Ship the widget" completed');
     expect(run.info.some((line) => line.includes('auto-approved'))).toBe(false);
@@ -668,7 +771,7 @@ describe('runHeadless', () => {
 
     expect(await runHeadless(runOptions(), run.deps)).toBe(HEADLESS_EXIT.completed);
 
-    expect(run.pi().commands).toEqual(['/tower on']);
+    expect(run.pi().commands).toEqual(['/tower on', '/tower models']);
     expect(run.info.filter((line) => line.startsWith('Plan for O1'))).toHaveLength(1);
     expect(plain(run.info)).toContain('objective O1 moved on to executing while waiting for its approval — following it');
     expect(run.errors).toEqual([]);

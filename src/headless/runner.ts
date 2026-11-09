@@ -1,7 +1,8 @@
 import { fileURLToPath } from 'node:url';
 
 import { TOWER_HUMAN_APPROVAL_MARKER } from '../protocol/objective.ts';
-import type { HeadlessRunOptions } from './args.ts';
+import { piRunArgs, type HeadlessRunOptions } from './args.ts';
+import { TOWER_MODELS_COMMAND, towerModelLines } from './models.ts';
 import { isCommandError, noticeOf, PI_DIALOG_METHODS, recordField, stringField, type PiCommandResult, type PiEvent, type PiExit, type PiRpcOptions, type PiUiResponse } from './rpc.ts';
 import type { HeadlessFeature, HeadlessMilestone, HeadlessObjective, HeadlessSnapshot } from './state.ts';
 
@@ -77,6 +78,14 @@ type Interrupt = { readonly kind: 'signal'; readonly signal: HeadlessSignal } | 
 
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function oneLine(text: string): string {
+  return text
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .join(' ');
 }
 
 function indent(text: string, prefix = '  '): string {
@@ -253,7 +262,7 @@ class HeadlessRun {
   private async drive(): Promise<HeadlessExit> {
     let pi: HeadlessPi;
     try {
-      pi = this.deps.createPi({ piBin: this.options.piBin, cwd: this.options.cwd, args: this.options.piArgs });
+      pi = this.deps.createPi({ piBin: this.options.piBin, cwd: this.options.cwd, args: piRunArgs(this.options) });
     } catch (error) {
       throw new HeadlessExit(HEADLESS_EXIT.startup, `could not start pi (${this.options.piBin}): ${errorText(error)}`);
     }
@@ -266,6 +275,7 @@ class HeadlessRun {
     await this.handshake(pi);
     await this.checkTowerCommand(pi);
     await this.towerCommand(pi, '/tower on', HEADLESS_EXIT.startup);
+    await this.showModels(pi);
     const baseline = (await this.snapshot())?.objective;
     if (baseline !== undefined && ADOPTABLE.has(baseline.status)) {
       this.line(`continuing existing objective ${baseline.id} "${baseline.title}" (status ${baseline.status}) — the -f file is not re-sent`);
@@ -321,18 +331,24 @@ class HeadlessRun {
     throw this.failure(HEADLESS_EXIT.startup, `pi has no /tower command — ${EXTENSION_HINT}`);
   }
 
-  private async towerCommand(pi: HeadlessPi, text: string, code: number): Promise<PiCommandResult> {
+  private async sendCommand(pi: HeadlessPi, text: string): Promise<PiCommandResult> {
     if (this.interrupt !== undefined) throw this.interruptExit();
     this.line(`> ${text}`);
     this.commandsInFlight += 1;
+    try {
+      return await this.guard(pi.command(text, this.deps.commandTimeoutMs ?? 60_000));
+    } finally {
+      this.commandsInFlight -= 1;
+    }
+  }
+
+  private async towerCommand(pi: HeadlessPi, text: string, code: number): Promise<PiCommandResult> {
     let result: PiCommandResult;
     try {
-      result = await this.guard(pi.command(text, this.deps.commandTimeoutMs ?? 60_000));
+      result = await this.sendCommand(pi, text);
     } catch (error) {
       if (error instanceof HeadlessExit) throw error;
       throw this.failure(code, `${text} failed: ${errorText(error)}`);
-    } finally {
-      this.commandsInFlight -= 1;
     }
     if (!result.success) throw this.failure(code, `pi rejected ${text}: ${result.error ?? 'no reason given'}`);
     if (result.disposition !== 'handled') {
@@ -348,6 +364,44 @@ class HeadlessRun {
       else this.fail(`pi ${notice.level}: ${notice.text}`);
     }
     return result;
+  }
+
+  private async showModels(pi: HeadlessPi): Promise<void> {
+    let result: PiCommandResult;
+    try {
+      result = await this.sendCommand(pi, TOWER_MODELS_COMMAND);
+    } catch (error) {
+      if (error instanceof HeadlessExit) throw error;
+      this.modelsUnavailable(`${TOWER_MODELS_COMMAND} failed: ${errorText(error)}`);
+      return;
+    }
+    if (!result.success) {
+      this.modelsUnavailable(`pi rejected ${TOWER_MODELS_COMMAND}: ${result.error ?? 'no reason given'}`);
+      return;
+    }
+    if (result.disposition !== 'handled') {
+      this.modelsUnavailable(`pi did not run ${TOWER_MODELS_COMMAND} as a pi-tower command (the prompt was ${result.disposition ?? 'not handled'})`);
+      return;
+    }
+    const errors = result.notices.filter((notice) => notice.level === 'error').map((notice) => notice.text);
+    if (errors.length > 0) {
+      this.modelsUnavailable(`${TOWER_MODELS_COMMAND} failed: ${errors.join(' | ')}`);
+      return;
+    }
+    for (const notice of result.notices) {
+      if (notice.level !== 'info') this.fail(`pi ${notice.level}: ${notice.text}`);
+    }
+    const replies = result.notices.filter((notice) => notice.level === 'info').map((notice) => notice.text);
+    const lines = replies.map((reply) => towerModelLines(reply)).find((described) => described !== undefined);
+    if (lines === undefined) {
+      this.modelsUnavailable(replies.length === 0 ? `${TOWER_MODELS_COMMAND} gave no reply` : `the ${TOWER_MODELS_COMMAND} reply has no model table: ${replies.join(' ')}`);
+      return;
+    }
+    for (const line of lines) this.line(line);
+  }
+
+  private modelsUnavailable(reason: string): void {
+    this.line(`role models unavailable (${oneLine(reason)}) — continuing`);
   }
 
   private onPiEvent(pi: HeadlessPi, event: PiEvent): void {

@@ -1,4 +1,6 @@
+import { formatModelTable, formatObjectiveSettings, resolveObjectiveSettings, resolveTowerModels, type TowerConfig } from '../../src/config/index.ts';
 import type { HeadlessRunOptions } from '../../src/headless/args.ts';
+import { TOWER_MODELS_COMMAND } from '../../src/headless/models.ts';
 import { commandNoticeOf, type PiCommandResult, type PiEvent, type PiExit, type PiNotice, type PiRpcOptions, type PiUiResponse } from '../../src/headless/rpc.ts';
 import type { HeadlessClock, HeadlessDeps, HeadlessPi, HeadlessSignal } from '../../src/headless/runner.ts';
 import { parseHeadlessSnapshot, type HeadlessSnapshot } from '../../src/headless/state.ts';
@@ -7,6 +9,30 @@ import type { Json } from './harness.ts';
 export function snapshot(objective: Json | undefined, missions: readonly Json[] = []): HeadlessSnapshot {
   return parseHeadlessSnapshot({ version: 1, missions, ...(objective === undefined ? {} : { objective }) });
 }
+
+const GLOBAL_CONFIG = '/home/user/.pi/agent/tower.json';
+
+const MODELS_CONFIG: TowerConfig = {
+  roles: {
+    orchestrator: { value: { provider: 'anthropic', modelId: 'claude-opus-4-5', thinkingLevel: 'high' }, source: { kind: 'file', scope: 'global', path: GLOBAL_CONFIG } },
+    worker: { value: { provider: 'openai', modelId: 'gpt-5.1-codex' }, source: { kind: 'flag', flag: 'tower-worker-model' } },
+    reviewer: { value: { provider: 'openai', modelId: 'gpt-5.1', thinkingLevel: 'low' }, source: { kind: 'env', variable: 'PI_TOWER_REVIEWER_MODEL' } },
+  },
+  models: { fast: { value: { provider: 'google', modelId: 'gemini-2.5-flash' }, source: { kind: 'file', scope: 'global', path: GLOBAL_CONFIG } } },
+  files: [
+    { scope: 'global', path: GLOBAL_CONFIG, status: 'loaded' },
+    { scope: 'project', path: '/work/repo/.pi/tower.json', status: 'missing' },
+  ],
+};
+
+export const MODELS_REPLY = ['Tower models', formatModelTable(resolveTowerModels(MODELS_CONFIG, undefined)), '', formatObjectiveSettings(resolveObjectiveSettings(MODELS_CONFIG))].join('\n');
+
+export const MODEL_LINES: readonly string[] = [
+  `orchestrator model: anthropic/claude-opus-4-5 · thinking: high (configured) · source: ${GLOBAL_CONFIG} (global)`,
+  'worker model: openai/gpt-5.1-codex · thinking: pi default · source: --tower-worker-model',
+  'reviewer model: openai/gpt-5.1 · thinking: low (configured) · source: env PI_TOWER_REVIEWER_MODEL',
+  'validator model: openai/gpt-5.1 · thinking: low (inherited from reviewer) · source: inherited from reviewer',
+];
 
 export class VirtualClock implements HeadlessClock {
   current = 0;
@@ -71,6 +97,7 @@ export class StubPi implements HeadlessPi {
 
   constructor(options: PiRpcOptions) {
     this.options = options;
+    this.reactions[TOWER_MODELS_COMMAND] = { notices: [{ level: 'info', text: MODELS_REPLY }] };
   }
 
   stderrTail(): string {
@@ -239,6 +266,7 @@ export function runOptions(extra: Partial<HeadlessRunOptions> = {}): HeadlessRun
     cwd: '/work/repo',
     piBin: 'pi',
     piArgs: [],
+    models: {},
     ...extra,
   };
 }

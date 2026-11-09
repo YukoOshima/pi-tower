@@ -5,9 +5,10 @@ import { join } from 'node:path';
 
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { HEADLESS_USAGE } from '../../src/headless/args.ts';
+import { HEADLESS_SYNOPSIS, HEADLESS_USAGE } from '../../src/headless/args.ts';
 import type { FakeCommand, FakeScenario } from './fakePi.ts';
 import { CHECKOUT, createWorld, feature, isAlive, milestone, objective, waitDead, type FakeWorld, type Json } from './harness.ts';
+import { MODEL_LINES, MODELS_REPLY } from './stubs.ts';
 
 const BIN = join(CHECKOUT, 'bin', 'pi-tower.js');
 const VERSION = (JSON.parse(readFileSync(join(CHECKOUT, 'package.json'), 'utf8')) as { version: string }).version;
@@ -107,6 +108,19 @@ function commandError(error: string): Json {
 
 const TOWER_ON: FakeCommand = { match: '/tower on', before: [{ missions: [] }, { notify: { text: 'Tower mode: ON' } }] };
 
+const MODELS: FakeCommand = { match: '/tower models', before: [{ notify: { text: MODELS_REPLY } }] };
+
+function usageError(message: string): string {
+  return `pi-tower: ${message}\n${HEADLESS_SYNOPSIS}\nRun pi-tower --help for all options.\n`;
+}
+
+function progress(stdout: string): string[] {
+  return stdout
+    .split('\n')
+    .filter((line) => line.startsWith('[pi-tower +'))
+    .map((line) => line.replace(/^\[pi-tower \+[0-9hms]+\] /, ''));
+}
+
 const DRAFT: FakeCommand = {
   match: '/tower objective --headless @',
   after: [
@@ -147,12 +161,12 @@ describe('pi-tower CLI (bin/pi-tower.js)', () => {
     expect(await cli(['run', '--timeout', 'soon', '-f', 'x.md'])).toEqual({
       code: 4,
       stdout: '',
-      stderr: 'pi-tower: --timeout must be a positive whole number of milliseconds, got "soon"\nRun pi-tower --help for usage.\n',
+      stderr: usageError('--timeout must be a positive whole number of milliseconds, got "soon"'),
     });
     expect(await cli(['run', '-f', 'x.md', '--timeout', '3000000000'])).toEqual({
       code: 4,
       stdout: '',
-      stderr: 'pi-tower: --timeout must be at most 2147483647 milliseconds (about 24.8 days), got "3000000000"\nRun pi-tower --help for usage.\n',
+      stderr: usageError('--timeout must be at most 2147483647 milliseconds (about 24.8 days), got "3000000000"'),
     });
     const fake = world();
     expect(await cli(['run', '-f', join(fake.dir, 'missing.md'), '--cwd', fake.repo])).toMatchObject({ code: 4, stderr: `pi-tower: objective file ${join(fake.dir, 'missing.md')} does not exist\n` });
@@ -164,14 +178,15 @@ describe('pi-tower CLI (bin/pi-tower.js)', () => {
   it('runs an objective to completion with --auto-approve (exit 0) without touching ~/.pi', { timeout: 20_000 }, async () => {
     const fake = world();
     const env = homeEnv(fake);
-    const result = await cli(runArgs(fake, { commands: [TOWER_ON, DRAFT, approve(stage('executing', 'passed', 'active'), stage('completed', 'passed', 'passed'))] }, ['--auto-approve', '--timeout', '15000']), { env });
+    const result = await cli(runArgs(fake, { commands: [TOWER_ON, MODELS, DRAFT, approve(stage('executing', 'passed', 'active'), stage('completed', 'passed', 'passed'))] }, ['--auto-approve', '--timeout', '15000']), { env });
     expect(result.stderr).toBe('');
     expect(result.code).toBe(0);
     expect(result.stdout).toContain('Plan for O1 "Ship the widget" (awaiting-approval):');
     expect(result.stdout).toMatch(/\] auto-approved the plan of O1 \(--auto-approve\)\n/);
     expect(result.stdout).toMatch(/\] O1 completed — MS1 passed · MS2 passed — features 0\/2 done\n/);
     expect(result.stdout).toMatch(/\] objective O1 "Ship the widget" completed\n$/);
-    expect(fake.commands()).toEqual(['/tower on', `/tower objective --headless @${fake.objectiveFile}`, '/tower approve --auto']);
+    expect(progress(result.stdout).slice(2, 8)).toEqual(['pi: Tower mode: ON', '> /tower models', ...MODEL_LINES]);
+    expect(fake.commands()).toEqual(['/tower on', '/tower models', `/tower objective --headless @${fake.objectiveFile}`, '/tower approve --auto']);
     const start = fake.log().find((entry) => entry.kind === 'start');
     expect(start?.argv).toEqual(['--mode', 'rpc', ...fake.scenario({ commands: [] })]);
     expect(start?.cwd).toBe(fake.repo);
@@ -185,7 +200,7 @@ describe('pi-tower CLI (bin/pi-tower.js)', () => {
     expect(result.code).toBe(3);
     expect(result.stdout).toContain('  estimated runs: 6 (features + 2 × milestones)');
     expect(result.stderr).toMatch(/objective O1 needs approval — re-run with --auto-approve/);
-    expect(fake.commands()).toEqual(['/tower on', `/tower objective --headless @${fake.objectiveFile}`]);
+    expect(fake.commands()).toEqual(['/tower on', '/tower models', `/tower objective --headless @${fake.objectiveFile}`]);
     expect(fake.state()?.objective).toMatchObject({ status: 'awaiting-approval' });
   });
 
@@ -195,7 +210,70 @@ describe('pi-tower CLI (bin/pi-tower.js)', () => {
     const result = await cli(runArgs(fake, { commands: [TOWER_ON, DRAFT, approve(stage('completed', 'passed', 'passed'))] }, ['--auto-approve']));
     expect(result.code).toBe(0);
     expect(result.stdout).toContain('continuing existing objective O1 "Ship the widget" (status awaiting-approval) — the -f file is not re-sent');
-    expect(fake.commands()).toEqual(['/tower on', '/tower approve --auto']);
+    expect(fake.commands()).toEqual(['/tower on', '/tower models', '/tower approve --auto']);
+  });
+
+  it('runs exec --mission like run: the role models reach pi as --tower-<role>-model and every role model is printed before the hand-over', { timeout: 20_000 }, async () => {
+    const fake = world();
+    const scenario = fake.scenario({ commands: [TOWER_ON, MODELS, DRAFT, approve(stage('completed', 'passed', 'passed'))] });
+    const result = await cli([
+      'exec',
+      '--mission',
+      '-f',
+      fake.objectiveFile,
+      '--cwd',
+      fake.repo,
+      '--pi',
+      fake.piBin,
+      '--worker-model',
+      'openai/gpt-5.1-codex',
+      '--validator-model=google/gemini-2.5-pro:low',
+      '--auto-approve',
+      '--',
+      ...scenario,
+    ]);
+    expect(result.stderr).toBe('');
+    expect(result.code).toBe(0);
+    const start = fake.log().find((entry) => entry.kind === 'start');
+    expect(start?.argv).toEqual(['--mode', 'rpc', ...scenario, '--tower-worker-model=openai/gpt-5.1-codex', '--tower-validator-model=google/gemini-2.5-pro:low']);
+    expect(fake.commands()).toEqual(['/tower on', '/tower models', `/tower objective --headless @${fake.objectiveFile}`, '/tower approve --auto']);
+    const lines = progress(result.stdout);
+    const handover = lines.indexOf(`> /tower objective --headless @${fake.objectiveFile}`);
+    expect(lines.slice(handover - 5, handover)).toEqual(['> /tower models', ...MODEL_LINES]);
+    expect(lines.at(-1)).toBe('objective O1 "Ship the widget" completed');
+  });
+
+  it('says in one line that the role models are unavailable when pi gives no model table, and goes on', { timeout: 20_000 }, async () => {
+    const fake = world();
+    const unloaded: FakeCommand = { match: '/tower models', before: [{ notify: { text: 'Tower models\nThe tower model configuration is not loaded yet.' } }] };
+    const result = await cli(runArgs(fake, { commands: [TOWER_ON, unloaded, DRAFT, approve(stage('completed', 'passed', 'passed'))] }, ['--auto-approve']));
+    expect(result.stderr).toBe('');
+    expect(result.code).toBe(0);
+    const lines = progress(result.stdout);
+    const handover = lines.indexOf(`> /tower objective --headless @${fake.objectiveFile}`);
+    expect(lines.slice(handover - 2, handover)).toEqual([
+      '> /tower models',
+      'role models unavailable (the /tower models reply has no model table: Tower models The tower model configuration is not loaded yet.) — continuing',
+    ]);
+  });
+
+  it('exits 4 with the usage, before starting pi, for exec without --mission, a model flag without a value, a malformed model and an unknown flag', { timeout: 20_000 }, async () => {
+    const fake = world();
+    const valid = ['-f', fake.objectiveFile, '--cwd', fake.repo, '--pi', fake.piBin];
+    const scenario = fake.scenario({ commands: [TOWER_ON] });
+    expect(await cli(['exec', ...valid, '--', ...scenario])).toEqual({
+      code: 4,
+      stdout: '',
+      stderr: usageError('exec needs --mission (pi-tower only runs missions) — use pi-tower exec --mission -f <mission.md>, the same as pi-tower run -f <mission.md>'),
+    });
+    expect(await cli(['run', ...valid, '--worker-model', '--', ...scenario])).toEqual({ code: 4, stdout: '', stderr: usageError('--worker-model needs a value') });
+    expect(await cli(['exec', '--mission', ...valid, '--validator-model', 'gemini-2.5-pro', '--', ...scenario])).toEqual({
+      code: 4,
+      stdout: '',
+      stderr: usageError('--validator-model "gemini-2.5-pro" has no provider — expected provider/modelId[:thinkingLevel] (e.g. anthropic/claude-sonnet-4-5:high)'),
+    });
+    expect(await cli(['run', ...valid, '--worker', 'a/b', '--', ...scenario])).toEqual({ code: 4, stdout: '', stderr: usageError('unknown option --worker') });
+    expect(fake.log()).toEqual([]);
   });
 
   it.each([
