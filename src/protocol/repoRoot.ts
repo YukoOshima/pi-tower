@@ -4,12 +4,21 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { WORKTREES_DIR } from './paths.ts';
 
 export function resolveTowerRepoRoot(cwd: string): string {
-  const normalized = cwd.replaceAll('\\', '/');
+  const normalized = normalizedPath(cwd);
   if (normalized.endsWith(`/${WORKTREES_DIR}`)) {
     return cwd.slice(0, normalized.length - WORKTREES_DIR.length - 1);
   }
   if (!normalized.includes(`/${WORKTREES_DIR}/`)) return cwd;
   return towerWorktreeRoot(cwd) ?? cwd;
+}
+
+export function lexicalTowerRepoRoot(cwd: string): string {
+  const index = `${normalizedPath(cwd)}/`.indexOf(`/${WORKTREES_DIR}/`);
+  return index === -1 ? cwd : cwd.slice(0, index);
+}
+
+function normalizedPath(cwd: string): string {
+  return cwd.replaceAll('\\', '/').replace(/\/+$/, '');
 }
 
 function towerWorktreeRoot(cwd: string): string | undefined {

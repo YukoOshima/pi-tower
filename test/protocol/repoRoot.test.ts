@@ -6,7 +6,7 @@ import { promisify } from 'node:util';
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
-import { WORKTREES_DIR, resolveTowerRepoRoot } from '../../src/protocol/index.ts';
+import { WORKTREES_DIR, lexicalTowerRepoRoot, resolveTowerRepoRoot } from '../../src/protocol/index.ts';
 
 const execFileAsync = promisify(execFile);
 
@@ -74,6 +74,13 @@ describe('resolveTowerRepoRoot', () => {
     expect(resolveTowerRepoRoot('C:\\repo\\.tower\\worktrees')).toBe('C:\\repo');
   });
 
+  it('ignores trailing separators on the worktrees directory', () => {
+    expect(resolveTowerRepoRoot(`${worktrees}/`)).toBe(root);
+    expect(resolveTowerRepoRoot('/repo/.tower/worktrees/')).toBe('/repo');
+    expect(resolveTowerRepoRoot('/repo/.tower/worktrees//')).toBe('/repo');
+    expect(resolveTowerRepoRoot('C:\\repo\\.tower\\worktrees\\')).toBe('C:\\repo');
+  });
+
   it('does not mangle lookalike paths', () => {
     expect(resolveTowerRepoRoot('/repo/.tower/worktreesmith/x')).toBe(
       '/repo/.tower/worktreesmith/x',
@@ -132,5 +139,18 @@ describe('resolveTowerRepoRoot', () => {
 
     expect(resolveTowerRepoRoot(separateWorktree)).toBe(separate);
     expect(resolveTowerRepoRoot(linkedWorktree)).toBe(linked);
+  });
+});
+
+describe('lexicalTowerRepoRoot', () => {
+  it('maps any path below a .tower/worktrees segment to the outermost enclosing checkout by its string alone', () => {
+    expect(lexicalTowerRepoRoot('/repo')).toBe('/repo');
+    expect(lexicalTowerRepoRoot('/repo/src/layer')).toBe('/repo/src/layer');
+    expect(lexicalTowerRepoRoot('/repo/.tower/worktrees')).toBe('/repo');
+    expect(lexicalTowerRepoRoot('/repo/.tower/worktrees/')).toBe('/repo');
+    expect(lexicalTowerRepoRoot('/repo/.tower/worktrees/wt-1/tmp/repo')).toBe('/repo');
+    expect(lexicalTowerRepoRoot('/repo/.tower/worktrees/wt-1/tmp/repo/.tower/worktrees/wt-2')).toBe('/repo');
+    expect(lexicalTowerRepoRoot('/repo/.tower/worktreesmith/x')).toBe('/repo/.tower/worktreesmith/x');
+    expect(lexicalTowerRepoRoot('C:\\repo\\.tower\\worktrees\\wt-1')).toBe('C:\\repo');
   });
 });
