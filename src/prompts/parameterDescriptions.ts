@@ -24,7 +24,7 @@ export const TOWER_PARAMETER_DESCRIPTIONS = {
     name: 'Unique tower name for the agent (e.g. "agent-build", "reviewer-a"). Used for inbox addressing and mission ownership.',
     kind: 'workers execute a mission in their worktree; reviewers review one branch; validators (objective mode) validate one milestone in a detached, read-only worktree',
     model:
-      'Model for this new spawn: one of the choices listed under "Available models" in this tool description — "orchestrator" (or "primary") for the tower\'s own model, "worker", "reviewer", or a configured pool alias. Pass this only when the user explicitly requests a model; when omitted, workers use the worker model and reviewers use the reviewer model, each falling back to the orchestrator model when unset.',
+      'Model for this new spawn: one of the choices listed under "Available models" in this tool description — "orchestrator" (or "primary") for the tower\'s own model, "worker", "reviewer", "validator", or a configured pool alias. Pass this only when the user explicitly requests a model; when omitted, workers use the worker model and reviewers use the reviewer model, each falling back to the orchestrator model when unset, and validators use the validator model, falling back to the reviewer model and then the orchestrator model.',
     mission_id: 'Required for workers: the mission id (e.g. "M1") from TowerPlan',
     review_target: 'Required for reviewers: the branch to review (e.g. "feat/vulkan-build")',
     milestone: 'Required for validators: the milestone id to validate (e.g. "MS1")',

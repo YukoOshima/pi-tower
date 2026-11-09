@@ -227,12 +227,12 @@ describe('upstream tower tool descriptions', () => {
 });
 
 describe('pi adaptations of upstream descriptions', () => {
-  it('describes three configurable spawn roles instead of the secondary pool', () => {
+  it('describes four configurable spawn roles instead of the secondary pool', () => {
     expect(TOWER_SPAWN_DESCRIPTION).toContain(
-      "The allowed choices are the three configurable roles — orchestrator (also accepted as primary: the tower's own model), worker, and reviewer — plus any optional pool aliases configured for the tower, not arbitrary provider/model ids.",
+      "The allowed choices are the four configurable roles — orchestrator (also accepted as primary: the tower's own model), worker, reviewer, and validator — plus any optional pool aliases configured for the tower, not arbitrary provider/model ids.",
     );
     expect(TOWER_SPAWN_DESCRIPTION).toContain(
-      'When model is omitted, workers use the worker model and reviewers use the reviewer model, each falling back to the orchestrator model when unset; the role models come from tower.json, environment variables, or CLI flags.',
+      'When model is omitted, workers use the worker model and reviewers use the reviewer model, each falling back to the orchestrator model when unset, and validators use the validator model, falling back to the reviewer model and then the orchestrator model; the role models come from tower.json, environment variables, or CLI flags.',
     );
     expect(TOWER_SPAWN_DESCRIPTION).not.toContain('[default]');
   });
@@ -339,11 +339,11 @@ describe('TOWER_PARAMETER_DESCRIPTIONS', () => {
     );
   });
 
-  it('describes the spawn model choice in terms of the three roles', () => {
+  it('describes the spawn model choice in terms of the four roles', () => {
     const model = TOWER_PARAMETER_DESCRIPTIONS.TowerSpawn.model;
     expect(model).toContain('"Available models"');
     expect(model).toContain('"orchestrator" (or "primary")');
-    expect(model).toContain('"worker", "reviewer", or a configured pool alias');
+    expect(model).toContain('"worker", "reviewer", "validator", or a configured pool alias');
     expect(model).toContain('Pass this only when the user explicitly requests a model');
     expect(model).toContain('each falling back to the orchestrator model when unset');
   });
