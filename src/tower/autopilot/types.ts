@@ -18,6 +18,8 @@ export interface AutopilotRuntimeSettings extends ObjectiveSettingsValues {
   readonly watchdogIntervalMs: number;
   readonly stallTimeoutMs: number;
   readonly maxStallWakes: number;
+  /** Completing the objective also runs the TowerTeardown of its finished worktrees (never forced). */
+  readonly autoTeardown: boolean;
 }
 
 /**

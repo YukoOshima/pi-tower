@@ -246,7 +246,7 @@ describe('parseTowerConfig objective section', () => {
     maxCostUsd: 12.5,
     skipScrutiny: true,
     skipUserTesting: true,
-    autoTeardown: true,
+    autoTeardown: false,
   };
 
   it('accepts every objective setting and an empty section', () => {

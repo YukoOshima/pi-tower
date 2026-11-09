@@ -107,6 +107,7 @@ export const SETTINGS: AutopilotSettings = {
   maxStallWakes: 3,
   skipScrutiny: false,
   skipUserTesting: false,
+  autoTeardown: true,
 };
 
 export interface SnapshotParts

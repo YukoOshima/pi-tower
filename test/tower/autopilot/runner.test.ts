@@ -181,6 +181,7 @@ describe('follow-up ticks', () => {
       'merge done',
       'start-validation done',
       'commands submitted',
+      'teardown done',
       'complete-objective done',
     ]);
     expect(tower.notices.at(-1)!.text).toContain('is complete');

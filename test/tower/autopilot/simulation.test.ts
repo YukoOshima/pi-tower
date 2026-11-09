@@ -177,7 +177,15 @@ describe('a full simulated objective on a real repository', () => {
     expect(await git(repo, 'show', 'main:core/a/value.txt')).toBe('ready');
     const worktrees = await git(repo, 'worktree', 'list', '--porcelain');
     expect(worktrees).not.toContain('/val-');
+    expect(worktrees).not.toContain('/.tower/worktrees/');
+    expect((await git(repo, 'branch', '--format=%(refname:short)')).split('\n')).toEqual(
+      expect.arrayContaining(state.missions.map((mission) => mission.branch)),
+    );
+    expect(tower.notices.at(-1)!.text.split('\n\n').at(-1)).toBe(
+      ['Automatic teardown: removed 4 worktree(s), kept 0.', ...state.missions.map((mission) => `- removed .tower/worktrees/${mission.worktree}`)].join('\n'),
+    );
     const activity = await readFile(store.abs(ACTIVITY_LOG), 'utf8');
+    expect(activity).toMatch(/ autopilot teardown objective=O1 result=done removed=4 kept=0\n/);
     expect(activity).toMatch(/ autopilot spawn-worker mission=M1 result=launched detail=name=ap-w-M1-1\n/);
     expect(activity).toMatch(/ autopilot commands milestone=MS1 commit=\w{7} result=submitted round=1 verdict=fail revision=0\n/);
     expect(activity).toMatch(/ autopilot complete-objective objective=O1 result=done detail=objective=O1\n/);

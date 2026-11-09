@@ -507,7 +507,7 @@ function planCompletion(draft: Draft): void {
   const verdicts = kinds.map((kind) => latestRound(final, kind, snapshot.baseTip)?.verdict);
   const stamped = final.validationCommit === snapshot.baseTip;
   if (stamped && verdicts.every((verdict) => verdict === 'pass')) {
-    draft.transitions.push({ type: 'complete-objective', objective: objective.id });
+    draft.transitions.push({ type: 'complete-objective', objective: objective.id, teardown: snapshot.settings.autoTeardown });
     return;
   }
   planValidation(draft, final, kinds, !stamped);

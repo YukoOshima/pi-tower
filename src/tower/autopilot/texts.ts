@@ -50,6 +50,7 @@ import {
   validationSettings,
   type AutopilotWorld,
 } from './snapshot.ts';
+import type { AutopilotTeardownOutcome } from './teardown.ts';
 import type { AutopilotRuntimeSettings, AutopilotValidatorKind } from './types.ts';
 
 const RECENT_ATTEMPTS = 3;
@@ -89,17 +90,40 @@ export function blockedNoticeText(
   });
 }
 
+export function autoTeardownNotice(outcome: AutopilotTeardownOutcome): string {
+  if (outcome.error !== undefined) {
+    const error = outcome.error.trim().replaceAll(/\s+/g, ' ').replace(/\.+$/, '');
+    return `Automatic teardown failed: ${error}. The completion is not affected; run /tower teardown to remove the remaining worktrees.`;
+  }
+  if (outcome.lines.length === 0) return 'Automatic teardown: no worktree was left to remove.';
+  const counts = [
+    `removed ${String(outcome.removed)} worktree(s)`,
+    `kept ${String(outcome.kept)}`,
+    ...(outcome.failed > 0 ? [`failed to remove ${String(outcome.failed)}`] : []),
+  ];
+  const staying = outcome.kept - outcome.finishing + outcome.failed;
+  return [
+    `Automatic teardown: ${counts.join(', ')}.`,
+    ...outcome.lines.map((line) => `- ${line}`),
+    ...(staying > 0
+      ? [`${outcome.finishing > 0 ? 'Every other' : 'A'} kept or failed worktree stays until a later /tower teardown removes it.`]
+      : []),
+  ].join('\n');
+}
+
 export function completedNoticeText(input: {
   readonly objective: TowerObjective;
   readonly state: TowerState;
   readonly baseTip: string;
   readonly now: number;
+  /** Outcome of the automatic teardown, appended to the notice; absent while autoTeardown is off. */
+  readonly teardown?: AutopilotTeardownOutcome;
 }): string {
   const { objective, state } = input;
   const started = objective.startedAt === undefined ? Number.NaN : Date.parse(objective.startedAt);
   const ended = objective.completedAt === undefined ? input.now : Date.parse(objective.completedAt);
   const elapsedMs = Number.isNaN(started) || Number.isNaN(ended) ? undefined : Math.max(0, ended - started);
-  return objectiveCompletedNotice({
+  const notice = objectiveCompletedNotice({
     objective,
     milestones: objective.milestones,
     features: objectiveMissions({ ...state, objective }),
@@ -108,6 +132,7 @@ export function completedNoticeText(input: {
     ...(elapsedMs === undefined ? {} : { elapsedMs }),
     costUsd: objective.usage?.costUsd ?? 0,
   });
+  return input.teardown === undefined ? notice : `${notice}\n\n${autoTeardownNotice(input.teardown)}`;
 }
 
 export function skipKinds(

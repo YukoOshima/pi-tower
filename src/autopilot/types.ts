@@ -94,6 +94,8 @@ export interface AutopilotSettings {
   readonly maxStallWakes: number;
   readonly skipScrutiny: boolean;
   readonly skipUserTesting: boolean;
+  /** The completion tears the finished worktrees down — in manual mode too, as completion is always automatic. */
+  readonly autoTeardown: boolean;
 }
 
 export interface AutopilotWorker {
@@ -301,6 +303,11 @@ export interface AutopilotAdvanceMilestone {
 export interface AutopilotCompleteObjective {
   readonly type: 'complete-objective';
   readonly objective: string;
+  /**
+   * Once completed, run the TowerTeardown of the workspace (never forced): it removes the worktrees of
+   * merged and abandoned missions and keeps those of live agents, uncommitted changes and open missions.
+   */
+  readonly teardown: boolean;
 }
 
 export interface AutopilotWakeOrchestrator {

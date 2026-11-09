@@ -49,5 +49,6 @@ export function autopilotSettings(
     watchdogIntervalMs: values.watchdogIntervalMs,
     stallTimeoutMs: values.stallTimeoutMs,
     maxStallWakes: values.maxStallWakes,
+    autoTeardown: values.autoTeardown,
   };
 }
