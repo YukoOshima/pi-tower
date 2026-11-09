@@ -1,7 +1,7 @@
 {
   "name": "pi-tower",
-  "version": "0.2.0",
-  "description": "Kimi Code's Tower multi-agent mode for the pi coding agent: an orchestrator splits work into missions, workers build them in isolated git worktrees, independent reviewers gate every merge. Objective mode keeps the fleet working until every milestone of an approved plan passes validation, with the features of a milestone running in parallel. Orchestrator, worker, reviewer and validator models are configured separately.",
+  "version": "0.3.0",
+  "description": "Droid-style Missions for the pi coding agent, run in parallel: /mission plans milestones of features with you, a swarm of workers builds the features of each milestone at the same time in isolated git worktrees, independent reviewers gate every merge, and validators check every milestone until the plan passes. Orchestrator, worker, reviewer and validator models are configured separately. Built on a port of Kimi Code's Tower multi-agent mode.",
   "type": "module",
   "license": "MIT",
   "author": "YukoOshima",
@@ -10,6 +10,8 @@
     "pi",
     "pi-extension",
     "multi-agent",
+    "missions",
+    "agent-swarm",
     "tower",
     "orchestrator",
     "git-worktree",

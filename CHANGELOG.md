@@ -1,5 +1,53 @@
 # Changelog
 
+## [0.3.0] - 2026-11-10
+
+Mission mode: `/mission` works like Factory's Droid Missions. You enter it, see the orchestrator, worker, reviewer and validator models, describe the goal, answer the orchestrator's questions, approve the plan, and follow the work in Mission Control until the mission completes and cleans up after itself. The one difference from Droid: the features of a milestone run in parallel, as a swarm. The `/tower` commands stay as the advanced, Kimi Code-compatible layer, with unchanged behaviour and replies.
+
+### Added
+
+- **`/mission` (alias `/missions`).** `/mission` turns tower mode on (with the same refusals as `/tower on`), switches the session to the orchestrator model, initializes the workspace on the current branch, and shows a header: the orchestrator, worker, reviewer and validator models with their thinking level and source (`same as reviewer` for an inherited validator), the base branch, the parallelism limit (`maxRunningAgents`), and "What do you want to build?".
+  - The next plain message becomes the mission goal, with the effect of `/tower objective <text>`; a message that is just `@file` reads the goal from that file. `/mission <goal>` and `/mission @file` start planning directly.
+  - A directory that is not a git repository, a repository without commits and a detached HEAD are refused with a hint.
+  - With a mission open, `/mission` shows Mission Control instead: the models, the mission dashboard and the commands that fit its state.
+  - Subcommands `approve`, `pause [reason]`, `resume`, `models [...]`, `agents`, `stop <agent>`, `exit` (alias `off`) and `help`, with tab completion and "did you mean" hints for near-miss words. They share their implementation with the `/tower` commands.
+  - Mission mode is saved in the pi session and comes back with it. `/mission exit` and `/tower off` leave it.
+- **Approval dialog.** When a plan awaits approval in mission mode, a dialog offers "Not yet — keep planning", the default, and "Approve and start mission" ("Approve the revised plan" after a contract change), so ↓ then Enter approves and Enter alone does not.
+  - It opens once the orchestrator is idle, the editor is empty and the keyboard has been quiet for 2 seconds.
+  - Typing or pasting while it is open closes it and moves the text to the editor.
+  - `/mission approve` stays available. There is no dialog for headless missions, without a UI, or while `objective.autoApprove` would approve anyway.
+- **Mission Control panel.** A live widget of at most 10 lines above the editor shows the mission with its status, elapsed time and cost (with the budgets when set), the milestones, the features of the current milestone with their state and agent, the running workers, reviewers and validators against the limit, the models, and the next step. A footer status line mirrors it. It refreshes on tower state changes, throttled, and on a timer, and it clears on `/mission exit` and `/tower off`.
+- **Droid-style planning.** In an interactive mission, the orchestrator interviews the human before drafting: done criteria, out of scope, user flows, verification commands and constraints. It pushes back on vague goals, plans the features of every milestone before it requests approval, and splits each milestone into as many small features with disjoint scopes as the work allows, so they run in parallel. It adds dependencies only where a feature needs another one's merged code, and it names fitting skills in a feature's context. Headless planning keeps its no-questions path.
+- **Headless missions.** `pi-tower exec --mission -f <mission.md> [run options]` is Droid's spelling of `pi-tower run -f <file>`; `run` accepts `--mission` and ignores it, and `exec` without `--mission` exits 4.
+  - `--orchestrator-model`, `--worker-model`, `--reviewer-model` and `--validator-model <provider/modelId[:thinkingLevel]>` set a role's model for the run. Each reaches pi as `--tower-<role>-model`, after the extra pi args, so it wins over `PI_TOWER_<ROLE>_MODEL`, `tower.json` and the same flag given after `--`. Malformed refs exit 4.
+  - After `/tower on`, the run sends `/tower models` and prints one line per role with its model, thinking level and source, or one `role models unavailable (…) — continuing` line. Every problem in the reply's Problems section adds a `model warning:` line on stderr before the hand-over. The run continues, and the exit codes are unchanged.
+- **Automatic teardown.** When a mission completes, the autopilot runs the teardown of `TowerTeardown`, never forced, in manual mode too. It removes the worktrees of merged and abandoned features and leftover validation worktrees, and keeps those of live agents, those with uncommitted changes and those of open features. Branches and `.tower/comms/` stay. The completion notice lists what was removed and kept, and the activity log records `autopilot teardown objective=… result=done removed=N kept=K`. A teardown that fails is reported but never undoes the completion.
+- **Docs.** The README in English and Simplified Chinese is restructured mission-first: install, the role models, a `/mission` walkthrough, the `/mission` and headless references and the Droid comparison come first, and the `/tower` layer and the internals move under Advanced. `examples/mission.md` is a Droid-style mission file.
+
+### Changed
+
+- **`objective.autoTeardown` defaults to `true`** and now works (see above). A clean worktree is removed together with its git-ignored files, such as `node_modules`, build output or a local `.env`. Set it to `false` to keep every worktree for `/tower teardown`.
+- **Mission wording.** The approval request, the paused, blocked and completed notices, the auto-approval notices and the dashboard heading say "Mission O1" and point at `/mission approve`, `/mission resume` and `/mission`. The approval request names the dialog, and each milestone line says how many of its features run in parallel. The completion notice says that the mission worktrees are cleaned up automatically unless `objective.autoTeardown` is off.
+- **Teardown hints.** While a mission is open, the `TowerMerge` result after the last open mission merges and the `TowerStatus` "Done" hint tell the orchestrator not to run `TowerTeardown`: the autopilot tears the worktrees down when the mission completes, or, with `autoTeardown` off, nothing is torn down before then. Without an open mission they still say the worktrees are ready for `TowerTeardown`. The `TowerTeardown` result tells the human to leave with `/mission exit or /tower off`.
+- **Refusals and reminders.** The refusal while tower mode is off says that only the user can enable it, with `/mission or /tower on`. The full reminder limits "auto-wired dependencies order merges only" to work outside missions; inside a mission a feature starts only after its dependencies merge, auto-wired ones included.
+- **`pi-tower` usage errors** print `pi-tower: <problem>`, the usage synopsis and `Run pi-tower --help for all options.` The exit codes are unchanged.
+- **Examples.** `examples/objective.md` is now `examples/mission.md`.
+
+### Fixed
+
+- **Dependency cycles are refused.** `TowerPlan` accepted a plan whose dependencies formed a cycle, in one batch, through an existing open mission, or as a self-dependency, so its missions could never start or merge. The plan is now refused before anything is written, and the refusal names the cycle, for example `M1 -> M2 -> M1`. Dependencies on merged or abandoned missions never count, and auto-added scope dependencies never close a cycle.
+
+### Compatibility
+
+- Every `/tower` command keeps its behaviour and its replies. Workspaces, state files and `tower.json` files from 0.2.0 keep working.
+- The one behaviour change for existing setups: a completed objective now tears its worktrees down. Set `"objective": { "autoTeardown": false }` to keep the 0.2.0 behaviour.
+
+### Known limitations
+
+- Automatic teardown deletes the git-ignored files of clean feature worktrees.
+- If you sit idle for 2 seconds or more inside one of pi's own selectors, such as `/model`, when the plan becomes ready, the approval dialog replaces that selector, and ↓ then Enter meant for it approves the plan. pi 1.5.0 gives extensions no signal for its built-in selectors.
+- A plan that already awaited approval when mission mode started, for example after a restart, gets no dialog. Approve it with `/mission approve`.
+
 ## [0.2.0] - 2026-11-09
 
 Objective mode: the tower keeps working on a plan you approved until every milestone has passed validation, in the style of Factory's Droid Missions. Unlike Missions, the features of a milestone run in parallel, each with its own worktree, independent review and merge gate.
