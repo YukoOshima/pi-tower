@@ -715,7 +715,7 @@ table('stall watchdog', [
   { name: 'maxStallWakes stall wakes without progress block the objective', snap: settled(QUIET, 180_000, { stallWakes: 3 }), actions: [blockOf('stalled')] },
   { name: 'a stall wake already sent is not resent', snap: settled(QUIET, 180_000, { wakeKeys: [`stalled:O1:${QUIET_KEY}#1`] }), actions: [] },
   {
-    name: 'manual mode stalls when the orchestrator leaves the mechanics undone',
+    name: 'manual mode stalls when the orchestrator leaves feature execution undone',
     snap: settled(MANUAL_PENDING, 180_000),
     actions: [wakeOf('stalled', 'O1', `${computeProgressKey(MANUAL_PENDING)}#1`)],
   },
@@ -849,17 +849,39 @@ const MANUAL = { autopilot: false };
 
 table('manual mode (autopilot=false)', [
   {
-    name: 'every due mechanic is left to the orchestrator',
+    name: 'every due feature-execution action is left to the orchestrator',
     snap: snapshot({ settings: { ...MANUAL, maxRunningAgents: 8 }, missions: EVERY_MECHANIC }),
     actions: [wakeOf('rebase-conflict', 'M7', `tip-M7@${BASE}`)],
   },
   {
-    name: 'a pending empty milestone only asks for a plan',
+    name: 'a pending milestone is still activated, and an empty one asks for its plan',
     snap: snapshot({ settings: MANUAL, objective: { milestones: [PASSED_MS1, milestone('MS2', 2)] }, missions: [merged('M1')] }),
-    actions: [wakeOf('plan-milestone', 'MS2', BASE)],
+    actions: [{ type: 'advance-milestone', milestone: 'MS2', from: 'MS1' }, wakeOf('plan-milestone', 'MS2', BASE)],
   },
-  { name: 'validation is not started', snap: snapshot({ settings: MANUAL, missions: DONE_MS1 }), actions: [] },
-  { name: 'the objective is not completed', snap: snapshot({ settings: MANUAL, objective: { milestones: [PASSED_MS1, FINAL_PASSED] }, missions: ALL_MERGED }), actions: [] },
+  {
+    name: 'a pending milestone is activated before its features are touched',
+    snap: snapshot({ settings: MANUAL, objective: { milestones: [PASSED_MS1, milestone('MS2', 2)] }, missions: [merged('M1'), { ...SCOPE_BLOCKED, id: 'M3', milestone: 'MS2', tip: 'tip-M3' }] }),
+    actions: [{ type: 'advance-milestone', milestone: 'MS2', from: 'MS1' }],
+  },
+  {
+    name: 'validation still starts with the LLM kinds and the commands kind',
+    snap: snapshot({
+      settings: MANUAL,
+      objective: { milestones: [milestone('MS1', 1, { status: 'active', validation: { scrutiny: true, userTesting: true, commands: 1 } })] },
+      missions: DONE_MS1,
+    }),
+    actions: [validate('MS1', BASE, ['scrutiny', 'user-testing', 'commands'])],
+  },
+  {
+    name: 'a moved base still re-validates the final milestone',
+    snap: snapshot({ settings: MANUAL, baseTip: 'base-1', objective: { milestones: [PASSED_MS1, FINAL_PASSED] }, missions: ALL_MERGED }),
+    actions: [validate('MS2', 'base-1', ['scrutiny', 'user-testing'])],
+  },
+  {
+    name: 'the objective still completes',
+    snap: snapshot({ settings: MANUAL, objective: { milestones: [PASSED_MS1, FINAL_PASSED] }, missions: ALL_MERGED }),
+    actions: [{ type: 'complete-objective', objective: 'O1' }],
+  },
   {
     name: 'validation failures still wake',
     snap: snapshot({ settings: MANUAL, objective: { milestones: [milestone('MS1', 1, { status: 'failed', rounds: FAIL_ROUNDS })] }, missions: DONE_MS1 }),
@@ -874,16 +896,6 @@ table('manual mode (autopilot=false)', [
   { name: 'exhausted attempts still wake', snap: snapshot({ settings: MANUAL, missions: [working('M1', { attempts: 3, worker: DEAD })] }), actions: [wakeOf('feature-attempts-exhausted', 'M1', '3')] },
   { name: 'merge blocks still wake', snap: snapshot({ settings: MANUAL, missions: [SCOPE_BLOCKED] }), actions: [wakeOf('merge-blocked', 'M1', 'tip-M1:out-of-scope')] },
   {
-    name: 'features of a milestone nobody activated still wake',
-    snap: snapshot({ settings: MANUAL, objective: { milestones: [PASSED_MS1, milestone('MS2', 2)] }, missions: [merged('M1'), { ...SCOPE_BLOCKED, id: 'M3', milestone: 'MS2', tip: 'tip-M3' }] }),
-    actions: [wakeOf('merge-blocked', 'M3', 'tip-M3:out-of-scope')],
-  },
-  {
-    name: 'contrast: with autopilot on, the milestone is activated before its features are touched',
-    snap: snapshot({ objective: { milestones: [PASSED_MS1, milestone('MS2', 2)] }, missions: [merged('M1'), { ...SCOPE_BLOCKED, id: 'M3', milestone: 'MS2', tip: 'tip-M3' }] }),
-    actions: [{ type: 'advance-milestone', milestone: 'MS2', from: 'MS1' }],
-  },
-  {
     name: 'exhausted validation rounds still block',
     snap: snapshot({
       settings: MANUAL,
@@ -894,7 +906,16 @@ table('manual mode (autopilot=false)', [
   },
 ]);
 
-const MANUAL_TYPES = new Set(['wake-orchestrator', 'block-objective', 'pause-objective']);
+const EXECUTION_TYPES = new Set(['spawn-worker', 'resume-worker', 'respawn-worker', 'spawn-reviewer', 'rebase', 'merge']);
+const BOOKKEEPING_TYPES = new Set(['advance-milestone', 'start-validation', 'complete-objective']);
+
+function withAutopilot(snap: AutopilotSnapshot, autopilot: boolean): AutopilotSnapshot {
+  return { ...snap, settings: { ...snap.settings, autopilot } };
+}
+
+function actionsOfTypes(snap: AutopilotSnapshot, types: ReadonlySet<string>): AutopilotAction[] {
+  return decideAutopilot(snap).actions.filter((action) => types.has(action.type));
+}
 
 function deepFreeze<T>(value: T): T {
   if (typeof value === 'object' && value !== null && !Object.isFrozen(value)) {
@@ -921,9 +942,14 @@ describe('idempotency and purity', () => {
     expect(decideAutopilot(deepFreeze(copy))).toEqual(decideAutopilot(snap));
   });
 
-  it.each(ALL_ROWS)('$name: manual mode yields only wake, block and pause actions', ({ snap }) => {
-    const manual = { ...snap, settings: { ...snap.settings, autopilot: false } };
-    for (const action of decideAutopilot(manual).actions) expect(MANUAL_TYPES.has(action.type)).toBe(true);
+  it.each(ALL_ROWS)('$name: manual mode never emits a feature-execution action', ({ snap }) => {
+    expect(actionsOfTypes(withAutopilot(snap, false), EXECUTION_TYPES)).toEqual([]);
+  });
+
+  it.each(ALL_ROWS)('$name: manual mode keeps the same objective bookkeeping', ({ snap }) => {
+    expect(actionsOfTypes(withAutopilot(snap, false), BOOKKEEPING_TYPES)).toEqual(
+      actionsOfTypes(withAutopilot(snap, true), BOOKKEEPING_TYPES),
+    );
   });
 });
 

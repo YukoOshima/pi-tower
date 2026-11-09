@@ -206,8 +206,8 @@ function planFeature(draft: Draft, feature: AutopilotMission): void {
       `${feature.id} reported ${String(feature.blockers.length)} blocker(s): ${feature.blockers.join(' | ')}`,
     );
   }
+  if (draft.current?.status === 'pending' && feature.milestone === draft.current.id) return;
   const autopilot = draft.snapshot.settings.autopilot;
-  if (autopilot && draft.current?.status === 'pending' && feature.milestone === draft.current.id) return;
   if (feature.gate.ready) {
     if (autopilot) draft.merges.push({ type: 'merge', mission: feature.id });
     return;
@@ -351,7 +351,7 @@ function planMilestone(draft: Draft): void {
     planCompletion(draft);
     return;
   }
-  if (current.status === 'pending' && snapshot.settings.autopilot) {
+  if (current.status === 'pending') {
     const ordered = sortedMilestones(objective);
     const previous = ordered[ordered.indexOf(current) - 1];
     draft.transitions.push({
@@ -408,7 +408,6 @@ function planValidation(
   milestone: AutopilotMilestone,
   kinds: readonly AutopilotValidationKind[],
 ): void {
-  if (!draft.snapshot.settings.autopilot) return;
   const commit = draft.snapshot.baseTip;
   if (kinds.length === 0) {
     if (milestone.status === 'active') {
@@ -443,9 +442,7 @@ function planCompletion(draft: Draft): void {
   const verdicts = kinds.map((kind) => latestRound(final, kind, snapshot.baseTip)?.verdict);
   if (verdicts.includes('fail')) return;
   if (verdicts.every((verdict) => verdict === 'pass')) {
-    if (snapshot.settings.autopilot) {
-      draft.transitions.push({ type: 'complete-objective', objective: objective.id });
-    }
+    draft.transitions.push({ type: 'complete-objective', objective: objective.id });
     return;
   }
   planValidation(draft, final, kinds);

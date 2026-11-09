@@ -80,7 +80,10 @@ export interface AutopilotObjective {
 }
 
 export interface AutopilotSettings {
-  /** false: only watchdog, budget, wake, block and pause actions; the orchestrator drives the mechanics. */
+  /**
+   * false: the orchestrator drives feature execution (spawn, resume and respawn workers, spawn
+   * reviewers, rebase, merge); milestone advance, validation, completion and the watchdog stay automatic.
+   */
   readonly autopilot: boolean;
   readonly maxRunningAgents: number;
   readonly stallTimeoutMs: number;
