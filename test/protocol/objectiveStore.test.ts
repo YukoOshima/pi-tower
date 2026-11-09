@@ -519,14 +519,27 @@ describe('roster with objectives', () => {
       store.registerAgent({ ...validator, milestoneId: 'MS7', validationKind: 'scrutiny' }),
     ).rejects.toThrow(/names milestone "MS7", which objective O1 does not have/);
     const tip = await git(repo, 'rev-parse', 'main');
-    await store.registerAgent({
+    const scrutiny = {
       ...validator,
       milestoneId: 'MS1',
-      validationKind: 'scrutiny',
+      validationKind: 'scrutiny' as const,
       validationRound: 1,
       validatedCommit: tip,
       worktree: 'val-ms1-scrutiny-r1',
+    };
+    await expect(store.registerAgent(scrutiny)).rejects.toThrow(
+      /milestone MS1 is pending, and validators are registered only while it is validating/,
+    );
+    await store.updateObjective({ goal: 'g', definitionOfDone: ['d'] });
+    await store.plan([{ title: 'Core work', scope: ['src/core/**'], milestone: 'MS1' }]);
+    await store.requestObjectiveApproval();
+    await store.approveObjective('human');
+    await expect(store.registerAgent(scrutiny)).rejects.toThrow(/milestone MS1 is active/);
+    await mutateState((state) => {
+      state.missions[0]!.status = 'merged';
     });
+    await store.startMilestoneValidation('MS1', tip);
+    await store.registerAgent(scrutiny);
     expect((await readState()).roster.agents).toEqual([
       {
         ...validator,
@@ -1488,6 +1501,22 @@ describe('a passed final milestone whose pass no longer holds', () => {
     await store.startMilestoneValidation('MS1', fixed);
     await store.submitValidation('tower', { milestone: 'MS1', kind: 'commands', verdict: 'pass', validatedCommit: fixed });
     expect((await store.completeObjective()).status).toBe('completed');
+  });
+
+  it('registers no validator while the milestone is passed or failed (F2, R1)', async () => {
+    const tip = await finalOnly({ userTesting: false });
+    await registerScrutiny('v1', tip);
+    await store.submitValidation('v1', { milestone: 'MS1', kind: 'scrutiny', verdict: 'pass' });
+    await commitFile(repo, 'moved.txt', 'moved\n', 'base moved');
+    const moved = await git(repo, 'rev-parse', 'main');
+    const before = await readFile(store.abs(STATE_FILE), 'utf8');
+    await expect(registerScrutiny('v2', moved)).rejects.toThrow(/milestone MS1 is passed, and validators are registered only/);
+    await expect(registerScrutiny('v2', tip)).rejects.toThrow(/milestone MS1 is passed/);
+    expect(await readFile(store.abs(STATE_FILE), 'utf8')).toBe(before);
+    await store.startMilestoneValidation('MS1', moved);
+    await registerScrutiny('v3', moved);
+    await store.submitValidation('v3', { milestone: 'MS1', kind: 'scrutiny', verdict: 'fail', failures: ['broken'] });
+    await expect(registerScrutiny('v4', moved)).rejects.toThrow(/milestone MS1 is failed/);
   });
 
   it('accepts a fix after a late failing verdict follows a dead-validator restart (R2)', async () => {

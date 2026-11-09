@@ -1202,12 +1202,17 @@ export class TowerStore {
         `validator "${entry.name}" names milestone "${entry.milestoneId}", which objective ${objective.id} does not have`,
       );
     }
+    if (milestone.status !== 'validating') {
+      throw new TowerProtocolError(
+        `validator "${entry.name}" cannot be registered — milestone ${milestone.id} is ${milestone.status}, and validators are registered only while it is validating`,
+      );
+    }
     if (entry.validatedCommit === undefined) {
       throw new TowerProtocolError(
         `validator "${entry.name}" needs a validatedCommit — the commit its validation worktree was checked out at, which stamps its round`,
       );
     }
-    if (milestone.status === 'validating' && entry.validatedCommit !== milestone.validationCommit) {
+    if (entry.validatedCommit !== milestone.validationCommit) {
       throw new TowerProtocolError(
         `validator "${entry.name}" was checked out at ${entry.validatedCommit.slice(0, 7)}, but milestone ${milestone.id} is validating ${milestone.validationCommit?.slice(0, 7) ?? 'no commit'} — prepare a validation worktree for the current validation commit`,
       );
