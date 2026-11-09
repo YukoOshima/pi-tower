@@ -45,6 +45,20 @@ const OBJECTIVE_APPROVAL_STEP: Readonly<Record<TowerObjectivePlaybookVariant, st
     '4. **Request approval — never self-approve.** Call `TowerObjective(action="request-approval")` as soon as the plan is complete, then end your turn: the runner approves it or hands it to the human. No tool can approve, and you never state or imply that the plan is approved.',
 };
 
+const OBJECTIVE_WORKER_STOPPED: Readonly<Record<TowerObjectivePlaybookVariant, string>> = {
+  interactive:
+    '   - worker-stopped → the human stopped the worker of a feature, and the feature waits: the autopilot never resumes, reassigns, or replaces an agent the human stopped, and you never do so on your own. Ask the human how to continue and act only on the answer: spawn a fresh worker with `TowerSpawn` only when the human wants the feature continued, abandon and re-plan it when they want it changed or dropped, or block the objective when they want to stop.',
+  headless:
+    '   - worker-stopped → the human stopped the worker of a feature, and the feature waits: the autopilot never resumes, reassigns, or replaces an agent the human stopped, and neither do you. Nobody can answer in a headless run, so block the objective with `TowerObjective(action="block", reason)` and name the stopped worker.',
+};
+
+const OBJECTIVE_REVIEWER_OR_VALIDATOR_STOPPED: Readonly<Record<TowerObjectivePlaybookVariant, string>> = {
+  interactive:
+    "When the wake says instead that the human stopped the reviewer or validator, that is no transient cause: never replace it on your own — ask the human how to continue and act only on the answer; spawn a fresh one only on the human's direction.",
+  headless:
+    'When the wake says instead that the human stopped the reviewer or validator, that is no transient cause: never replace it — nobody can answer in a headless run, so block the objective with a reason that names the stopped agent.',
+};
+
 const OBJECTIVE_ESCALATION: Readonly<Record<TowerObjectivePlaybookVariant, string>> = {
   interactive:
     'Report to the human at milestone boundaries and whenever the objective blocks or pauses; escalate only what you cannot decide from the objective and the human\'s own words.',
@@ -60,15 +74,20 @@ function objectivePlaybook(variant: TowerObjectivePlaybookVariant): string {
     "2. **Give every milestone a validation contract.** Order milestones so that each one leaves the product working and testable — one is enough for a small objective; long or risky work needs more, so drift is caught early. For each milestone decide its validation: scrutiny (a validator reviews the merged diff against the features' tasks and runs typecheck/tests), user-testing (a validator exercises the product the way a user would — write `qa_instructions`: how to start it, which flows to drive, what to observe), and `commands` that must exit 0. Milestone commands and acceptance commands run mechanically in a fresh detached checkout of the base tip with no installed dependencies or build output, so each command must include its own setup (e.g. `npm ci && npm test`). Switch a validator off only when it genuinely cannot apply.",
     "3. **Plan features with `TowerPlan(milestone)`.** Plan at least the first milestone's features before approval, passing `milestone` on every item; later milestones can be planned now or when they become current. Shape features for parallel execution: disjoint scopes, explicit deps only for real ordering, verifiable tasks, and the human's key wording in `context`.",
     OBJECTIVE_APPROVAL_STEP[variant],
-    '5. **Let the autopilot run the mechanics.** After approval, code drives the routine through the same gated tools you use: it spawns workers, reviewers, and validators, resumes or respawns stalled workers, rebases stale branches, merges gate-ready branches, starts validation once every feature of the current milestone is merged or abandoned, and advances milestones. Do not duplicate these steps and do not poll — end your turn and let wakes bring you work. Use `TowerObjective(action="status")` when the human wants a report. While the objective is paused (by the human or a budget limit), start nothing new and wait for `/tower resume`. With the autopilot off (`objective.autopilot=false`), you drive feature execution yourself with the work cycle above — spawn workers and reviewers, rebase, merge — but validation start, milestone advancement, and objective completion stay automatic in both modes: never start a validation yourself (spawn a validator only to recover a validation-stuck round), and never try to advance a milestone or complete the objective by hand.',
+    '5. **Let the autopilot run the mechanics.** After approval, code drives the routine through the same gated tools you use: it spawns workers, reviewers, and validators, resumes or respawns stalled workers, rebases stale branches, merges gate-ready branches, starts validation once every feature of the current milestone is merged or abandoned, and advances milestones. It never resumes, reassigns, or replaces an agent the human stopped: that wakes you instead (worker-stopped, review-stuck, validation-stuck). Do not duplicate these steps and do not poll — end your turn and let wakes bring you work. Use `TowerObjective(action="status")` when the human wants a report. While the objective is paused (by the human or a budget limit), start nothing new and wait for `/tower resume`. With the autopilot off (`objective.autopilot=false`), you drive feature execution yourself with the work cycle above — spawn workers and reviewers, rebase, merge — but validation start, milestone advancement, and objective completion stay automatic in both modes: never start a validation yourself (spawn a validator only to recover a validation-stuck round), and never try to advance a milestone or complete the objective by hand.',
     [
       '6. **Own the judgment work.** Every wake names its reason:',
       '   - validation-failed → read every failure, then plan fix features into the same milestone with `TowerPlan(milestone, origin="fix")`, one per failure or per tightly related group, quoting the failure in the tasks. Fix causes, not symptoms. If the contract itself is wrong, change it with an update — the human must approve it again.',
       '   - plan-milestone → plan the features of the milestone that just became current.',
       "   - blocker → answer the worker from the objective and the human's words; decide what you can, escalate what you cannot.",
+      "   - worker-idle → a worker went idle without `TowerComplete`, a blocker, or a question while its feature is still active — after one autopilot reminder on the same tip, or at once with the autopilot off. Read its last message (quoted in the wake, or with `TowerTaskOutput`), then decide: answer what it waits for with `TowerSend` and wake it with `TowerResume` — an idle worker reads its inbox only when resumed; reassign the feature of a stuck or circling worker to a fresh worker with `TowerSpawn`, or abandon and re-plan a feature that is ill-posed; when only the human can unblock it, record a blocker on the mission or block the objective.",
+      OBJECTIVE_WORKER_STOPPED[variant],
       '   - rebase-conflict, merge-blocked → route the conflict to the owning worker, or re-plan the scope or deps; never work around a gate.',
       '   - feature-attempts-exhausted, stalled → find out why the work does not converge, then re-plan it smaller, unblock it, or call `TowerObjective(action="block", reason)` with what the human must decide.',
-      '   - review-stuck, validation-stuck → reviewers or validators keep ending without a verdict: inspect why (`TowerTasks` with `active_only=false`, `TowerTaskOutput`); for a transient cause spawn a fresh one with `TowerSpawn` under a new name; when the diff or the milestone is too large to judge in one run, simplify or split the work; otherwise block the objective with a reason for the human.',
+      [
+        '   - review-stuck, validation-stuck → reviewers or validators keep ending without a verdict: inspect why (`TowerTasks` with `active_only=false`, `TowerTaskOutput`); for a transient cause spawn a fresh one with `TowerSpawn` under a new name; when the diff or the milestone is too large to judge in one run, simplify or split the work; otherwise block the objective with a reason for the human.',
+        OBJECTIVE_REVIEWER_OR_VALIDATOR_STOPPED[variant],
+      ].join(' '),
     ].join('\n'),
     OBJECTIVE_ESCALATION[variant],
   ].join('\n\n');
@@ -78,7 +97,7 @@ export const TOWER_OBJECTIVE_PLAYBOOK = objectivePlaybook('interactive');
 export const TOWER_OBJECTIVE_HEADLESS_PLAYBOOK = objectivePlaybook('headless');
 
 export const TOWER_OBJECTIVE_SPARSE_REMINDER =
-  'Objective open: you own the judgment — plan milestone features and fix features (`TowerPlan` with `milestone`; origin "fix" after a failed validation), answer blockers, route conflicts, merge blocks, and stuck reviews or validations, escalate. Validation start, milestone advancement, and completion are always automatic; the feature mechanics are too unless the autopilot is off. Never approve yourself: approval comes only from `/tower approve`.';
+  'Objective open: you own the judgment — plan milestone features and fix features (`TowerPlan` with `milestone`; origin "fix" after a failed validation), answer blockers and idle workers, route conflicts, merge blocks, and stuck reviews or validations, escalate. Validation start, milestone advancement, and completion are always automatic; the feature mechanics are too unless the autopilot is off. Never replace an agent the human stopped unless the human says so. Never approve yourself: approval comes only from `/tower approve`.';
 
 const OBJECTIVE_PLAYBOOKS: Readonly<Record<TowerObjectivePlaybookVariant, string>> = {
   interactive: TOWER_OBJECTIVE_PLAYBOOK,
