@@ -42,6 +42,7 @@ import {
   mergeNoFf,
   tryGit,
   worktreeAdd,
+  worktreeAddDetached,
   worktreeAddNewBranch,
   worktreeRemove,
 } from './git.ts';
@@ -58,6 +59,7 @@ import {
   isObjectiveOpen,
   isTerminalObjectiveStatus,
   milestoneMissions,
+  nextValidationRound,
   objectiveApprovalProblems,
   planPlacement,
   requiredValidationKinds,
@@ -86,6 +88,7 @@ import {
   STATE_FILE,
   TOWER_NAME,
   TOWER_ROOT,
+  VALIDATION_WORKTREE_PREFIX,
   WORKTREES_DIR,
   isReservedTowerAgentName,
   dateDash,
@@ -96,6 +99,7 @@ import {
   reviewFileName,
   slugify,
   targetSlug,
+  validationWorktreeName,
 } from './paths.ts';
 import type {
   TowerFindingSeverity,
@@ -235,6 +239,13 @@ export interface TowerMissionPatch {
 export interface TowerAddWorktreeResult {
   readonly rel: string;
   readonly spawnBase?: string;
+}
+
+export interface TowerValidationWorktree {
+  readonly worktree: string;
+  readonly path: string;
+  readonly commit: string;
+  readonly round: number;
 }
 
 export interface TowerStoreOptions {
@@ -3393,6 +3404,78 @@ export class TowerStore {
     return { rel, spawnBase };
   }
 
+  async prepareValidationWorktree(
+    milestoneId: string,
+    kind: TowerValidationKind,
+  ): Promise<TowerValidationWorktree> {
+    if (!TOWER_VALIDATION_KINDS.includes(kind)) {
+      throw new TowerProtocolError(
+        `validation kind must be ${TOWER_VALIDATION_KINDS.join(' | ')}, got "${String(kind)}"`,
+      );
+    }
+    return this.withStateLock(async () => {
+      const state = await this.load();
+      const objective = this.requireObjective(state);
+      const milestone = findMilestone(objective, milestoneId);
+      if (milestone === undefined) {
+        throw new TowerProtocolError(`objective ${objective.id} has no milestone "${milestoneId}"`);
+      }
+      const commit = milestone.validationCommit;
+      if (milestone.status !== 'validating' || commit === undefined) {
+        throw new TowerProtocolError(
+          `milestone ${milestone.id} is ${milestone.status}, not validating — start its validation on the base tip before preparing a validation worktree`,
+        );
+      }
+      let round = nextValidationRound(milestone, kind);
+      let worktree = validationWorktreeName(milestone.id, kind, round);
+      while (existsSync(this.abs(join(WORKTREES_DIR, worktree)))) {
+        round += 1;
+        worktree = validationWorktreeName(milestone.id, kind, round);
+      }
+      const path = this.abs(join(WORKTREES_DIR, worktree));
+      await mkdir(this.abs(WORKTREES_DIR), { recursive: true });
+      await worktreeAddDetached(this.repoRoot, path, commit);
+      await this.appendLog(TOWER_NAME, 'worktree.add', {
+        worktree,
+        milestone: milestone.id,
+        kind,
+        commit: commit.slice(0, 7),
+      });
+      return { worktree, path, commit, round };
+    });
+  }
+
+  async removeValidationWorktree(worktree: string): Promise<boolean> {
+    const name = worktree.trim().replace(/\/+$/, '').replace(`${WORKTREES_DIR}/`, '');
+    if (!name.startsWith(VALIDATION_WORKTREE_PREFIX) || name.includes('/')) {
+      throw new TowerProtocolError(
+        `"${worktree}" is not a validation worktree — only ${VALIDATION_WORKTREE_PREFIX}* worktrees under ${WORKTREES_DIR} are removed here`,
+      );
+    }
+    const absPath = this.abs(join(WORKTREES_DIR, name));
+    if (!(await isRegisteredWorktree(this.repoRoot, absPath))) return false;
+    await worktreeRemove(this.repoRoot, absPath);
+    await this.appendLog(TOWER_NAME, 'worktree.remove', { worktree: name });
+    return true;
+  }
+
+  private async validationWorktrees(): Promise<string[]> {
+    let entries: string[];
+    try {
+      entries = await readdir(this.abs(WORKTREES_DIR));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+      throw error;
+    }
+    const registered: string[] = [];
+    for (const name of entries.filter((entry) => entry.startsWith(VALIDATION_WORKTREE_PREFIX)).toSorted()) {
+      if (await isRegisteredWorktree(this.repoRoot, this.abs(join(WORKTREES_DIR, name)))) {
+        registered.push(name);
+      }
+    }
+    return registered;
+  }
+
   async teardown(options: TowerTeardownOptions = {}): Promise<readonly string[]> {
     const state = await this.load();
     const dryRun = options.dryRun === true;
@@ -3409,7 +3492,7 @@ export class TowerStore {
     }
     const report: string[] = [];
     const kept = async (
-      mission: TowerMission,
+      worktree: string,
       rel: string,
       reason: string,
       log: Record<string, string | number | undefined>,
@@ -3417,8 +3500,50 @@ export class TowerStore {
       report.push(`${dryRun ? 'would keep' : 'kept'} ${rel} (${reason})`);
       if (!dryRun) {
         await this.appendLog(TOWER_NAME, 'worktree.keep', {
-          worktree: mission.worktree,
+          worktree,
           ...log,
+        });
+      }
+    };
+    const removeRegistered = async (worktree: string, wasExcluded: boolean): Promise<void> => {
+      const rel = join(WORKTREES_DIR, worktree);
+      const absPath = this.abs(rel);
+      if (wasExcluded) {
+        await kept(worktree, rel, 'excluded', { reason: 'excluded' });
+        return;
+      }
+      const liveAgent = state.roster.agents.find(
+        (agent) => agent.worktree === worktree && liveAgentIds.has(agent.agentId),
+      );
+      if (liveAgent !== undefined) {
+        await kept(worktree, rel, `live agent: ${liveAgent.name}`, {
+          reason: 'live-agent',
+          agent: liveAgent.name,
+        });
+        return;
+      }
+      if (!force) {
+        if (await isWorktreeDirty(absPath)) {
+          await kept(worktree, rel, 'uncommitted changes — rerun with force to remove', {
+            reason: 'uncommitted-changes',
+          });
+          return;
+        }
+      }
+      if (dryRun) {
+        report.push(`would remove ${rel}`);
+        return;
+      }
+      try {
+        await worktreeRemove(this.repoRoot, absPath);
+        report.push(`removed ${rel}`);
+        await this.appendLog(TOWER_NAME, 'worktree.remove', { worktree });
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error);
+        report.push(`failed to remove ${rel}: ${reason}`);
+        await this.appendLog(TOWER_NAME, 'worktree.remove.failed', {
+          worktree,
+          reason,
         });
       }
     };
@@ -3436,44 +3561,10 @@ export class TowerStore {
         }
         continue;
       }
-      if (wasExcluded) {
-        await kept(mission, rel, 'excluded', { reason: 'excluded' });
-        continue;
-      }
-      const liveAgent = state.roster.agents.find(
-        (agent) => agent.worktree === mission.worktree && liveAgentIds.has(agent.agentId),
-      );
-      if (liveAgent !== undefined) {
-        await kept(mission, rel, `live agent: ${liveAgent.name}`, {
-          reason: 'live-agent',
-          agent: liveAgent.name,
-        });
-        continue;
-      }
-      if (!force) {
-        if (await isWorktreeDirty(absPath)) {
-          await kept(mission, rel, 'uncommitted changes — rerun with force to remove', {
-            reason: 'uncommitted-changes',
-          });
-          continue;
-        }
-      }
-      if (dryRun) {
-        report.push(`would remove ${rel}`);
-        continue;
-      }
-      try {
-        await worktreeRemove(this.repoRoot, absPath);
-        report.push(`removed ${rel}`);
-        await this.appendLog(TOWER_NAME, 'worktree.remove', { worktree: mission.worktree });
-      } catch (error) {
-        const reason = error instanceof Error ? error.message : String(error);
-        report.push(`failed to remove ${rel}: ${reason}`);
-        await this.appendLog(TOWER_NAME, 'worktree.remove.failed', {
-          worktree: mission.worktree,
-          reason,
-        });
-      }
+      await removeRegistered(mission.worktree, wasExcluded);
+    }
+    for (const worktree of await this.validationWorktrees()) {
+      await removeRegistered(worktree, excluded.delete(worktree));
     }
     for (const original of excluded.values()) {
       report.push(`excluded worktree "${original}" matched no mission worktree`);

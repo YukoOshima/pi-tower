@@ -550,3 +550,91 @@ describe('roster with objectives', () => {
     expect(state.missions.find((mission) => mission.id === plain!.id)?.attempts).toBeUndefined();
   });
 });
+
+async function validatingMilestone(): Promise<string> {
+  await approvedObjective();
+  await mutateState((state) => {
+    state.missions[0]!.status = 'merged';
+  });
+  const tip = await git(repo, 'rev-parse', 'main');
+  await store.startMilestoneValidation('MS1', tip);
+  return tip;
+}
+
+describe('validation worktrees', () => {
+  it('prepares detached worktrees at the validation commit with per-kind round names', async () => {
+    await approvedObjective();
+    await expect(store.prepareValidationWorktree('MS1', 'scrutiny')).rejects.toThrow(/MS1 is active, not validating/);
+    await expect(store.prepareValidationWorktree('MS1', 'lint' as 'scrutiny')).rejects.toThrow(/validation kind must be/);
+    await mutateState((state) => {
+      state.missions[0]!.status = 'merged';
+    });
+    const tip = await git(repo, 'rev-parse', 'main');
+    await store.startMilestoneValidation('MS1', tip);
+    await commitFile(repo, 'moved.txt', 'moved\n', 'base moved after validation started');
+
+    const first = await store.prepareValidationWorktree('MS1', 'scrutiny');
+    expect(first).toEqual({
+      worktree: 'val-ms1-scrutiny-r1',
+      path: store.abs('.tower/worktrees/val-ms1-scrutiny-r1'),
+      commit: tip,
+      round: 1,
+    });
+    expect(await git(first.path, 'rev-parse', 'HEAD')).toBe(tip);
+    await expect(git(first.path, 'symbolic-ref', '-q', 'HEAD')).rejects.toThrow();
+    expect((await store.prepareValidationWorktree('MS1', 'scrutiny')).worktree).toBe('val-ms1-scrutiny-r2');
+    expect((await store.prepareValidationWorktree('MS1', 'user-testing')).worktree).toBe('val-ms1-user-testing-r1');
+    expect(await activityLog()).toContain(
+      `worktree.add worktree=val-ms1-scrutiny-r1 milestone=MS1 kind=scrutiny commit=${tip.slice(0, 7)}`,
+    );
+  });
+
+  it('removes only validation worktrees', async () => {
+    await validatingMilestone();
+    const prepared = await store.prepareValidationWorktree('MS1', 'scrutiny');
+    await expect(store.removeValidationWorktree('wt-1')).rejects.toThrow(/not a validation worktree/);
+    expect(await store.removeValidationWorktree(`.tower/worktrees/${prepared.worktree}/`)).toBe(true);
+    expect(await git(repo, 'worktree', 'list')).not.toContain(prepared.worktree);
+    expect(await store.removeValidationWorktree(prepared.worktree)).toBe(false);
+    expect(await activityLog()).toContain('worktree.remove worktree=val-ms1-scrutiny-r1');
+  });
+
+  it('tears validation worktrees down with the live-agent and dirty protections', async () => {
+    await validatingMilestone();
+    const live = await store.prepareValidationWorktree('MS1', 'scrutiny');
+    const dirty = await store.prepareValidationWorktree('MS1', 'user-testing');
+    const idle = await store.prepareValidationWorktree('MS1', 'commands');
+    await writeFile(join(dirty.path, 'scratch.txt'), 'scratch\n');
+    await store.registerAgent({
+      name: 'val-scrutiny',
+      agentId: 'agent-val-scrutiny',
+      kind: 'validator',
+      milestoneId: 'MS1',
+      validationKind: 'scrutiny',
+      worktree: live.worktree,
+      spawnedAt: '2026-04-04T00:00:00.000Z',
+    });
+    const liveAgentIds = new Set(['agent-val-scrutiny']);
+    expect(await store.teardown({ dryRun: true, liveAgentIds })).toEqual([
+      'already removed .tower/worktrees/wt-1',
+      'would remove .tower/worktrees/val-ms1-commands-r1',
+      'would keep .tower/worktrees/val-ms1-scrutiny-r1 (live agent: val-scrutiny)',
+      'would keep .tower/worktrees/val-ms1-user-testing-r1 (uncommitted changes — rerun with force to remove)',
+    ]);
+    expect(await store.teardown({ liveAgentIds })).toEqual([
+      'already removed .tower/worktrees/wt-1',
+      'removed .tower/worktrees/val-ms1-commands-r1',
+      'kept .tower/worktrees/val-ms1-scrutiny-r1 (live agent: val-scrutiny)',
+      'kept .tower/worktrees/val-ms1-user-testing-r1 (uncommitted changes — rerun with force to remove)',
+    ]);
+    expect(await store.teardown({ force: true, exclude: [live.worktree] })).toEqual([
+      'already removed .tower/worktrees/wt-1',
+      'kept .tower/worktrees/val-ms1-scrutiny-r1 (excluded)',
+      'removed .tower/worktrees/val-ms1-user-testing-r1',
+    ]);
+    const worktrees = await git(repo, 'worktree', 'list');
+    expect(worktrees).toContain(live.worktree);
+    expect(worktrees).not.toContain(dirty.worktree);
+    expect(worktrees).not.toContain(idle.worktree);
+  });
+});

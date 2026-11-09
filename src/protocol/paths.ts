@@ -4,6 +4,7 @@ export const INBOX_DIR = `${COMMS_DIR}/inbox`;
 export const FINDINGS_DIR = `${COMMS_DIR}/findings`;
 export const REVIEWS_DIR = `${COMMS_DIR}/reviews`;
 export const MISSIONS_DIR = `${COMMS_DIR}/missions`;
+export const VALIDATIONS_DIR = `${COMMS_DIR}/validations`;
 export const LOG_DIR = `${COMMS_DIR}/log`;
 export const WORKTREES_DIR = `${TOWER_ROOT}/worktrees`;
 export const AGENTS_DIR = `${TOWER_ROOT}/agents`;
@@ -75,6 +76,21 @@ export function reviewFileName(input: {
   readonly round: number;
 }): string {
   return `review-${targetSlug(input.target)}-${slugify(input.reviewer, 30)}-r${input.round}.md`;
+}
+
+export function validationFileName(input: {
+  readonly milestone: string;
+  readonly kind: string;
+  readonly validator: string;
+  readonly round: number;
+}): string {
+  return `validation-${slugify(input.milestone, 20)}-${slugify(input.kind, 20)}-${slugify(input.validator, 30)}-r${input.round}.md`;
+}
+
+export const VALIDATION_WORKTREE_PREFIX = 'val-';
+
+export function validationWorktreeName(milestone: string, kind: string, round: number): string {
+  return `${VALIDATION_WORKTREE_PREFIX}${slugify(milestone, 20)}-${slugify(kind, 20)}-r${round}`;
 }
 
 export function missionFileName(id: string, slug: string): string {
