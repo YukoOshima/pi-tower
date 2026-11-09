@@ -1286,6 +1286,19 @@ describe('objective command completions and help', () => {
     expect(towerCommandCompletions('pause ')).toBeNull();
   });
 
+  it('names validators among the agents /tower agents lists and /tower stop stops', () => {
+    expect(TOWER_COMMAND_USAGE).toContain('\n/tower agents — list the background workers, reviewers and validators\n');
+    expect(TOWER_COMMAND_USAGE).toContain(
+      '\n/tower stop <agent> — stop a running worker, reviewer or validator (a human stop: it is never resumed)\n',
+    );
+    expect(towerCommandCompletions('agents')).toEqual([
+      { value: 'agents', label: 'agents', description: 'List the background workers, reviewers and validators and their status' },
+    ]);
+    expect(towerCommandCompletions('stop')).toEqual([
+      { value: 'stop', label: 'stop', description: 'Stop a running worker, reviewer or validator (a human stop: it is never resumed)' },
+    ]);
+  });
+
   it('documents the objective commands in the usage', () => {
     for (const line of [
       '/tower objective [--headless] <text | @file> — ',
