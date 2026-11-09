@@ -678,3 +678,124 @@ table('completion', [
   },
   { name: 'an objective without milestones does nothing', snap: snapshot({ objective: { milestones: [] } }), actions: [] },
 ]);
+
+function settled(
+  snap: AutopilotSnapshot,
+  quietMs: number,
+  memory: Partial<AutopilotSnapshot['memory']> = {},
+): AutopilotSnapshot {
+  return {
+    ...snap,
+    memory: { ...snap.memory, progressKey: computeProgressKey(snap), progressAt: NOW - quietMs, ...memory },
+  };
+}
+
+const QUIET = snapshot({ missions: [working('M1', { worker: IDLE })] });
+const QUIET_KEY = computeProgressKey(QUIET);
+const MANUAL_PENDING = snapshot({ settings: { autopilot: false }, missions: [working('M1', { worker: IDLE }), feature('M2')] });
+
+table('stall watchdog', [
+  { name: 'a quiet, unchanged objective wakes after stallTimeoutMs', snap: settled(QUIET, 180_000), actions: [wakeOf('stalled', 'O1', `${QUIET_KEY}#1`)] },
+  { name: 'quiet for less than stallTimeoutMs is not a stall', snap: settled(QUIET, 179_999), actions: [] },
+  { name: 'a live agent is not a stall', snap: settled(snapshot({ missions: [working('M1')] }), 999_999), actions: [] },
+  { name: 'a busy orchestrator is not a stall', snap: settled({ ...QUIET, orchestratorBusy: true }, 999_999), actions: [] },
+  {
+    name: 'an in-flight commands run is not a stall',
+    snap: settled({ ...QUIET, validators: [{ milestone: 'MS1', kind: 'commands', commit: BASE }] }, 999_999),
+    actions: [],
+  },
+  {
+    name: 'a due action is not a stall',
+    snap: settled(snapshot({ missions: [working('M1', { worker: IDLE }), feature('M2')] }), 999_999),
+    actions: [spawn('M2')],
+  },
+  { name: 'each stall wake has its own key', snap: settled(QUIET, 180_000, { stallWakes: 2 }), actions: [wakeOf('stalled', 'O1', `${QUIET_KEY}#3`)] },
+  { name: 'maxStallWakes stall wakes without progress block the objective', snap: settled(QUIET, 180_000, { stallWakes: 3 }), actions: [blockOf('stalled')] },
+  { name: 'a stall wake already sent is not resent', snap: settled(QUIET, 180_000, { wakeKeys: [`stalled:O1:${QUIET_KEY}#1`] }), actions: [] },
+  {
+    name: 'manual mode stalls when the orchestrator leaves the mechanics undone',
+    snap: settled(MANUAL_PENDING, 180_000),
+    actions: [wakeOf('stalled', 'O1', `${computeProgressKey(MANUAL_PENDING)}#1`)],
+  },
+]);
+
+describe('stall bookkeeping', () => {
+  it.each([
+    {
+      name: 'a changed progress key restarts the clock and the stall count',
+      snap: { ...QUIET, memory: { progressKey: 'older', progressAt: NOW - 999_999, stallWakes: 2, wakeKeys: [] } },
+      stall: { progressAt: NOW, idleMs: 0, stalled: false, stallWakes: 0 },
+    },
+    { name: 'the first tick counts as progress', snap: QUIET, stall: { progressAt: NOW, idleMs: 0, stalled: false, stallWakes: 0 } },
+    { name: 'a quiet tick keeps the clock', snap: settled(QUIET, 100_000, { stallWakes: 1 }), stall: { progressAt: NOW - 100_000, idleMs: 100_000, stalled: false, stallWakes: 1 } },
+    { name: 'activity restarts the clock but keeps the count', snap: settled({ ...QUIET, orchestratorBusy: true }, 500_000, { stallWakes: 1 }), stall: { progressAt: NOW, idleMs: 0, stalled: false, stallWakes: 1 } },
+    { name: 'a stall wake restarts the clock and counts', snap: settled(QUIET, 200_000), stall: { progressAt: NOW, idleMs: 200_000, stalled: true, stallWakes: 1 } },
+    {
+      name: 'a suppressed stall wake still counts as sent',
+      snap: settled(QUIET, 200_000, { wakeKeys: [`stalled:O1:${QUIET_KEY}#1`] }),
+      stall: { progressAt: NOW, idleMs: 200_000, stalled: true, stallWakes: 1 },
+    },
+    { name: 'the stall block keeps the count', snap: settled(QUIET, 200_000, { stallWakes: 3 }), stall: { progressAt: NOW - 200_000, idleMs: 200_000, stalled: true, stallWakes: 3 } },
+    {
+      name: 'a non-executing objective rests the clock',
+      snap: settled(snapshot({ objective: { status: 'paused' } }), 999_999, { stallWakes: 2 }),
+      stall: { progressAt: NOW, idleMs: 0, stalled: false, stallWakes: 2 },
+    },
+  ])('$name', ({ snap, stall }) => {
+    expect(decideAutopilot(snap).stall).toEqual(stall);
+  });
+
+  it('returns the progress key of the snapshot', () => {
+    expect(decideAutopilot(QUIET).progressKey).toBe(QUIET_KEY);
+  });
+});
+
+describe('computeProgressKey', () => {
+  const base = snapshot({
+    reviewCount: 2,
+    inboxCount: 5,
+    missions: [working('M1'), merged('M2')],
+    objective: { milestones: [milestone('MS1', 1, { status: 'validating', rounds: [round('scrutiny', 1, BASE, 'fail'), round('user-testing', 1, BASE, 'pass')] })] },
+  });
+  const key = computeProgressKey(base);
+  const objective = base.objective!;
+  const ms1 = objective.milestones[0]!;
+
+  it('is a short deterministic hex digest', () => {
+    expect(key).toMatch(/^[0-9a-f]{16}$/);
+    expect(computeProgressKey(base)).toBe(key);
+  });
+
+  it('ignores the input order of missions and rounds', () => {
+    const reordered: AutopilotSnapshot = {
+      ...base,
+      missions: [...base.missions].reverse(),
+      objective: { ...objective, milestones: [{ ...ms1, rounds: [...ms1.rounds].reverse() }] },
+    };
+    expect(computeProgressKey(reordered)).toBe(key);
+  });
+
+  it.each([
+    ['a mission status', { missions: [working('M1', { status: 'completed' }), merged('M2')] }],
+    ['a branch tip', { missions: [working('M1', { tip: 'tip-M1b' }), merged('M2')] }],
+    ['a new mission', { missions: [...base.missions, feature('M3')] }],
+    ['the base tip', { baseTip: 'base-9' }],
+    ['the review count', { reviewCount: 3 }],
+    ['the inbox count', { inboxCount: 6 }],
+    ['a new validation round', { objective: { ...objective, milestones: [{ ...ms1, rounds: [...ms1.rounds, round('scrutiny', 2, BASE, 'pass')] }] } }],
+    ['a milestone status', { objective: { ...objective, milestones: [{ ...ms1, status: 'failed' as const }] } }],
+  ] as Array<[string, Partial<AutopilotSnapshot>]>)('changes with %s', (_label, patch) => {
+    expect(computeProgressKey({ ...base, ...patch })).not.toBe(key);
+  });
+
+  it.each([
+    ['the clock', { now: NOW + 1 }],
+    ['worker liveness', { missions: [working('M1', { worker: IDLE }), merged('M2')] }],
+    ['the orchestrator', { orchestratorBusy: true }],
+    ['the memory', { memory: { progressKey: 'x', progressAt: 1, stallWakes: 2, wakeKeys: ['k'] } }],
+    ['running validators', { validators: [{ milestone: 'MS1', kind: 'scrutiny' as const, commit: BASE }] }],
+    ['gate observations', { missions: [working('M1', { gate: { ready: false, blocks: ['stale-base'] } }), merged('M2')] }],
+  ] as Array<[string, Partial<AutopilotSnapshot>]>)('ignores %s', (_label, patch) => {
+    expect(computeProgressKey({ ...base, ...patch })).toBe(key);
+  });
+});
