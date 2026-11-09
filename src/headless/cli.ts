@@ -1,6 +1,6 @@
 import { readFileSync, statSync } from 'node:fs';
 
-import { HEADLESS_USAGE, parseHeadlessArgs, type HeadlessRunOptions } from './args.ts';
+import { HEADLESS_SYNOPSIS, HEADLESS_USAGE, parseHeadlessArgs, type HeadlessRunOptions } from './args.ts';
 import { PiRpcClient } from './rpc.ts';
 import { HEADLESS_EXIT, runHeadless, type HeadlessClock, type HeadlessDeps, type HeadlessOutput, type HeadlessSignal } from './runner.ts';
 import { readHeadlessSnapshot } from './state.ts';
@@ -98,7 +98,7 @@ export async function main(argv: readonly string[], deps: HeadlessDeps = headles
       deps.output.info(packageVersion());
       return HEADLESS_EXIT.completed;
     case 'error':
-      deps.output.error(`pi-tower: ${parsed.message}\nRun pi-tower --help for usage.`);
+      deps.output.error(`pi-tower: ${parsed.message}\n${HEADLESS_SYNOPSIS}\nRun pi-tower --help for all options.`);
       return HEADLESS_EXIT.startup;
     case 'run': {
       const problem = preflight(parsed.options);
