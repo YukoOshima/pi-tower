@@ -247,7 +247,7 @@ The autopilot:
 - starts a worker for each feature of the current milestone whose dependencies are merged or abandoned, up to `maxRunningAgents`;
 - spawns a reviewer for each review request on the current branch tip;
 - resumes an idle worker that received review findings or has a rebase conflict to resolve;
-- nudges a worker that stopped without finishing its feature (no `TowerComplete`, no blocker, no message) to finish it or say what blocks it, once per branch tip;
+- nudges a worker that went idle before finishing its feature (it neither called `TowerComplete` nor reported a blocker) to finish it or say what blocks it, once per branch tip;
 - replaces a worker that failed or timed out with a fresh one on the same branch, up to `maxFeatureAttempts` workers per feature, but never a worker you stopped;
 - rebases stale branches and merges the branches that pass the gate;
 - starts validation: it spawns the validators and runs the commands;
@@ -260,7 +260,7 @@ The orchestrator is woken only for judgment, with one of these reasons:
 - `validation-failed`: plan fix features from the failures;
 - `blocker`: a worker reported a blocker or asked a question;
 - `feature-attempts-exhausted`: a feature used up its worker attempts;
-- `worker-idle`: a worker stopped again without finishing after it was nudged;
+- `worker-idle`: a worker went idle again without finishing after it was nudged;
 - `merge-blocked`: the merge gate is blocked for a reason that needs judgment, such as files outside the feature's scope;
 - `rebase-conflict`: a conflict that no worker can take over;
 - `review-stuck` and `validation-stuck`: reviewers or validators keep ending without a result;
@@ -552,7 +552,7 @@ Line by line:
 - Validators of an objective use the same vendor's model with thinking `xhigh`, for slower and more thorough checks.
 - The pool adds one extra model, `fast`. The tower uses it only for a spawn you explicitly ask it for.
 - At most 4 agents run at the same time, and each run is stopped after one hour.
-- An objective pauses after 4 hours or once it has cost $40, whichever comes first, and the orchestrator is woken after 5 quiet minutes instead of 3.
+- An objective pauses 4 hours after its first approval or once it has cost $40, whichever comes first, and the orchestrator is woken after 5 quiet minutes instead of 3.
 
 Replace the model ids with ones your pi can use. `pi --list-models` lists them.
 
@@ -587,7 +587,7 @@ The optional `objective` object tunes [objective mode](#objective-mode). Every k
 | Key | Value | Default | What it does |
 | --- | --- | --- | --- |
 | `autopilot` | `true` or `false` | `true` | The autopilot drives feature execution. `false` selects [manual mode](#autopilot-and-orchestrator). |
-| `autoApprove` | `true` or `false` | `false` | Approves every plan automatically, recorded as an automatic approval. Keep it off for interactive use; see [Known limitations](#known-limitations). |
+| `autoApprove` | `true` or `false` | `false` | Approves plans automatically, recorded as an automatic approval. A contract changed while the objective was blocked or paused still needs a human. Keep it off for interactive use; see [Known limitations](#known-limitations). |
 | `maxValidationRounds` | Positive integer | `3` | Failed rounds of one validation kind after which the milestone and the objective block |
 | `maxFeatureAttempts` | Positive integer | `3` | Worker spawns per feature. It also caps the reviewers per branch tip and the validators per milestone, kind and commit that may end without a result before the orchestrator is woken. |
 | `watchdogIntervalMs` | Positive integer, at most 2147483647 | `60000` (1 minute) | How often the watchdog checks the objective |

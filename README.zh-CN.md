@@ -247,7 +247,7 @@ autopilot 会：
 - 为当前里程碑中依赖已合并或已放弃的每个 feature 启动 worker，数量上限为 `maxRunningAgents`；
 - 为 branch 当前最新提交上的每个 review 请求派发 reviewer；
 - 恢复收到 review 意见或需要解决 rebase 冲突的空闲 worker；
-- 当 worker 没有完成 feature 就停下（没有调用 `TowerComplete`，没有报告 blocker，也没有发消息）时，提醒它完成任务或说明受阻原因，每个 branch 最新提交只提醒一次；
+- 当 worker 在完成 feature 之前就空闲下来（既没有调用 `TowerComplete`，也没有报告 blocker）时，提醒它完成任务或说明受阻原因，每个 branch 最新提交只提醒一次；
 - 用同一 branch 上的新 worker 替换失败或超时的 worker，每个 feature 最多 `maxFeatureAttempts` 个 worker，但绝不替换你停止的 worker；
 - rebase 落后的 branch，合并通过检查的 branch；
 - 启动验证：派发 validator 并运行命令；
@@ -260,7 +260,7 @@ autopilot 会：
 - `validation-failed`：根据失败项规划修复 feature；
 - `blocker`：某个 worker 报告了 blocker 或提出了问题；
 - `feature-attempts-exhausted`：某个 feature 用完了 worker 尝试次数；
-- `worker-idle`：worker 被提醒之后，再次没有完成就停下；
+- `worker-idle`：worker 被提醒之后，再次没有完成就空闲下来；
 - `merge-blocked`：合并检查因需要判断的原因而受阻，例如改动了 feature 范围之外的文件；
 - `rebase-conflict`：没有 worker 能接手的冲突；
 - `review-stuck` 和 `validation-stuck`：reviewer 或 validator 一再没有给出结果就结束；
@@ -552,7 +552,7 @@ pi-tower 从 `tower.json` 读取配置。下面是 [`examples/tower.json`](examp
 - objective 的 validator 使用同一家厂商的模型，思考等级为 `xhigh`，检查得更慢、更彻底。
 - 模型池额外提供一个模型 `fast`。只有你明确要求时，Tower 才会在某次派发中使用它。
 - 最多同时运行 4 个 Agent，每次运行最长一小时。
-- objective 运行 4 小时后，或者花费达到 40 美元时（以先到者为准）会暂停；连续 5 分钟没有进展（而不是默认的 3 分钟）才会唤醒 orchestrator。
+- objective 在首次批准 4 小时后，或者花费达到 40 美元时（以先到者为准）会暂停；连续 5 分钟没有进展（而不是默认的 3 分钟）才会唤醒 orchestrator。
 
 请把模型 id 换成你的 pi 可以使用的模型，`pi --list-models` 会列出它们。
 
@@ -587,7 +587,7 @@ pi-tower 从 `tower.json` 读取配置。下面是 [`examples/tower.json`](examp
 | 配置项 | 取值 | 默认值 | 作用 |
 | --- | --- | --- | --- |
 | `autopilot` | `true` 或 `false` | `true` | 由 autopilot 驱动 feature 的执行。设为 `false` 即为[手动模式](#autopilot-与-orchestrator)。 |
-| `autoApprove` | `true` 或 `false` | `false` | 自动批准每一份计划，记录为自动批准。交互使用时请保持关闭，见[已知限制](#已知限制)。 |
+| `autoApprove` | `true` 或 `false` | `false` | 自动批准计划，记录为自动批准。如果契约是在 objective 被阻塞或暂停期间修改的，仍然需要人工批准。交互使用时请保持关闭，见[已知限制](#已知限制)。 |
 | `maxValidationRounds` | 正整数 | `3` | 某类验证的失败轮数达到这个值时，里程碑和 objective 会被阻塞 |
 | `maxFeatureAttempts` | 正整数 | `3` | 每个 feature 最多派发几次 worker。它也限制没有给出结果就结束的 reviewer 数量（按 branch 最新提交计）和 validator 数量（按里程碑、验证类型和 commit 计），达到上限后会唤醒 orchestrator。 |
 | `watchdogIntervalMs` | 正整数，最大 2147483647 | `60000`（1 分钟） | 看门狗检查 objective 的间隔 |
