@@ -307,3 +307,115 @@ describe('approval after a contract change while blocked or paused', () => {
     expect(await rawState()).not.toContain('approvalRequiresHuman');
   });
 });
+
+describe('contract revisions on roster entries and validation results', () => {
+  function validator(name: string, commit: string, extra: Readonly<Record<string, unknown>> = {}) {
+    return {
+      name,
+      agentId: `agent-${name}`,
+      kind: 'validator' as const,
+      milestoneId: 'MS1',
+      validationKind: 'scrutiny' as const,
+      validatedCommit: commit,
+      spawnedAt: SPAWNED_AT,
+      ...extra,
+    };
+  }
+
+  it('requires the briefed revision from both registration paths once the contract changed', async () => {
+    const tip = await validatingMilestone();
+    await store.updateObjective({ definitionOfDone: ['works', 'documented'] });
+    await store.approveObjective('human');
+    const before = await rawState();
+    const missing =
+      /validator "v-1" must state the contract revision it was briefed under \(contractRevision\) — objective O1 is at revision 1, and a round is stamped with the contract its validator checked/;
+    await expect(store.registerAgent(validator('v-1', tip))).rejects.toThrow(missing);
+    await expect(store.registerSpawnedAgent(validator('v-1', tip))).rejects.toThrow(missing);
+    await expect(store.registerSpawnedAgent(validator('v-1', tip, { contractRevision: 2 }))).rejects.toThrow(
+      /briefed under contract revision 2, but objective O1 is at revision 1/,
+    );
+    expect(await rawState()).toBe(before);
+
+    await store.registerSpawnedAgent(validator('v-1', tip, { contractRevision: 1 }));
+    expect((await readState()).roster.agents.at(-1)).toMatchObject({ name: 'v-1', contractRevision: 1 });
+  });
+
+  it('type-checks a given revision even before the contract changed, and omits revision 0', async () => {
+    const tip = await validatingMilestone();
+    const before = await rawState();
+    for (const [bad, shown] of [
+      ['0', '"0"'],
+      [1.5, '1.5'],
+      [-1, '-1'],
+      [null, 'null'],
+    ] as const) {
+      await expect(store.registerAgent(validator('v-bad', tip, { contractRevision: bad }))).rejects.toThrow(
+        `validator "v-bad" contractRevision must be the non-negative integer revision it was briefed under, got ${shown}`,
+      );
+    }
+    expect(await rawState()).toBe(before);
+
+    await store.registerAgent(validator('v-zero', tip, { contractRevision: 0 }));
+    await store.registerAgent({ ...validator('v-none', tip), validationKind: 'user-testing' });
+    expect(await rawState()).not.toContain('contractRevision');
+  });
+
+  it('never keeps a revision on worker or reviewer entries', async () => {
+    await draftWithFeature();
+    await store.updateObjective({ goal: 'ship it twice' });
+    await store.registerSpawnedAgent(
+      { name: 'w-1', agentId: 'agent-w-1', kind: 'worker', missionId: 'M1', contractRevision: 1, spawnedAt: SPAWNED_AT },
+      { id: 'M1', owner: 'w-1' },
+    );
+    await store.registerAgent({ name: 'w-2', agentId: 'agent-w-2', kind: 'worker', missionId: 'M1', contractRevision: 1, spawnedAt: SPAWNED_AT });
+    await store.registerAgent({ name: 'r-1', agentId: 'agent-r-1', kind: 'reviewer', reviewTarget: 'feat/core-feature', contractRevision: 1, spawnedAt: SPAWNED_AT });
+    const state = await readState();
+    expect(state.objective!.contractRevision).toBe(1);
+    expect(state.roster.agents.map((agent) => [agent.name, 'contractRevision' in agent])).toEqual([
+      ['w-1', false],
+      ['w-2', false],
+      ['r-1', false],
+    ]);
+  });
+
+  it('says a round stamped under an older revision does not decide the milestone', async () => {
+    const tip = await validatingMilestone();
+    await registerValidator('v-old', 'scrutiny', tip);
+    await registerValidator('v-old-qa', 'user-testing', tip);
+    await store.updateObjective({ definitionOfDone: ['works', 'documented'] });
+    const stale =
+      'This round was recorded but does not decide the milestone: it checked contract revision 0, and objective O1 is now at revision 1 — only a round under the current contract counts.';
+
+    const passed = await report('v-old', 'scrutiny', 'pass');
+    expect(passed.milestone.status).toBe('validating');
+    expect(passed.message?.item.body).toContain(stale);
+
+    const failed = await report('v-old-qa', 'user-testing', 'fail');
+    expect(failed.milestone.status).toBe('validating');
+    expect(failed.message?.item.body).toContain(`${stale}\n\nFailures:\n- user-testing broke`);
+    expect(failed.message?.item.subject).toBe('validation MS1 user-testing r1: fail (1 failure)');
+
+    await store.approveObjective('human');
+    await registerValidator('v-new', 'scrutiny', tip, 1);
+    const current = await report('v-new', 'scrutiny', 'pass');
+    expect(current.message?.item.body).not.toContain('does not decide the milestone');
+  });
+
+  it('tells the worker to finish with TowerComplete after a rebase conflict', async () => {
+    const [mission] = await store.plan([{ title: 'Shared work', scope: ['src/x/**'] }]);
+    await store.addWorktree(mission!.worktree, mission!.branch, 'main');
+    const worktree = store.abs(join('.tower/worktrees', mission!.worktree));
+    await commitFile(worktree, 'src/x/shared.ts', 'from branch\n', 'branch work');
+    await store.updateMission('tower', mission!.id, { status: 'completed' }, { silent: true });
+    await commitFile(repo, 'src/x/shared.ts', 'from base\n', 'base touches the same file');
+
+    expect((await store.rebaseMission('tower', mission!.id)).status).toBe('conflict');
+
+    const blocker = (await readState()).missions[0]!.blockers.join('\n');
+    expect(blocker).toMatch(/^tower rebase onto main conflicted in: src\/x\/shared\.ts — /);
+    expect(blocker).toContain(
+      'Re-run your tests, then clear this blocker (TowerMission clear_blockers) and finish with TowerComplete, which requests the fresh review — a worker-run rebase is not covered by the clean-rebase waiver',
+    );
+    expect(blocker).not.toContain('TowerSend');
+  });
+});

@@ -1035,7 +1035,8 @@ export function applyValidationRound(
     status,
     counted:
       (previousStatus === 'validating' || previousStatus === 'failed') &&
-      round.validatedCommit === milestone.validationCommit,
+      round.validatedCommit === milestone.validationCommit &&
+      roundContractRevision(round) === contractRevisionOf(objective),
     objectiveBlocked,
   };
 }
