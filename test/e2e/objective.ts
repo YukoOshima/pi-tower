@@ -238,10 +238,6 @@ export function autopilotEntries(repo: string, action?: string): LogEntry[] {
   return logEntries(repo).filter((entry) => entry.actor === 'autopilot' && (action === undefined || entry.action === action));
 }
 
-export function towerEntries(repo: string, action: string): LogEntry[] {
-  return logEntries(repo).filter((entry) => entry.action === action);
-}
-
 export function validationFileFields(repo: string): { readonly name: string; readonly fields: Record<string, string>; readonly text: string }[] {
   return validationFiles(repo).map((file) => ({ name: file.name, fields: frontmatter(file.text), text: file.text }));
 }
@@ -358,12 +354,4 @@ export function isAncestor(repo: string, ancestor: string, descendant: string): 
   } catch {
     return false;
   }
-}
-
-export function notificationTexts(rpc: PiRpc, fromIndex = 0): string[] {
-  return rpc.noticesSince(fromIndex).map((notice) => notice.text);
-}
-
-export function customTexts(rpc: PiRpc, customType: string, fromIndex = 0): string[] {
-  return rpc.customMessages(customType, fromIndex).map((message) => message.text);
 }

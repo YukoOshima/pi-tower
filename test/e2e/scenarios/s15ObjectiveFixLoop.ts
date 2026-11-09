@@ -12,6 +12,7 @@ import {
   ObjectiveTrace,
   planToApproval,
   recordObjectiveUsage,
+  validationFileFields,
   waitForObjective,
   writeText,
 } from '../objective.ts';
@@ -268,6 +269,19 @@ function assertFixLoop(ctx: ScenarioContext, repo: string, state: TowerState, tr
       commandsRounds.every((round) => round.validator === 'tower') &&
       new Set(scrutinyRounds.map((agent) => agent.validationRound)).size === scrutinyRounds.length,
     validators.map((agent) => `${agent.name}: kind=${agent.kind} milestone=${String(agent.milestoneId)} validation=${String(agent.validationKind)} r${String(agent.validationRound)} on ${String(agent.validatedCommit?.slice(0, 7))} model=${String(agent.model)}`),
+  );
+
+  const files = validationFileFields(repo);
+  const fileLines = ms1.rounds.map((round) => {
+    const file = files.find((candidate) => candidate.name === basename(round.file));
+    const fields = file?.fields ?? {};
+    const ok = fields.milestone === ms1.id && fields.kind === round.kind && fields.validator === round.validator && fields.round === String(round.round) && fields.verdict === round.verdict && fields.validatedCommit === round.validatedCommit;
+    return { ok, line: `${file?.name ?? `(missing ${round.file})`}: ${fields.kind ?? '?'} r${fields.round ?? '?'} ${fields.verdict ?? '?'} by ${fields.validator ?? '?'} on ${(fields.validatedCommit ?? '?').slice(0, 7)}` };
+  });
+  report.check(
+    'every validation round has its validation file, with frontmatter matching state.json',
+    fileLines.length >= 4 && fileLines.every((entry) => entry.ok) && files.length === fileLines.length,
+    fileLines.map((entry) => entry.line),
   );
 
   const usage = tryGit(repo, ['show', `main:${DELIVERABLE}`]);
