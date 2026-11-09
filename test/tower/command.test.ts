@@ -841,9 +841,12 @@ describe('/tower objective', () => {
     expect((await h.run('objective again')).errors).toEqual([
       refusal('awaiting-approval', 'approve its plan with /tower approve, or ask the tower to change it'),
     ]);
-    await store.approveObjective('human');
+    await store.approveObjective('auto');
     expect((await h.run('objective again')).errors).toEqual([
-      refusal('executing', 'pause it with /tower pause, or ask the tower to block it first'),
+      refusal(
+        'executing',
+        'let the fleet finish it, ask the tower to block it, or wait until it completes or blocks — pausing does not help: a paused objective is refused too',
+      ),
     ]);
     await store.pauseObjective('lunch');
     expect((await h.run('objective again')).errors).toEqual([
@@ -1002,12 +1005,82 @@ describe('/tower approve, pause and resume', () => {
     await store.updateObjective({ definitionOfDone: ['works', 'documented'] });
     const refused = await h.run('approve --auto');
     expect(refused.errors).toEqual([
-      'Approval failed — objective O1 changed its contract while it was blocked or paused, so only a human can approve it — auto-approval stays refused until a human approves',
+      'Approval failed — objective O1 changed its contract while it was blocked or paused, so only a human can approve it — auto-approval stays refused until a human approves [human-approval-required]',
     ]);
     expect((await h.run('approve')).notices[0]?.title).toBe('Objective O1 approved — executing');
     expect((await h.run('approve now')).errors).toEqual([
       "Usage: /tower approve [--auto] — approve the objective's plan; --auto records an automatic approval",
     ]);
+  });
+
+  async function headlessAwaitingApproval(h: Harness): Promise<TowerStore> {
+    await h.run('on');
+    await h.run('objective --headless Ship it');
+    const store = new TowerStore(h.repo);
+    await store.draftObjective({ title: 'Ship', goal: 'ship it', definitionOfDone: ['works'], milestones: [{ title: 'Core' }] });
+    await store.plan([{ title: 'Core work', scope: ['src/core/**'], milestone: 'MS1' }]);
+    await store.requestObjectiveApproval();
+    return store;
+  }
+
+  it('keeps a headless objective headless through --auto and a tower restart, and a human resume makes it interactive', async () => {
+    const h = await harness();
+    const store = await headlessAwaitingApproval(h);
+
+    expect((await h.run('approve --auto')).errors).toEqual([]);
+    await h.run('off');
+    await h.run('on');
+    expect(await readTowerState(h.repo)).toMatchObject({ objectiveMode: 'headless', objectiveModeFor: 'O1' });
+
+    await store.pauseObjective('budget: maxCostUsd reached');
+    expect((await h.run('resume')).errors).toEqual([]);
+    expect(await readTowerState(h.repo)).toMatchObject({
+      objectiveMode: 'interactive',
+      objectiveModeFor: 'O1',
+      objective: { status: 'executing' },
+    });
+  });
+
+  it('makes a headless objective interactive when the human approves it', async () => {
+    const h = await harness();
+    await headlessAwaitingApproval(h);
+
+    const approved = await h.run('approve');
+
+    expect(approved.errors).toEqual([]);
+    expect(await readTowerState(h.repo)).toMatchObject({
+      objectiveMode: 'interactive',
+      objectiveModeFor: 'O1',
+      objective: { status: 'executing', approvedBy: 'human' },
+    });
+  });
+
+  it('does not hand headless to an objective drafted after a finished one without a fresh /tower objective', async () => {
+    const h = await harness();
+    const store = await headlessAwaitingApproval(h);
+    await h.run('approve --auto');
+    await store.blockObjective('cannot converge');
+
+    await store.draftObjective({ title: 'Next', goal: 'next', definitionOfDone: ['done'], milestones: [{ title: 'Again' }] });
+
+    const state = await readTowerState(h.repo);
+    expect(state.objective?.id).toBe('O2');
+    expect('objectiveMode' in state).toBe(false);
+    expect('objectiveModeFor' in state).toBe(false);
+  });
+
+  it('leaves a workspace without an objective byte-identical when approve, pause and resume are refused', async () => {
+    const h = await harness();
+    await new TowerStore(h.repo).init(SESSION_ID, 'main');
+    await h.run('on');
+    const before = await readFile(join(h.repo, STATE_FILE), 'utf8');
+
+    for (const args of ['approve', 'approve --auto', 'pause', 'resume']) {
+      expect((await h.run(args)).errors, args).toHaveLength(1);
+    }
+
+    expect(await readFile(join(h.repo, STATE_FILE), 'utf8')).toBe(before);
+    expect(before).not.toContain('objective');
   });
 
   it('reports a failing autopilot tick, skips the tick while tower mode is off, and works without hooks', async () => {
@@ -1211,6 +1284,28 @@ describe('objective command completions and help', () => {
     expect(towerCommandCompletions('objective --headless ')).toBeNull();
     expect(towerCommandCompletions('approve ')).toEqual([{ value: 'approve --auto', label: '--auto' }]);
     expect(towerCommandCompletions('pause ')).toBeNull();
+  });
+
+  it('names the validator among the roles /tower models shows and sets', () => {
+    expect(TOWER_COMMAND_USAGE).toContain(
+      '\n/tower models [<role|alias> <provider/model[:thinking]>|<role|alias> --clear] [--project] — show or set the orchestrator, worker, reviewer and validator models\n',
+    );
+    expect(towerCommandCompletions('models')).toEqual([
+      { value: 'models', label: 'models', description: 'Show or set the orchestrator, worker, reviewer and validator models' },
+    ]);
+  });
+
+  it('names validators among the agents /tower agents lists and /tower stop stops', () => {
+    expect(TOWER_COMMAND_USAGE).toContain('\n/tower agents — list the background workers, reviewers and validators\n');
+    expect(TOWER_COMMAND_USAGE).toContain(
+      '\n/tower stop <agent> — stop a running worker, reviewer or validator (a human stop: it is never resumed)\n',
+    );
+    expect(towerCommandCompletions('agents')).toEqual([
+      { value: 'agents', label: 'agents', description: 'List the background workers, reviewers and validators and their status' },
+    ]);
+    expect(towerCommandCompletions('stop')).toEqual([
+      { value: 'stop', label: 'stop', description: 'Stop a running worker, reviewer or validator (a human stop: it is never resumed)' },
+    ]);
   });
 
   it('documents the objective commands in the usage', () => {

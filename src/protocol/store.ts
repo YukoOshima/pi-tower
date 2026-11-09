@@ -54,6 +54,7 @@ import {
   applyValidationRound,
   buildObjective,
   canPlanObjective,
+  claimObjectiveMode,
   contractRevisionOf,
   currentMilestone,
   estimateObjectiveRuns,
@@ -71,9 +72,12 @@ import {
   nextValidationRound,
   objectiveApprovalProblems,
   planPlacement,
+  releaseObjectiveMode,
   requiredValidationKinds,
   roundContractRevision,
   sortedMilestones,
+  takeOverObjectiveMode,
+  TOWER_HUMAN_APPROVAL_MARKER,
   TOWER_OBJECTIVE_MODES,
   TOWER_VALIDATION_KINDS,
   TowerObjectiveCompletionError,
@@ -1348,6 +1352,7 @@ export class TowerStore {
         state.objectiveHistory = [...(state.objectiveHistory ?? []), previous];
       }
       state.objective = objective;
+      const dropped = claimObjectiveMode(state, objective.id);
       await this.saveObjective(state, 'objective.draft', {
         id: objective.id,
         milestones:
@@ -1355,7 +1360,9 @@ export class TowerStore {
             ? objective.milestones.map((milestone) => milestone.id).join(',')
             : undefined,
         archived: previous?.id,
+        mode: state.objectiveMode,
       });
+      await this.logObjectiveMode(objective.id, dropped, undefined);
       return objective;
     });
   }
@@ -1391,11 +1398,13 @@ export class TowerStore {
       }
       this.assertApprovable(state, objective, 'request approval');
       objective.status = 'awaiting-approval';
+      const dropped = claimObjectiveMode(state, objective.id);
       const estimatedRuns = estimateObjectiveRuns(state);
       await this.saveObjective(state, 'objective.request-approval', {
         id: objective.id,
         estimated_runs: estimatedRuns,
       });
+      await this.logObjectiveMode(objective.id, dropped, undefined);
       return { objective, estimatedRuns };
     });
   }
@@ -1414,7 +1423,7 @@ export class TowerStore {
       }
       if (by === 'auto' && objective.approvalRequiresHuman === true) {
         throw new TowerProtocolError(
-          `objective ${objective.id} changed its contract while it was blocked or paused, so only a human can approve it — auto-approval stays refused until a human approves`,
+          `objective ${objective.id} changed its contract while it was blocked or paused, so only a human can approve it — auto-approval stays refused until a human approves ${TOWER_HUMAN_APPROVAL_MARKER}`,
         );
       }
       this.assertApprovable(state, objective, 'be approved');
@@ -1426,11 +1435,13 @@ export class TowerStore {
       delete objective.approvalReason;
       delete objective.approvalRequiresHuman;
       const activated = this.activateCurrentMilestoneLocked(objective, now);
+      const replaced = by === 'human' ? takeOverObjectiveMode(state, objective.id) : undefined;
       await this.saveObjective(state, 'objective.approve', {
         id: objective.id,
         by,
         activated: activated?.id,
       });
+      await this.logObjectiveMode(objective.id, replaced, 'interactive');
       return objective;
     });
   }
@@ -1477,12 +1488,14 @@ export class TowerStore {
         objective.autopilot.stallWakes = 0;
         objective.autopilot.progressAt = new Date().toISOString();
       }
+      const replaced = takeOverObjectiveMode(state, objective.id);
       await this.saveObjective(state, 'objective.resume', {
         id: objective.id,
         from,
         status: objective.status,
         reopened: reopened.length > 0 ? reopened.join(',') : undefined,
       });
+      await this.logObjectiveMode(objective.id, replaced, 'interactive');
       return objective;
     });
   }
@@ -1501,7 +1514,9 @@ export class TowerStore {
       objective.status = 'blocked';
       objective.blockedReason = trimmed;
       delete objective.pausedReason;
+      const released = releaseObjectiveMode(state, objective.id);
       await this.saveObjective(state, 'objective.block', { id: objective.id, reason: trimmed });
+      await this.logObjectiveMode(objective.id, released, undefined);
       return objective;
     });
   }
@@ -1521,10 +1536,12 @@ export class TowerStore {
       }
       objective.status = 'completed';
       objective.completedAt = new Date().toISOString();
+      const released = releaseObjectiveMode(state, objective.id);
       await this.saveObjective(state, 'objective.complete', {
         id: objective.id,
         base_tip: baseTip.slice(0, 7),
       });
+      await this.logObjectiveMode(objective.id, released, undefined);
       return objective;
     });
   }
@@ -1681,17 +1698,33 @@ export class TowerStore {
     await this.withStateLock(async () => {
       const state = await this.load();
       const objective = state.objective;
-      if (objective !== undefined && !canPlanObjective(objective)) {
+      const open = objective !== undefined && !canPlanObjective(objective) ? objective : undefined;
+      if (open !== undefined && mode === 'headless') {
         throw new TowerProtocolError(
-          `objective ${objective.id} is ${objective.status} — the objective mode is chosen while an objective is planned, so it changes only when no objective is open or the open one is still planning`,
+          `objective ${open.id} is ${open.status} — headless mode is chosen while an objective is planned, so it is set only when no objective is open or the open one is still planning; switching to interactive is allowed at any time`,
         );
       }
-      if (state.objectiveMode === mode) return;
+      if (state.objectiveMode === mode && state.objectiveModeFor === open?.id) return;
       const from = state.objectiveMode;
       state.objectiveMode = mode;
+      if (open === undefined) delete state.objectiveModeFor;
+      else state.objectiveModeFor = open.id;
       await this.save(state);
-      await this.appendLog(TOWER_NAME, 'objective.mode', { mode, from });
+      await this.appendLog(TOWER_NAME, 'objective.mode', {
+        mode,
+        from: from === mode ? undefined : from,
+        objective: open?.id,
+      });
     });
+  }
+
+  private async logObjectiveMode(
+    objectiveId: string,
+    from: TowerObjectiveMode | undefined,
+    mode: TowerObjectiveMode | undefined,
+  ): Promise<void> {
+    if (from === undefined) return;
+    await this.appendLog(TOWER_NAME, 'objective.mode', { mode: mode ?? 'none', from, objective: objectiveId });
   }
 
   private async resolveCommit(commit: string): Promise<string> {
@@ -3687,6 +3720,7 @@ export class TowerStore {
         ...(stamp.contractRevision > 0 ? { contractRevision: stamp.contractRevision } : {}),
       };
       const outcome = applyValidationRound(objective, milestone, record, settings);
+      const released = outcome.objectiveBlocked ? releaseObjectiveMode(state, objective.id) : undefined;
       await this.save(state);
       await this.renderMissionsIndex(state);
       let activityLogError: string | undefined;
@@ -3705,6 +3739,7 @@ export class TowerStore {
           },
           file,
         );
+        await this.logObjectiveMode(objective.id, released, undefined);
       } catch (error) {
         activityLogError = `validation ${file} was stored, but appending its validation.submit activity log failed: ${error instanceof Error ? error.message : String(error)}`;
       }
@@ -3852,7 +3887,12 @@ export class TowerStore {
       }
       const path = this.abs(join(WORKTREES_DIR, worktree));
       await mkdir(this.abs(WORKTREES_DIR), { recursive: true });
-      await worktreeAddDetached(this.repoRoot, path, commit);
+      try {
+        await worktreeAddDetached(this.repoRoot, path, commit);
+      } catch (error) {
+        if (existsSync(path) || !(await this.pruneStaleValidationWorktree(worktree, path))) throw error;
+        await worktreeAddDetached(this.repoRoot, path, commit);
+      }
       await this.appendLog(TOWER_NAME, 'worktree.add', {
         worktree,
         milestone: milestone.id,
@@ -3861,6 +3901,12 @@ export class TowerStore {
       });
       return { worktree, path, commit, round };
     });
+  }
+
+  private async pruneStaleValidationWorktree(worktree: string, path: string): Promise<boolean> {
+    if ((await tryGit(this.repoRoot, ['worktree', 'remove', '--force', path])) === null) return false;
+    await this.appendLog(TOWER_NAME, 'worktree.prune', { worktree, reason: 'directory-missing' });
+    return true;
   }
 
   async removeValidationWorktree(worktree: string): Promise<boolean> {

@@ -36,9 +36,9 @@ export const TOWER_SUBCOMMANDS: readonly { readonly value: string; readonly desc
   { value: 'off', description: 'Turn tower mode off; agents keep running and .tower/ stays on disk' },
   { value: 'status', description: 'Show the tower dashboard without a model turn' },
   { value: 'teardown', description: 'Ask the tower to remove the finished mission worktrees' },
-  { value: 'models', description: 'Show or set the orchestrator, worker and reviewer models' },
-  { value: 'agents', description: 'List the background workers and reviewers and their status' },
-  { value: 'stop', description: 'Stop a running worker or reviewer (a human stop: it is never resumed)' },
+  { value: 'models', description: 'Show or set the orchestrator, worker, reviewer and validator models' },
+  { value: 'agents', description: 'List the background workers, reviewers and validators and their status' },
+  { value: 'stop', description: 'Stop a running worker, reviewer or validator (a human stop: it is never resumed)' },
   {
     value: 'objective',
     description: 'Start an objective the fleet works on until its validation contract is met, or show its status',
@@ -55,9 +55,9 @@ export const TOWER_COMMAND_USAGE = [
   '/tower or /tower status — show the tower dashboard without a model turn',
   '/tower teardown — ask the tower to remove the finished mission worktrees',
   '/tower <base-branch> — turn tower mode on with that local branch as the base (a missing branch is created from HEAD)',
-  '/tower models [<role|alias> <provider/model[:thinking]>|<role|alias> --clear] [--project] — show or set the orchestrator, worker and reviewer models',
-  '/tower agents — list the background workers and reviewers',
-  '/tower stop <agent> — stop a running worker or reviewer (a human stop: it is never resumed)',
+  '/tower models [<role|alias> <provider/model[:thinking]>|<role|alias> --clear] [--project] — show or set the orchestrator, worker, reviewer and validator models',
+  '/tower agents — list the background workers, reviewers and validators',
+  '/tower stop <agent> — stop a running worker, reviewer or validator (a human stop: it is never resumed)',
   '/tower objective [--headless] <text | @file> — hand an objective to the tower: it plans milestones and features (with you, or without questions when --headless), you approve, and the fleet works until every milestone passes validation',
   '/tower objective status — show the objective dashboard',
   "/tower approve [--auto] — approve the objective's plan (--auto records an automatic approval)",
@@ -513,7 +513,7 @@ function openObjectiveRefusal(objective: TowerObjective): string {
       ? 'approve its plan with /tower approve, or ask the tower to change it'
       : objective.status === 'paused'
         ? 'continue it with /tower resume, or ask the tower to block it first'
-        : 'pause it with /tower pause, or ask the tower to block it first';
+        : 'let the fleet finish it, ask the tower to block it, or wait until it completes or blocks — pausing does not help: a paused objective is refused too';
   return `Objective ${objective.id} "${objective.title}" is ${objective.status} — /tower objective plans a new objective only when none is open or the open one is still planning. See it with /tower objective status; ${next}.`;
 }
 

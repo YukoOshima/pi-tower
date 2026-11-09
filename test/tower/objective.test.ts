@@ -679,8 +679,26 @@ describe('autopilot observations', () => {
     await settle();
 
     expect(h.runtime.disposed).toEqual([validator]);
-    expect(h.controller.autopilotAgent(validator)).toEqual({ status: 'completed' });
+    expect(h.controller.autopilotAgent(validator)).toEqual({ status: 'completed', lastAssistantText: 'pass' });
     expect(h.controller.autopilotAgent('agent-from-a-previous-session')).toBeUndefined();
+  });
+
+  it("passes the agent's last assistant text so the autopilot can quote what the agent said last", async () => {
+    const h = await harness();
+    const worker = await launch(h, 'w-quiet');
+    const silent = await launch(h, 'w-silent');
+
+    h.runtime.finish(worker, 'idle', { summary: 'The migration needs a database URL — which one should I use?' });
+    h.runtime.finish(silent, 'idle');
+
+    expect(h.controller.autopilotAgent(worker)).toEqual({
+      status: 'idle',
+      lastAssistantText: 'The migration needs a database URL — which one should I use?',
+    });
+    expect(towerAutopilotObservations(h.controller).agent(worker)).toMatchObject({
+      lastAssistantText: 'The migration needs a database URL — which one should I use?',
+    });
+    expect(h.controller.autopilotAgent(silent)).toEqual({ status: 'idle' });
   });
 
   it('reports unknown, never running, when the process has no agent runtime', async () => {

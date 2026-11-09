@@ -24,6 +24,7 @@ export const TOWER_VALIDATION_KINDS: readonly TowerValidationKind[] = [
   'commands',
 ];
 export const TOWER_OBJECTIVE_MODES: readonly TowerObjectiveMode[] = ['interactive', 'headless'];
+export const TOWER_HUMAN_APPROVAL_MARKER = '[human-approval-required]';
 
 export interface TowerValidationSettings {
   readonly skipScrutiny?: boolean;
@@ -107,6 +108,34 @@ export function isObjectiveOpen(objective: TowerObjective | undefined): boolean 
 
 export function canPlanObjective(objective: TowerObjective | undefined): boolean {
   return !isObjectiveOpen(objective) || objective?.status === 'planning';
+}
+
+export function claimObjectiveMode(state: TowerState, objectiveId: string): TowerObjectiveMode | undefined {
+  const mode = state.objectiveMode;
+  if (mode === undefined || state.objectiveModeFor === objectiveId) return undefined;
+  if (state.objectiveModeFor === undefined) {
+    state.objectiveModeFor = objectiveId;
+    return undefined;
+  }
+  delete state.objectiveMode;
+  delete state.objectiveModeFor;
+  return mode;
+}
+
+export function releaseObjectiveMode(state: TowerState, objectiveId: string): TowerObjectiveMode | undefined {
+  const mode = state.objectiveMode;
+  if (mode === undefined || state.objectiveModeFor !== objectiveId) return undefined;
+  delete state.objectiveMode;
+  delete state.objectiveModeFor;
+  return mode;
+}
+
+export function takeOverObjectiveMode(state: TowerState, objectiveId: string): TowerObjectiveMode | undefined {
+  const mode = state.objectiveMode;
+  if (mode === undefined) return undefined;
+  state.objectiveMode = 'interactive';
+  state.objectiveModeFor = objectiveId;
+  return mode === 'interactive' ? undefined : mode;
 }
 
 function isOpenFeature(mission: Pick<TowerMission, 'status'>): boolean {

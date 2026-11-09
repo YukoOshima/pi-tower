@@ -40,7 +40,8 @@ export const HEADLESS_USAGE = [
   '  0  objective completed',
   '  1  objective blocked or paused, or pi exited after the run started',
   '  2  timeout',
-  '  3  the plan needs approval (re-run with --auto-approve, or /tower approve in pi)',
+  '  3  the plan needs approval (re-run with --auto-approve, or /tower approve in pi; a plan changed while',
+  '     blocked or paused needs a human /tower approve)',
   '  4  usage or startup error',
   '  130 / 143  interrupted by SIGINT / SIGTERM (pi is stopped first)',
 ].join('\n');
