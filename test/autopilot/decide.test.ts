@@ -1379,7 +1379,9 @@ table('features attached to the objective', [
   },
 ]);
 
-const silentValidators = (ms: string, kind: Kind, commit: string, attempts: number) => [{ milestone: ms, kind, commit, attempts }];
+const silentValidators = (ms: string, kind: Kind, commit: string, attempts: number, humanStopped = false) => [
+  { milestone: ms, kind, commit, attempts, humanStopped },
+];
 
 table('loop guard for agents that end without submitting', [
   {
@@ -1441,6 +1443,60 @@ table('loop guard for agents that end without submitting', [
     snap: snapshot({
       baseTip: 'base-1',
       validationAttempts: silentValidators('MS2', 'scrutiny', 'base-1', 3),
+      objective: { milestones: [PASSED_MS1, FINAL_PASSED] },
+      missions: ALL_MERGED,
+    }),
+    actions: [validate('MS2', 'base-1', ['user-testing']), wakeOf('validation-stuck', 'MS2:scrutiny', 'base-1')],
+  },
+]);
+
+const STOPPED_REVIEW = awaitingReview('M1', { reviewerAttemptsOnTip: 1, reviewerHumanStopped: true });
+
+table('reviewers and validators the human stopped', [
+  {
+    name: 'a reviewer the human stopped is never replaced and wakes the orchestrator',
+    snap: snapshot({ missions: [STOPPED_REVIEW] }),
+    actions: [wakeOf('review-stuck', 'M1', 'tip-M1')],
+  },
+  {
+    name: 'the human-stop review wake is sent once per tip',
+    snap: snapshot({ missions: [STOPPED_REVIEW], memory: { wakeKeys: ['review-stuck:M1:tip-M1'] } }),
+    actions: [],
+  },
+  {
+    name: 'manual mode reports a reviewer the human stopped too',
+    snap: snapshot({ settings: { autopilot: false }, missions: [STOPPED_REVIEW] }),
+    actions: [wakeOf('review-stuck', 'M1', 'tip-M1')],
+  },
+  {
+    name: 'a feature whose reviewer the human stopped is still rebased onto a moved base',
+    snap: snapshot({ missions: [{ ...STOPPED_REVIEW, gate: { ready: false, blocks: ['stale-base'] } }] }),
+    actions: [rebase('M1')],
+  },
+  {
+    name: 'a validator the human stopped is never replaced and wakes the orchestrator',
+    snap: snapshot({ validationAttempts: silentValidators('MS1', 'scrutiny', BASE, 1, true), missions: DONE_MS1 }),
+    actions: [validate('MS1', BASE, ['user-testing']), wakeOf('validation-stuck', 'MS1:scrutiny', BASE)],
+  },
+  {
+    name: 'the human-stop validation wake is sent once per commit',
+    snap: snapshot({
+      validationAttempts: silentValidators('MS1', 'scrutiny', BASE, 1, true),
+      missions: DONE_MS1,
+      memory: { wakeKeys: [`validation-stuck:MS1:scrutiny:${BASE}`] },
+    }),
+    actions: [validate('MS1', BASE, ['user-testing'])],
+  },
+  {
+    name: 'a validator the human stopped on an older commit does not hold the new commit',
+    snap: snapshot({ validationAttempts: silentValidators('MS1', 'scrutiny', 'base-old', 1, true), missions: DONE_MS1 }),
+    actions: [validate('MS1', BASE, ['scrutiny', 'user-testing'])],
+  },
+  {
+    name: 'a final re-validation the human stopped wakes too',
+    snap: snapshot({
+      baseTip: 'base-1',
+      validationAttempts: silentValidators('MS2', 'scrutiny', 'base-1', 1, true),
       objective: { milestones: [PASSED_MS1, FINAL_PASSED] },
       missions: ALL_MERGED,
     }),

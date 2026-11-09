@@ -32,6 +32,7 @@ export function feature(id: string, overrides: Partial<AutopilotMission> = {}): 
     reviewRequestOnTip: false,
     reviewerRunning: false,
     reviewerAttemptsOnTip: 0,
+    reviewerHumanStopped: false,
     gate: { ready: false, blocks: ['not-completed'] },
     rebaseConflict: false,
     blockers: [],

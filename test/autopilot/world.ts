@@ -133,6 +133,7 @@ export class World {
       reviewRequestOnTip: feature.reviewRequested,
       reviewerRunning: feature.reviewerRunning,
       reviewerAttemptsOnTip: 0,
+      reviewerHumanStopped: false,
       ...(review === undefined ? {} : { latestReviewOnTip: review }),
       gate: this.gate(feature),
       rebaseConflict: false,

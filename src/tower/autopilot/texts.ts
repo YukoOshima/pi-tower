@@ -42,13 +42,15 @@ import {
   type StuckAgentAttempt,
 } from '../../prompts/objectiveWakes.ts';
 import {
+  humanStoppedReviewer,
+  humanStoppedValidator,
   isRebaseConflictBlocker,
   missionReviewerEntries,
   missionWorkerEntries,
   validationSettings,
   type AutopilotWorld,
 } from './snapshot.ts';
-import type { AutopilotRuntimeSettings } from './types.ts';
+import type { AutopilotRuntimeSettings, AutopilotValidatorKind } from './types.ts';
 
 const RECENT_ATTEMPTS = 3;
 const WORKER_TEXT_MAX_CHARS = 1_500;
@@ -165,6 +167,11 @@ function quotedTail(text: string, limit: number): string {
     .join('\n');
 }
 
+function featureLabel(mission: Pick<TowerMission, 'id' | 'title' | 'branch' | 'milestone'>): string {
+  const details = [...(mission.milestone === undefined ? [] : [`milestone ${mission.milestone}`]), `branch ${mission.branch}`];
+  return `feature ${mission.id} "${mission.title}" (${details.join(', ')})`;
+}
+
 export function workerIdleWake(input: {
   readonly mission: Pick<TowerMission, 'id' | 'title' | 'branch' | 'milestone'>;
   readonly worker: string;
@@ -173,7 +180,6 @@ export function workerIdleWake(input: {
   readonly nudged: boolean;
 }): string {
   const { mission, worker } = input;
-  const details = [...(mission.milestone === undefined ? [] : [`milestone ${mission.milestone}`]), `branch ${mission.branch}`];
   const lastText = input.lastText?.trim() ?? '';
   const situation = input.nudged
     ? ' A worker of this feature was already resumed once on this tip with a reminder to finish, report a blocker or ask — the autopilot does not resume the feature again until its tip moves.'
@@ -181,7 +187,7 @@ export function workerIdleWake(input: {
       ? ''
       : ' With the autopilot off, nobody resumes it unless you do.';
   return [
-    `worker-idle: worker ${worker} on feature ${mission.id} "${mission.title}" (${details.join(', ')}) is idle without TowerComplete, a blocker or an unanswered message, and the feature is still active.${situation}`,
+    `worker-idle: worker ${worker} on ${featureLabel(mission)} is idle without TowerComplete, a blocker or an unanswered message, and the feature is still active.${situation}`,
     lastText.length > 0
       ? `Its last message:\n${quotedTail(lastText, WORKER_TEXT_MAX_CHARS)}`
       : `Its last message is not available here — read it with TowerTaskOutput(agent="${worker}").`,
@@ -191,6 +197,46 @@ export function workerIdleWake(input: {
       `- It is stuck, confused or going in circles → reassign the feature: spawn a fresh worker with TowerSpawn(kind="worker", mission_id="${mission.id}") and instructions that name the problem — or, when the feature itself is ill-posed, abandon it with TowerMission(id="${mission.id}", status="abandoned") and re-plan it with TowerPlan.`,
       `- Only the human can unblock it → record a blocker with TowerMission(id="${mission.id}", blocker="...") or block the objective with TowerObjective(action="block", reason).`,
     ].join('\n'),
+  ].join('\n\n');
+}
+
+export function reviewerStoppedWake(input: {
+  readonly mission: Pick<TowerMission, 'id' | 'title' | 'branch' | 'milestone'>;
+  readonly reviewer: string;
+  readonly tip?: string;
+}): string {
+  const { mission, reviewer } = input;
+  return [
+    `review-stuck: the human stopped reviewer ${reviewer} of ${featureLabel(mission)}${input.tip === undefined ? '' : ` on tip ${input.tip.slice(0, 7)}`} before it submitted a review. The review waits: the autopilot never replaces an agent the human stopped.`,
+    [
+      'Ask the human how to continue, then act only on the answer:',
+      `- review it after all → spawn a fresh reviewer with TowerSpawn(kind="reviewer", review_target="${mission.branch}") under a new name;`,
+      '- rework it first → tell the worker what to change with TowerSend, or TowerResume when it is idle; its next TowerComplete gets a fresh review;',
+      `- drop or re-plan it → abandon ${mission.id} with TowerMission(id="${mission.id}", status="abandoned") and plan replacement features with TowerPlan;`,
+      '- stop here → block the objective with TowerObjective(action="block", reason).',
+    ].join('\n'),
+    'Never spawn a replacement reviewer on your own. In a headless run nobody can answer: block the objective and name the stopped reviewer.',
+  ].join('\n\n');
+}
+
+export function validatorStoppedWake(input: {
+  readonly objective: Pick<TowerObjective, 'id' | 'title'>;
+  readonly milestone: Pick<TowerMilestone, 'id' | 'title'>;
+  readonly kind: AutopilotValidatorKind;
+  readonly validator: string;
+  readonly commit: string;
+}): string {
+  const { milestone, kind } = input;
+  return [
+    `validation-stuck: the human stopped validator ${input.validator} before it submitted a verdict — the ${kind} validation of milestone ${milestone.id} "${milestone.title}" on ${input.commit.slice(0, 7)} waits (objective ${input.objective.id} "${input.objective.title}"). The autopilot never replaces an agent the human stopped.`,
+    [
+      'Ask the human how to continue, then act only on the answer:',
+      `- validate after all → spawn a fresh validator with TowerSpawn(kind="validator", milestone="${milestone.id}", validation_kind="${kind}") under a new name;`,
+      `- fix something first → plan a fix feature with TowerPlan(milestone="${milestone.id}", origin="fix"); the validation runs again once it merges;`,
+      "- change the milestone → TowerObjective(action=\"update\"); a contract change needs the human's approval again;",
+      '- stop here → block the objective with TowerObjective(action="block", reason).',
+    ].join('\n'),
+    'Never start a replacement validator on your own. In a headless run nobody can answer: block the objective and name the stopped validator.',
   ].join('\n\n');
 }
 
@@ -379,6 +425,14 @@ export function orchestratorWakeText(
     case 'review-stuck': {
       if (mission === undefined) return fallbackWake(wake);
       const observed = snapshot.missions.find((candidate) => candidate.id === mission.id);
+      const stopped = observed?.reviewerHumanStopped === true ? humanStoppedReviewer(world, mission, observed.tip) : undefined;
+      if (stopped !== undefined) {
+        return reviewerStoppedWake({
+          mission,
+          reviewer: stopped.name,
+          ...(wake.revision === '-' ? {} : { tip: wake.revision }),
+        });
+      }
       return reviewStuckWake({
         feature: mission,
         ...(wake.revision === '-' ? {} : { tip: wake.revision }),
@@ -392,9 +446,16 @@ export function orchestratorWakeText(
       const milestone = findMilestone(objective, wake.subject.slice(0, separator));
       const kind = wake.subject.slice(separator + 1);
       if (milestone === undefined || (kind !== 'scrutiny' && kind !== 'user-testing')) return fallbackWake(wake);
-      const attempts = snapshot.validationAttempts
-        .filter((entry) => entry.milestone === milestone.id && entry.kind === kind && entry.commit === wake.revision)
-        .reduce((sum, entry) => sum + entry.attempts, 0);
+      const entries = snapshot.validationAttempts.filter(
+        (entry) => entry.milestone === milestone.id && entry.kind === kind && entry.commit === wake.revision,
+      );
+      const stopped = entries.some((entry) => entry.humanStopped)
+        ? humanStoppedValidator(world, milestone.id, kind, wake.revision)
+        : undefined;
+      if (stopped !== undefined) {
+        return validatorStoppedWake({ objective, milestone, kind, validator: stopped.name, commit: wake.revision });
+      }
+      const attempts = entries.reduce((sum, entry) => sum + entry.attempts, 0);
       return validationStuckWake({
         objective,
         milestone,

@@ -86,6 +86,17 @@ export function validationAttemptsOn(
   return attempts;
 }
 
+export function validationStoppedOn(
+  snapshot: AutopilotSnapshot,
+  milestoneId: string,
+  kind: AutopilotValidationKind,
+  commit: string,
+): boolean {
+  return snapshot.validationAttempts.some(
+    (entry) => entry.milestone === milestoneId && entry.kind === kind && entry.commit === commit && entry.humanStopped,
+  );
+}
+
 export function isClosed(mission: AutopilotMission): boolean {
   return mission.status === 'merged' || mission.status === 'abandoned';
 }

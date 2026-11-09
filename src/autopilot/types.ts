@@ -143,6 +143,8 @@ export interface AutopilotMission {
   readonly reviewerRunning: boolean;
   /** Reviewers spawned for the current tip that ended without submitting a review. */
   readonly reviewerAttemptsOnTip: number;
+  /** The human stopped the latest reviewer of the current tip before it reviewed: autopilot never replaces it. */
+  readonly reviewerHumanStopped: boolean;
   /** Latest review stamped on the current tip (or carried over by a clean-rebase waiver). */
   readonly latestReviewOnTip?: AutopilotReviewVerdict;
   readonly gate: AutopilotGate;
@@ -169,6 +171,8 @@ export interface AutopilotValidationAttempts {
   readonly kind: AutopilotValidationKind;
   readonly commit: string;
   readonly attempts: number;
+  /** The human stopped the latest of these validators: autopilot never replaces it. */
+  readonly humanStopped: boolean;
 }
 
 export interface AutopilotMemory {

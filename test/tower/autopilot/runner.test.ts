@@ -773,6 +773,64 @@ describe('duplicate launch guard', () => {
   });
 });
 
+describe('agents the human stopped', () => {
+  const calls = (tower: FakeTower, effect: string): string[] => tower.calls.filter((call) => call.startsWith(effect));
+
+  async function reviewing(): Promise<ReturnType<typeof setup>> {
+    await draft();
+    await store.approveObjective('human');
+    const harness = setup();
+    await settle(harness.runner);
+    await harness.tower.actAll();
+    await settle(harness.runner);
+    expect(calls(harness.tower, 'spawnReviewer')).toEqual(['spawnReviewer M1 ap-r-M1-1']);
+    return harness;
+  }
+
+  it('a reviewer the human stopped is never replaced: the orchestrator is woken once instead', async () => {
+    const { runner, tower } = await reviewing();
+    Object.assign(tower.agents.get('agent-ap-r-M1-1')!, { status: 'stopped', stopReason: 'user' });
+    await settle(runner);
+    await settle(runner);
+    expect(calls(tower, 'spawnReviewer')).toEqual(['spawnReviewer M1 ap-r-M1-1']);
+    expect(tower.wakes).toHaveLength(1);
+    expect(tower.wakes[0]).toMatch(
+      /^review-stuck: the human stopped reviewer ap-r-M1-1 of feature M1 "Core A" \(milestone MS1, branch feat\/core-a\) on tip [0-9a-f]{7} before it submitted a review\. The review waits: the autopilot never replaces an agent the human stopped\./,
+    );
+    expect(tower.wakes[0]).toContain('TowerSpawn(kind="reviewer", review_target="feat/core-a") under a new name');
+    expect(tower.wakes[0]).toContain('Never spawn a replacement reviewer on your own.');
+    const tip = await git(repo, 'rev-parse', 'feat/core-a');
+    expect((await objectiveOf()).autopilot?.wakeKeys).toContain(`review-stuck:M1:${tip}`);
+  });
+
+  it('a reviewer that failed is still replaced while attempts remain', async () => {
+    const { runner, tower } = await reviewing();
+    Object.assign(tower.agents.get('agent-ap-r-M1-1')!, { status: 'failed', stopReason: 'provider crashed' });
+    await settle(runner);
+    expect(calls(tower, 'spawnReviewer')).toEqual(['spawnReviewer M1 ap-r-M1-1', 'spawnReviewer M1 ap-r-M1-2']);
+    expect(tower.wakes).toEqual([]);
+  });
+
+  it('a validator the human stopped is never replaced: the orchestrator is woken once instead', async () => {
+    await draft({ scrutiny: true });
+    await store.approveObjective('human');
+    await store.updateMission('tower', 'M1', { status: 'abandoned' });
+    const { runner, tower } = setup();
+    await settle(runner);
+    expect(calls(tower, 'spawnValidator')).toEqual(['spawnValidator MS1 scrutiny ap-v-MS1-scrutiny-1']);
+    Object.assign(tower.agents.get('agent-ap-v-MS1-scrutiny-1')!, { status: 'stopped', stopReason: 'user' });
+    await settle(runner);
+    await settle(runner);
+    expect(calls(tower, 'spawnValidator')).toEqual(['spawnValidator MS1 scrutiny ap-v-MS1-scrutiny-1']);
+    expect(tower.wakes).toHaveLength(1);
+    expect(tower.wakes[0]).toMatch(
+      /^validation-stuck: the human stopped validator ap-v-MS1-scrutiny-1 before it submitted a verdict — the scrutiny validation of milestone MS1 "Core" on [0-9a-f]{7} waits \(objective O1 "Ship"\)\. The autopilot never replaces an agent the human stopped\./,
+    );
+    expect(tower.wakes[0]).toContain('TowerSpawn(kind="validator", milestone="MS1", validation_kind="scrutiny") under a new name');
+    expect(tower.wakes[0]).toContain('Never start a replacement validator on your own.');
+  });
+});
+
 describe('terminal objectives the runner did not end itself', () => {
   it('notifies the human once when the orchestrator blocks the objective', async () => {
     await draft();
