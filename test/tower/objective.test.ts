@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import type {
+  BeforeAgentStartEvent,
   MessageEndEvent,
   SessionStartEvent,
   ToolDefinition,
@@ -14,7 +15,12 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { FakeSession, assistantMessage } from '../runtime/fakeSession.ts';
 
 import { TOWER_OBJECTIVE_DEFAULTS } from '../../src/config/index.ts';
-import { TOWER_VALIDATOR_ROLE, TOWER_WORKER_ROLE } from '../../src/prompts/index.ts';
+import {
+  TOWER_MODE_FULL_REMINDER,
+  TOWER_OBJECTIVE_HEADLESS_PLAYBOOK,
+  TOWER_VALIDATOR_ROLE,
+  TOWER_WORKER_ROLE,
+} from '../../src/prompts/index.ts';
 import {
   ACTIVITY_LOG,
   STATE_FILE,
@@ -27,6 +33,7 @@ import { createTowerSpawnTool } from '../../src/tools/spawn/spawnTool.ts';
 import { ORCHESTRATOR_CALLER } from '../../src/tools/support.ts';
 import { createTowerAgentRuntime } from '../../src/tower/agentRuntime.ts';
 import { towerAutopilotEffects } from '../../src/tower/autopilotHost.ts';
+import { commandUi, handleTowerCommand, type TowerCommandDeps } from '../../src/tower/command.ts';
 import {
   TOWER_AGENT_NOTIFICATION_MESSAGE,
   TOWER_AUTOPILOT_WAKE_MESSAGE,
@@ -859,5 +866,77 @@ describe('validation worktrees', () => {
     expect(existsSync(prepared.path)).toBe(true);
     h.runtime.finish(agentId, 'idle');
     await vi.waitFor(() => expect(existsSync(prepared.path)).toBe(false));
+  });
+});
+
+describe('tower-mode reminders with an objective', () => {
+  function beforeStart(): BeforeAgentStartEvent {
+    return {
+      type: 'before_agent_start',
+      messageType: 'user',
+      prompt: 'go',
+      systemPrompt: '',
+      systemPromptOptions: {},
+    } as unknown as BeforeAgentStartEvent;
+  }
+
+  it('appends the playbook of the recorded objective mode, read from the store for the turn', async () => {
+    const h = await harness({
+      prepare: async (store) => {
+        await planningObjective(store);
+        await store.setObjectiveMode('headless');
+      },
+    });
+    await h.controller.enter();
+
+    const result = await h.controller.onBeforeAgentStart(beforeStart(), h.ctx.asContext);
+
+    expect(result?.message?.content).toBe(`${TOWER_MODE_FULL_REMINDER}\n\n${TOWER_OBJECTIVE_HEADLESS_PLAYBOOK}`);
+  });
+
+  it('keeps the plain reminder without an objective and when the workspace is not initialized', async () => {
+    const h = await harness();
+    await h.controller.enter();
+
+    const result = await h.controller.onBeforeAgentStart(beforeStart(), h.ctx.asContext);
+
+    expect(result?.message?.content).toBe(TOWER_MODE_FULL_REMINDER);
+  });
+});
+
+describe('the /tower objective command hooks', () => {
+  function hooks(controller: TowerController): TowerCommandDeps {
+    return {
+      sendUserMessage: () => undefined,
+      objective: {
+        autopilotTick: (reason) => controller.autopilotTick(reason),
+        objectiveSettings: () => controller.objectiveSettings(),
+      },
+    };
+  }
+
+  it('ticks the autopilot after approve and resume, and refreshes the limits from the configured settings', async () => {
+    const h = await harness({
+      config: { objective: { maxValidationRounds: 5, maxCostUsd: 20 } },
+      prepare: async (store) => {
+        await planningObjective(store);
+        await store.requestObjectiveApproval();
+      },
+    });
+    await h.controller.enter();
+    const ui = commandUi(h.ctx.asCommandContext);
+    const deps = hooks(h.controller);
+
+    await handleTowerCommand(h.controller, 'approve', h.ctx.asCommandContext, deps, ui);
+    await vi.waitFor(() => expect(h.autopilots[0]?.calls).toContain('tick approve'));
+    await handleTowerCommand(h.controller, 'pause checking the plan', h.ctx.asCommandContext, deps, ui);
+    await handleTowerCommand(h.controller, 'resume', h.ctx.asCommandContext, deps, ui);
+
+    await vi.waitFor(() => expect(h.autopilots[0]?.calls).toContain('tick resume'));
+    expect((await h.store.load()).objective).toMatchObject({
+      status: 'executing',
+      approvedBy: 'human',
+      limits: { maxValidationRounds: 5, maxCostUsd: 20 },
+    });
   });
 });

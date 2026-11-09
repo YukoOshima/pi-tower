@@ -521,13 +521,16 @@ export class TowerController implements TowerToolHost {
   }
 
   private async continueObjective(): Promise<void> {
-    let executing: boolean;
+    const state = await this.loadedState();
+    if (state?.objective?.status === 'executing') await this.autopilotTick('restart');
+  }
+
+  private async loadedState(): Promise<TowerState | undefined> {
     try {
-      executing = (await this.store().load()).objective?.status === 'executing';
+      return await this.store().load();
     } catch {
-      return;
+      return undefined;
     }
-    if (executing) await this.autopilotTick('restart');
   }
 
   async enter(base?: string): Promise<TowerEnterResult> {
@@ -689,16 +692,18 @@ export class TowerController implements TowerToolHost {
     ]);
   }
 
-  onBeforeAgentStart(
+  async onBeforeAgentStart(
     event: BeforeAgentStartEvent,
     ctx: ExtensionContext,
-  ): BeforeAgentStartEventResult | undefined {
+  ): Promise<BeforeAgentStartEventResult | undefined> {
     this.observe(ctx);
     if (this.active) this.activateTowerTools();
+    const state = this.active ? await this.loadedState() : undefined;
     const reminder = selectReminderForContext(
       this.active,
       ctx.sessionManager.buildContextEntries(),
       event.messageType === 'user' ? 'user' : 'custom',
+      state,
     );
     if (reminder === undefined) return undefined;
     return {

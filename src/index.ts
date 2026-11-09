@@ -62,6 +62,10 @@ export default function towerExtension(pi: ExtensionAPI): void {
             pi.sendUserMessage(text, options);
           },
           models: (words, modelsUi) => handleTowerModelsCommand(controller, words, ctx, modelsUi),
+          objective: {
+            autopilotTick: (reason) => controller.autopilotTick(reason),
+            objectiveSettings: () => controller.objectiveSettings(),
+          },
         },
         ui,
       );
