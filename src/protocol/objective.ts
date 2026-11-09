@@ -70,6 +70,7 @@ export interface TowerMilestoneProgress {
   readonly kinds: readonly TowerValidationKindProgress[];
   readonly validationCommit?: string;
   readonly validationStale: boolean;
+  readonly failedOnTip: readonly TowerValidationKind[];
   readonly readyForValidation: boolean;
 }
 
@@ -200,6 +201,19 @@ export function milestonePassesOn(
   );
 }
 
+export function failedRoundsOn(
+  objective: TowerObjective,
+  milestone: TowerMilestone,
+  commit: string,
+  settings: TowerValidationSettings = {},
+): TowerValidationRound[] {
+  return requiredValidationKinds(objective, milestone, settings).flatMap((kind) =>
+    milestone.rounds.filter(
+      (round) => round.kind === kind && round.verdict === 'fail' && round.validatedCommit === commit,
+    ),
+  );
+}
+
 export function latestFailingKinds(
   objective: TowerObjective,
   milestone: TowerMilestone,
@@ -260,6 +274,9 @@ function milestoneProgress(
   const features = milestoneMissions(state, milestone.id);
   const openFeatures = features.filter(isOpenFeature).map((mission) => mission.id);
   const required = requiredValidationKinds(objective, milestone, settings);
+  const failedOnTip = [
+    ...new Set(failedRoundsOn(objective, milestone, baseTip, settings).map((round) => round.kind)),
+  ];
   const kinds = TOWER_VALIDATION_KINDS.filter(
     (kind) => required.includes(kind) || milestone.rounds.some((round) => round.kind === kind),
   ).map(
@@ -292,8 +309,12 @@ function milestoneProgress(
       (milestone.status === 'validating' || milestone.status === 'passed') &&
       milestone.validationCommit !== undefined &&
       milestone.validationCommit !== baseTip,
+    failedOnTip,
     readyForValidation:
-      milestone.status === 'active' && features.length > 0 && openFeatures.length === 0,
+      milestone.status === 'active' &&
+      features.length > 0 &&
+      openFeatures.length === 0 &&
+      failedOnTip.length === 0,
   };
 }
 

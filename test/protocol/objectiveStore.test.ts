@@ -1341,7 +1341,15 @@ describe('restarting a validation', () => {
       `milestone MS1 already failed scrutiny r1 on the base tip ${tip.slice(0, 7)} — a new validation needs a new base tip`,
     );
     expect(await snapshot()).toBe(before);
+    expect((await store.objectiveEvaluation()).milestones[0]).toMatchObject({
+      failedOnTip: ['scrutiny'],
+      readyForValidation: false,
+    });
     await commitFile(repo, 'src/fix/fix.ts', 'export const fixed = true;\n', 'fix merged');
+    expect((await store.objectiveEvaluation()).milestones[0]).toMatchObject({
+      failedOnTip: [],
+      readyForValidation: true,
+    });
     const fixed = await git(repo, 'rev-parse', 'main');
     expect((await store.startMilestoneValidation('MS1', fixed)).milestone).toMatchObject({
       status: 'validating',

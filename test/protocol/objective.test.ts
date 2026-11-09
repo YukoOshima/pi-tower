@@ -397,6 +397,27 @@ describe('evaluateObjective', () => {
     ]);
   });
 
+  it('is not ready for validation while a required kind already failed on the tip', () => {
+    const s = state(
+      objective({
+        milestones: [
+          milestone('MS1', 1, {
+            status: 'active',
+            validationCommit: C1,
+            rounds: [round('scrutiny', 1, 'fail'), round('scrutiny', 2, 'pass', C2)],
+          }),
+        ],
+      }),
+      [mission('M1', 'MS1', 'merged')],
+    );
+    expect(evaluateObjective(s, C1).milestones[0]).toMatchObject({ failedOnTip: ['scrutiny'], readyForValidation: false });
+    expect(evaluateObjective(s, C1, { skipScrutiny: true }).milestones[0]).toMatchObject({
+      failedOnTip: [],
+      readyForValidation: true,
+    });
+    expect(evaluateObjective(s, C2).milestones[0]).toMatchObject({ failedOnTip: [], readyForValidation: true });
+  });
+
   it('does not mark a milestone without features ready for validation', () => {
     const s = state(objective({ milestones: [milestone('MS1', 1, { status: 'active' })] }));
     expect(evaluateObjective(s, C1).milestones[0]!.readyForValidation).toBe(false);

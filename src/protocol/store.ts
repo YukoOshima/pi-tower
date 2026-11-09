@@ -56,6 +56,7 @@ import {
   currentMilestone,
   estimateObjectiveRuns,
   evaluateObjective,
+  failedRoundsOn,
   finalMilestone,
   finalPassBroken,
   findMilestone,
@@ -1566,10 +1567,8 @@ export class TowerStore {
           `final milestone ${milestone.id} already passed on the current base tip ${baseTip.slice(0, 7)} — it is validated again only after the base tip moves`,
         );
       }
-      const failedHere = requiredValidationKinds(objective, milestone, settings).flatMap((kind) =>
-        milestone.rounds
-          .filter((round) => round.kind === kind && round.verdict === 'fail' && round.validatedCommit === baseTip)
-          .map((round) => `${kind} r${String(round.round)}`),
+      const failedHere = failedRoundsOn(objective, milestone, baseTip, settings).map(
+        (round) => `${round.kind} r${String(round.round)}`,
       );
       if (failedHere.length > 0) {
         throw new TowerProtocolError(
