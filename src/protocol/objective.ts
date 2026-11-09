@@ -97,7 +97,7 @@ export function isTerminalObjectiveStatus(status: TowerObjectiveStatus): boolean
   return status === 'completed' || status === 'blocked';
 }
 
-export function isObjectiveOpen(objective: TowerObjective | undefined): objective is TowerObjective {
+export function isObjectiveOpen(objective: TowerObjective | undefined): boolean {
   return objective !== undefined && !isTerminalObjectiveStatus(objective.status);
 }
 
@@ -835,7 +835,7 @@ export function planPlacement(state: TowerState, item: TowerPlanPlacementInput):
         `mission "${item.title}" sets origin "${item.origin}" without a milestone — origin applies only to features planned into a milestone`,
       );
     }
-    if (isObjectiveOpen(objective) && (item.kind ?? 'build') === 'build') {
+    if (objective !== undefined && isObjectiveOpen(objective) && (item.kind ?? 'build') === 'build') {
       throw new TowerProtocolError(
         `objective ${objective.id} is ${objective.status} — build mission "${item.title}" must name the milestone it belongs to (milestones: ${describeMilestones(objective)}); plan it with milestone=<id>`,
       );

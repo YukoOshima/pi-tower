@@ -55,12 +55,14 @@ import {
   estimateObjectiveRuns,
   evaluateObjective,
   findMilestone,
+  isObjectiveOpen,
   isTerminalObjectiveStatus,
   milestoneMissions,
   objectiveApprovalProblems,
   planPlacement,
   requiredValidationKinds,
   sortedMilestones,
+  TOWER_VALIDATION_KINDS,
   TowerObjectiveCompletionError,
 } from './objective.ts';
 import type {
@@ -1048,8 +1050,9 @@ export class TowerStore {
   async registerAgent(entry: TowerRosterEntry): Promise<void> {
     await this.withStateLock(async () => {
       const state = await this.load();
-      this.registerAgentLocked(entry, state);
+      const attempted = this.registerAgentLocked(entry, state);
       await this.save(state);
+      if (attempted !== undefined) await this.renderMissionFile(attempted);
     });
   }
 
@@ -1059,9 +1062,10 @@ export class TowerStore {
   ): Promise<void> {
     await this.withStateLock(async () => {
       const state = await this.load();
-      this.registerAgentLocked(entry, state);
+      const attempted = this.registerAgentLocked(entry, state);
       if (mission === undefined) {
         await this.save(state);
+        if (attempted !== undefined) await this.renderMissionFile(attempted);
         return;
       }
       await this.updateMissionLocked(
@@ -1092,7 +1096,7 @@ export class TowerStore {
     });
   }
 
-  private registerAgentLocked(entry: TowerRosterEntry, state: TowerState): void {
+  private registerAgentLocked(entry: TowerRosterEntry, state: TowerState): TowerMission | undefined {
     if (entry.name.trim().length === 0 || entry.name.trim() !== entry.name) {
       throw new TowerProtocolError(
         `tower agent name "${entry.name}" must not be blank or carry surrounding whitespace`,
@@ -1103,6 +1107,7 @@ export class TowerStore {
         `tower agent name "${entry.name}" is reserved by the tower protocol — pick a different name`,
       );
     }
+    if (entry.kind === 'validator') this.assertValidatorRegistration(entry, state);
     for (let index = state.roster.agents.length - 1; index >= 0; index -= 1) {
       if (state.roster.agents[index]!.agentId === entry.agentId) {
         state.roster.agents.splice(index, 1);
@@ -1115,6 +1120,35 @@ export class TowerStore {
       ...entry,
       lastInboxReadAt: entry.lastInboxReadAt ?? entry.spawnedAt,
     });
+    if (entry.kind !== 'worker' || state.objective === undefined) return undefined;
+    const mission = state.missions.find((candidate) => candidate.id === entry.missionId);
+    if (mission === undefined) return undefined;
+    mission.attempts = (mission.attempts ?? 0) + 1;
+    return mission;
+  }
+
+  private assertValidatorRegistration(entry: TowerRosterEntry, state: TowerState): void {
+    if (entry.milestoneId === undefined || entry.validationKind === undefined) {
+      throw new TowerProtocolError(
+        `validator "${entry.name}" needs a milestone and a validation kind — a validator checks exactly one (milestone, kind, round)`,
+      );
+    }
+    if (!TOWER_VALIDATION_KINDS.includes(entry.validationKind)) {
+      throw new TowerProtocolError(
+        `validator "${entry.name}" validation kind must be ${TOWER_VALIDATION_KINDS.join(' | ')}, got "${String(entry.validationKind)}"`,
+      );
+    }
+    const objective = state.objective;
+    if (objective === undefined || !isObjectiveOpen(objective)) {
+      throw new TowerProtocolError(
+        `validator "${entry.name}" cannot be registered — there is no open objective${objective === undefined ? '' : ` (objective ${objective.id} is ${objective.status})`}`,
+      );
+    }
+    if (findMilestone(objective, entry.milestoneId) === undefined) {
+      throw new TowerProtocolError(
+        `validator "${entry.name}" names milestone "${entry.milestoneId}", which objective ${objective.id} does not have`,
+      );
+    }
   }
 
   async markAgentDied(

@@ -482,3 +482,71 @@ describe('plan with milestones', () => {
     );
   });
 });
+
+describe('roster with objectives', () => {
+  const spawnedAt = '2026-04-04T00:00:00.000Z';
+
+  it('registers a validator only for a milestone of the open objective', async () => {
+    const validator = {
+      name: 'val-ms1-scrutiny-r1',
+      agentId: 'agent-val-1',
+      kind: 'validator' as const,
+      spawnedAt,
+    };
+    await expect(store.registerAgent(validator)).rejects.toThrow(/needs a milestone and a validation kind/);
+    await expect(
+      store.registerAgent({ ...validator, milestoneId: 'MS1', validationKind: 'scrutiny' }),
+    ).rejects.toThrow(/there is no open objective$/);
+    await store.draftObjective({ title: 'Ship', milestones: [{ title: 'Core' }] });
+    await expect(
+      store.registerAgent({ ...validator, milestoneId: 'MS1', validationKind: 'lint' as 'scrutiny' }),
+    ).rejects.toThrow(/validation kind must be scrutiny \| user-testing \| commands, got "lint"/);
+    await expect(
+      store.registerAgent({ ...validator, milestoneId: 'MS7', validationKind: 'scrutiny' }),
+    ).rejects.toThrow(/names milestone "MS7", which objective O1 does not have/);
+    const tip = await git(repo, 'rev-parse', 'main');
+    await store.registerAgent({
+      ...validator,
+      milestoneId: 'MS1',
+      validationKind: 'scrutiny',
+      validationRound: 1,
+      validatedCommit: tip,
+      worktree: 'val-ms1-scrutiny-r1',
+    });
+    expect((await readState()).roster.agents).toEqual([
+      {
+        ...validator,
+        milestoneId: 'MS1',
+        validationKind: 'scrutiny',
+        validationRound: 1,
+        validatedCommit: tip,
+        worktree: 'val-ms1-scrutiny-r1',
+        lastInboxReadAt: spawnedAt,
+      },
+    ]);
+    await store.blockObjective('stop');
+    await expect(
+      store.registerAgent({ ...validator, name: 'val-2', agentId: 'agent-val-2', milestoneId: 'MS1', validationKind: 'user-testing' }),
+    ).rejects.toThrow(/no open objective \(objective O1 is blocked\)/);
+  });
+
+  it('counts worker spawns as mission attempts only while an objective exists', async () => {
+    const [plain] = await store.plan([{ title: 'Plain work', scope: ['src/plain/**'] }]);
+    await store.registerSpawnedAgent(
+      { name: 'w-plain', agentId: 'agent-plain', kind: 'worker', missionId: plain!.id, spawnedAt },
+      { id: plain!.id, owner: 'w-plain' },
+    );
+    expect(await readFile(store.abs(STATE_FILE), 'utf8')).not.toContain('attempts');
+    await store.draftObjective({ title: 'Ship', milestones: [{ title: 'Core' }] });
+    const [core] = await store.plan([{ title: 'Core work', scope: ['src/core/**'], milestone: 'MS1' }]);
+    await store.registerSpawnedAgent(
+      { name: 'w-core-1', agentId: 'agent-core-1', kind: 'worker', missionId: core!.id, spawnedAt },
+      { id: core!.id, owner: 'w-core-1' },
+    );
+    await store.registerAgent({ name: 'w-core-2', agentId: 'agent-core-2', kind: 'worker', missionId: core!.id, spawnedAt });
+    await store.registerAgent({ name: 'r-core', agentId: 'agent-r', kind: 'reviewer', reviewTarget: core!.branch, spawnedAt });
+    const state = await readState();
+    expect(state.missions.find((mission) => mission.id === core!.id)?.attempts).toBe(2);
+    expect(state.missions.find((mission) => mission.id === plain!.id)?.attempts).toBeUndefined();
+  });
+});
