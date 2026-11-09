@@ -3,6 +3,7 @@ import { appendFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { logEntries, towerState } from './evidence.ts';
+import { leftoverWorktrees } from './mission.ts';
 import {
   autopilotEntries,
   checkAutopilotPromptness,
@@ -216,6 +217,8 @@ async function runVariant(ctx: ScenarioContext, variant: HeadlessVariant): Promi
     const agentDirAfter = hashTree(settings.agentDir);
     report.check(`${settings.agentDir} is unchanged (sha256 over every file before/after)`, agentDirBefore === agentDirAfter, `before ${agentDirBefore.slice(0, 16)}… after ${agentDirAfter.slice(0, 16)}…`);
     await sleep(3000);
+    const left = leftoverWorktrees(repo);
+    report.note(`worktrees left after the run: registered ${left.registered.join(', ') || '(none)'}; .tower/worktrees ${left.directories.join(', ') || '(empty)'}`);
     scan = processesUnder(dir);
     if (scan.applicable) {
       report.check(

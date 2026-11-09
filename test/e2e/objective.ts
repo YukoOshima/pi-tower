@@ -259,6 +259,15 @@ export function autopilotEntries(repo: string, action?: string): LogEntry[] {
   return logEntries(repo).filter((entry) => entry.actor === 'autopilot' && (action === undefined || entry.action === action));
 }
 
+export async function waitForAutopilotEntry(repo: string, action: string, timeoutMs: number, pollMs = 500): Promise<LogEntry | undefined> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const entry = autopilotEntries(repo, action)[0];
+    if (entry !== undefined || Date.now() > deadline) return entry;
+    await sleep(pollMs);
+  }
+}
+
 export const VALIDATION_START_LATENCY_LIMIT_MS = 15_000;
 
 export interface ValidationStart {

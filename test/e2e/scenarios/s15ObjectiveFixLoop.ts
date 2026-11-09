@@ -14,6 +14,7 @@ import {
   planToApproval,
   recordObjectiveUsage,
   validationFileFields,
+  waitForAutopilotEntry,
   waitForObjective,
   writeText,
 } from '../objective.ts';
@@ -318,6 +319,7 @@ export const s15ObjectiveFixLoop: ScenarioDefinition = {
       const approve = await rpc.command('/tower approve');
       report.check('the scripted human approves with /tower approve and the objective starts executing', /approved/.test(approve.text) && towerState(repo)?.objective?.status === 'executing', approve.text);
       const final = await waitForObjective(ctx, repo, (state) => state.objective?.status === 'completed', { label: 'the objective to complete', timeoutMs: MAX_WALL_TIME_MS + 5 * 60_000, rpc, human });
+      await waitForAutopilotEntry(repo, 'complete-objective', 60_000);
       trace.stop();
       assertFixLoop(ctx, repo, final, trace, readJsonFile<AcceptRun[]>(runsFile) ?? []);
       checkAutopilotPromptness(ctx, repo);

@@ -15,6 +15,7 @@ import {
   processesUnder,
   requiredValidationKinds,
   validationStarts,
+  waitForAutopilotEntry,
   type FeatureWindow,
 } from './objective.ts';
 import { ScenarioReport, type CheckResult } from './report.ts';
@@ -270,6 +271,18 @@ describe('processesUnder', () => {
     const scan = processesUnder(dir, { procRoot: join(dir, 'no-proc') });
     expect(scan.method).toMatch(/^the command line of every process \(ps\) and the working directories lsof reported for \d+ processes$/);
     expect(scan.processes.map((info) => info.pid)).toContain(child.pid);
+  });
+});
+
+describe('waitForAutopilotEntry', () => {
+  it('waits for an autopilot action that is logged after the state already changed, and gives up after the timeout', async () => {
+    const repo = unitRepo();
+    writeActivityLog(repo, ['2026-11-09T17:03:35.721Z tower objective.complete id=O1 base_tip=2aea10e']);
+    setTimeout(() => {
+      writeActivityLog(repo, ['2026-11-09T17:03:35.721Z tower objective.complete id=O1 base_tip=2aea10e', '2026-11-09T17:03:36.109Z autopilot complete-objective objective=O1 result=done detail=objective=O1']);
+    }, 150);
+    expect((await waitForAutopilotEntry(repo, 'complete-objective', 5000, 20))?.fields).toEqual({ objective: 'O1', result: 'done', detail: 'objective=O1' });
+    expect(await waitForAutopilotEntry(repo, 'block-objective', 100, 20)).toBeUndefined();
   });
 });
 
