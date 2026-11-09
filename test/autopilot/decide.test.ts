@@ -434,6 +434,11 @@ function validate(ms: string, commit: string, kinds: Kind[]): AutopilotAction {
 }
 
 const PASSED_MS1 = milestone('MS1', 1, { status: 'passed' });
+const SKIP_FLIPPED = snapshot({
+  settings: { skipUserTesting: true },
+  objective: { milestones: [milestone('MS1', 1, { status: 'validating', validationCommit: BASE, rounds: [round('scrutiny', 1, BASE, 'pass')] }), milestone('MS2', 2)] },
+  missions: [merged('M1')],
+});
 const DONE_MS1 = [merged('M1'), feature('M2', { status: 'abandoned' })];
 const NO_KINDS = { scrutiny: false, userTesting: false, commands: 0 };
 
@@ -558,12 +563,38 @@ table('start-validation', [
     actions: [validate('MS1', BASE, [])],
   },
   {
-    name: 'every kind passed on the tip: the store records the pass, autopilot waits',
+    name: 'every required kind already passed on the tip but the store has not marked it passed: re-derive with []',
     snap: snapshot({
       objective: { milestones: [milestone('MS1', 1, { status: 'validating', rounds: [round('scrutiny', 1, BASE, 'pass'), round('user-testing', 1, BASE, 'pass')] }), milestone('MS2', 2)] },
       missions: DONE_MS1,
     }),
+    actions: [validate('MS1', BASE, [])],
+  },
+  { name: 'a skip flag flipped mid-validation leaves only passed kinds: re-derive with []', snap: SKIP_FLIPPED, actions: [validate('MS1', BASE, [])] },
+  {
+    name: 'an active milestone whose required kinds all passed on the tip is re-derived too',
+    snap: snapshot({
+      objective: { milestones: [milestone('MS1', 1, { status: 'active', rounds: [round('scrutiny', 1, BASE, 'pass'), round('user-testing', 1, BASE, 'pass')] }), milestone('MS2', 2)] },
+      missions: DONE_MS1,
+    }),
+    actions: [validate('MS1', BASE, [])],
+  },
+  {
+    name: 'a kind still in flight on the tip holds the re-derive',
+    snap: snapshot({
+      objective: { milestones: [milestone('MS1', 1, { status: 'validating', validationCommit: BASE, rounds: [round('scrutiny', 1, BASE, 'pass')] }), milestone('MS2', 2)] },
+      validators: [{ milestone: 'MS1', kind: 'user-testing', commit: BASE }],
+      missions: DONE_MS1,
+    }),
     actions: [],
+  },
+  {
+    name: 'a pass on an older commit is not re-derived: the kind runs again on the tip',
+    snap: snapshot({
+      objective: { milestones: [milestone('MS1', 1, { status: 'validating', validationCommit: BASE, rounds: [round('scrutiny', 1, BASE, 'pass'), round('user-testing', 1, 'base-old', 'pass')] }), milestone('MS2', 2)] },
+      missions: DONE_MS1,
+    }),
+    actions: [validate('MS1', BASE, ['user-testing'])],
   },
 ]);
 
@@ -710,6 +741,11 @@ table('completion', [
   {
     name: 'passing rounds on the tip without a matching validationCommit are re-stamped, not completed',
     snap: snapshot({ objective: { milestones: [PASSED_MS1, { ...FINAL_PASSED, validationCommit: 'base-old' }] }, missions: ALL_MERGED }),
+    actions: [validate('MS2', BASE, [])],
+  },
+  {
+    name: 'a re-stamped final left validating although its kinds passed on the tip is re-derived',
+    snap: snapshot({ objective: { milestones: [PASSED_MS1, { ...FINAL_PASSED, status: 'validating' }] }, missions: ALL_MERGED }),
     actions: [validate('MS2', BASE, [])],
   },
   {
@@ -874,11 +910,12 @@ function refuseEveryAction(start: AutopilotSnapshot, ticks: number): AutopilotDe
 
 describe('stall watchdog with an executor that refuses every action', () => {
   it.each([
-    { action: 'rebase', snap: snapshot({ missions: [STALE] }) },
-    { action: 'spawn-worker', snap: snapshot({ missions: PLANNED }) },
-    { action: 'start-validation', snap: snapshot({ missions: DONE_MS1 }) },
-    { action: 'complete-objective', snap: snapshot({ objective: { milestones: [PASSED_MS1, FINAL_PASSED] }, missions: ALL_MERGED }) },
-  ])('a refused $action keeps being emitted, stall wakes #1..#3 join it, then block-objective alone', ({ action, snap }) => {
+    { name: 'rebase', action: 'rebase', snap: snapshot({ missions: [STALE] }) },
+    { name: 'spawn-worker', action: 'spawn-worker', snap: snapshot({ missions: PLANNED }) },
+    { name: 'start-validation', action: 'start-validation', snap: snapshot({ missions: DONE_MS1 }) },
+    { name: 're-derive start-validation([]) the store never applies', action: 'start-validation', snap: SKIP_FLIPPED },
+    { name: 'complete-objective', action: 'complete-objective', snap: snapshot({ objective: { milestones: [PASSED_MS1, FINAL_PASSED] }, missions: ALL_MERGED }) },
+  ])('a refused $name keeps being emitted, stall wakes #1..#3 join it, then block-objective alone', ({ action, snap }) => {
     const decisions = refuseEveryAction(snap, 13);
     const ticks = decisions.map((decision) =>
       decision.actions.map((next) => (next.type === 'wake-orchestrator' ? `wake:${next.reason}` : next.type)).join(' '),

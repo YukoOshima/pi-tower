@@ -433,7 +433,8 @@ function planValidation(
   const agents = missing.filter((kind) => kind !== 'commands').slice(0, draft.free);
   draft.free -= agents.length;
   const started = missing.filter((kind) => kind === 'commands' || agents.includes(kind));
-  if (started.length === 0 && kinds.length > 0 && !restamp) return;
+  const rederive = kinds.every((kind) => latestRound(milestone, kind, commit)?.verdict === 'pass');
+  if (started.length === 0 && !restamp && !rederive) return;
   draft.validations.push({ type: 'start-validation', milestone: milestone.id, commit, kinds: started });
 }
 
