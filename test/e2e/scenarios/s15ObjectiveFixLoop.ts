@@ -4,6 +4,7 @@ import { basename, join } from 'node:path';
 import { agentTranscriptPath, frontmatter, logEntries, reviewFiles, summarizeTranscript, towerState, type LogEntry, type MissionRecord, type TowerState, type ValidationRoundRecord } from '../evidence.ts';
 import {
   autopilotEntries,
+  checkAutopilotPromptness,
   createTextkitRepo,
   describeObjective,
   humanScript,
@@ -319,6 +320,7 @@ export const s15ObjectiveFixLoop: ScenarioDefinition = {
       const final = await waitForObjective(ctx, repo, (state) => state.objective?.status === 'completed', { label: 'the objective to complete', timeoutMs: MAX_WALL_TIME_MS + 5 * 60_000, rpc, human });
       trace.stop();
       assertFixLoop(ctx, repo, final, trace, readJsonFile<AcceptRun[]>(runsFile) ?? []);
+      checkAutopilotPromptness(ctx, repo);
       const off = await rpc.command('/tower off');
       report.note(off.text);
     } finally {

@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { logEntries, towerState } from '../evidence.ts';
 import {
   autopilotEntries,
+  checkAutopilotPromptness,
   createTextkitRepo,
   describeObjective,
   hashTree,
@@ -126,6 +127,7 @@ export const s16Headless: ScenarioDefinition = {
         }
       })();
       report.check('main carries the reverse command', reversed, git(repo, ['log', '--oneline', '-6', 'main']));
+      checkAutopilotPromptness(ctx, repo);
       const agentDirAfter = hashTree(settings.agentDir);
       report.check(`${settings.agentDir} is unchanged (sha256 over every file before/after)`, agentDirBefore === agentDirAfter, `before ${agentDirBefore.slice(0, 16)}… after ${agentDirAfter.slice(0, 16)}…`);
       await sleep(3000);

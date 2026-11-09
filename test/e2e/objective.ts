@@ -238,6 +238,44 @@ export function autopilotEntries(repo: string, action?: string): LogEntry[] {
   return logEntries(repo).filter((entry) => entry.actor === 'autopilot' && (action === undefined || entry.action === action));
 }
 
+export const VALIDATION_START_LATENCY_LIMIT_MS = 15_000;
+
+export interface ValidationStart {
+  readonly milestone: string;
+  readonly commit: string;
+  readonly latencyMs: number | undefined;
+  readonly line: string;
+}
+
+export function validationStarts(repo: string): ValidationStart[] {
+  const entries = logEntries(repo);
+  return entries
+    .filter((entry) => entry.actor === 'autopilot' && entry.action === 'start-validation' && entry.fields.result === 'done')
+    .map((start) => {
+      const commit = start.fields.commit ?? '';
+      const merge = entries.slice(0, start.index).reverse().find((entry) => entry.actor === 'tower' && entry.action === 'merge' && entry.fields.merge_commit === commit);
+      const latencyMs = merge === undefined ? undefined : Date.parse(start.at) - Date.parse(merge.at);
+      const timing = merge === undefined ? 'no merge produced this commit' : `merge ${merge.at} → start ${start.at} (${((latencyMs ?? 0) / 1000).toFixed(1)}s)`;
+      return { milestone: start.fields.milestone ?? '?', commit, latencyMs, line: `${start.fields.milestone ?? '?'} on ${commit}: ${timing}` };
+    });
+}
+
+export function checkAutopilotPromptness(ctx: ScenarioContext, repo: string): void {
+  const starts = validationStarts(repo);
+  ctx.report.check(
+    `every milestone validation starts within ${String(VALIDATION_START_LATENCY_LIMIT_MS / 1000)}s of the merge that produced its commit`,
+    starts.length > 0 && starts.every((start) => start.latencyMs === undefined || start.latencyMs <= VALIDATION_START_LATENCY_LIMIT_MS),
+    starts.length === 0 ? '(no autopilot start-validation line)' : starts.map((start) => start.line),
+  );
+  const refused = autopilotEntries(repo).filter((entry) => entry.fields.result === 'refused');
+  const duplicates = refused.filter((entry) => /already registered/.test(entry.line));
+  ctx.report.check(
+    'the autopilot never launches the same agent twice (no "already registered" refusal)',
+    duplicates.length === 0,
+    refused.length === 0 ? 'no refused autopilot action' : refused.map((entry) => clip(entry.line, 300)),
+  );
+}
+
 export function validationFileFields(repo: string): { readonly name: string; readonly fields: Record<string, string>; readonly text: string }[] {
   return validationFiles(repo).map((file) => ({ name: file.name, fields: frontmatter(file.text), text: file.text }));
 }

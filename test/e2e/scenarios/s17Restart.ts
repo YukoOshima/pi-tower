@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { agentTranscriptPath, logEntries, summarizeTranscript, towerState, type MissionRecord, type RosterEntry } from '../evidence.ts';
 import {
   autopilotEntries,
+  checkAutopilotPromptness,
   createTextkitRepo,
   describeObjective,
   humanScript,
@@ -178,6 +179,7 @@ export const s17Restart: ScenarioDefinition = {
         }
       })();
       report.check('main carries the title command', title.length > 0, clip(title, 200));
+      checkAutopilotPromptness(ctx, repo);
       await second.rpc.command('/tower off');
     } finally {
       trace.stop();
