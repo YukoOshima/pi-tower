@@ -13,8 +13,10 @@ import {
   objectiveCompletedNotice,
   planMilestoneRequest,
   rebaseConflictWake,
+  reviewStuckWake,
   stallReevaluation,
   validationResultWake,
+  validationStuckWake,
   type ApprovalRequestInput,
 } from '../../src/prompts/objectiveWakes.ts';
 
@@ -81,6 +83,15 @@ function allTexts(): readonly string[] {
     rebaseConflictWake({ feature: FEATURE, files: ['src/cli.ts'] }),
     blockerWake({ feature: FEATURE, agent: 'agent-cli', source: 'blocker', items: ['missing fixture'] }),
     mergeBlockedWake({ feature: FEATURE, blocks: [{ reason: 'out-of-scope' }] }),
+    reviewStuckWake({ feature: FEATURE, attempts: 3, maxAttempts: 3 }),
+    validationStuckWake({
+      objective: OBJECTIVE,
+      milestone: MILESTONE,
+      validationKind: 'user-testing',
+      validatedCommit: 'c0ffee1234',
+      attempts: 3,
+      maxAttempts: 3,
+    }),
     budgetPausedNotice({ objective: OBJECTIVE, limit: 'cost', costUsd: 1, maxCostUsd: 1 }),
     objectiveCompletedNotice({ objective: OBJECTIVE, milestones: [], features: [], base: 'main', baseTip: 'c0ffee1234' }),
     objectiveBlockedNotice({ objective: OBJECTIVE, reason: 'stalled' }),
@@ -284,6 +295,59 @@ describe('judgment wakes', () => {
     expect(text).toContain('TowerStatus shows the full gate state of M2');
     expect(text).toContain(
       'Never merge around the gate: once it is ready, the autopilot merges (with the autopilot off, merge with TowerMerge).',
+    );
+  });
+});
+
+describe('stuck wakes', () => {
+  it('recovers a review that keeps ending without a verdict', () => {
+    const text = reviewStuckWake({
+      feature: FEATURE,
+      tip: 'abc1234def',
+      attempts: 3,
+      maxAttempts: 3,
+      recent: [
+        { name: 'reviewer-m2-a', status: 'failed', reason: '  model error ' },
+        { name: 'reviewer-m2-b', status: 'timed_out' },
+        { name: 'reviewer-m2-c' },
+      ],
+    });
+    expect(text.split('\n')[0]).toBe(
+      'review-stuck: feature M2 "CLI flag" (milestone MS1, branch feat/cli-flag) is stuck in review — 3 of 3 reviewers ended without submitting a review on tip abc1234; the tower will not spawn another reviewer by itself.',
+    );
+    expect(text).toContain('Recent attempts:\n- reviewer-m2-a: failed — model error\n- reviewer-m2-b: timed_out\n- reviewer-m2-c\n');
+    expect(text).toContain('their final messages (TowerTaskOutput), and TowerTasks with active_only=false');
+    expect(text).toContain('spawn a fresh reviewer with TowerSpawn(kind="reviewer", review_target="feat/cli-flag") under a new name');
+    expect(text).toContain('have the worker simplify it');
+    expect(text).toContain('abandon M2 with TowerMission(id="M2", status="abandoned") and plan smaller replacement features into MS1');
+    expect(text).toContain('TowerObjective(action="block", reason)');
+  });
+
+  it('recovers a validation that keeps ending without a verdict', () => {
+    const text = validationStuckWake({
+      objective: OBJECTIVE,
+      milestone: MILESTONE,
+      validationKind: 'scrutiny',
+      validatedCommit: 'c0ffee1234',
+      attempts: 2,
+      maxAttempts: 3,
+      recent: [{ name: 'validator-ms1-scrutiny-r2', status: 'timed_out' }],
+    });
+    expect(text.split('\n')[0]).toBe(
+      'validation-stuck: the scrutiny validation of milestone MS1 "Exporter core" on c0ffee1 is stuck — 2 of 3 validators ended without a verdict (objective O1 "CSV export"); the tower will not start another one by itself.',
+    );
+    expect(text).toContain('Recent attempts:\n- validator-ms1-scrutiny-r2: timed_out');
+    expect(text).toContain('a validation worktree that cannot build or start the product');
+    expect(text).toContain('TowerSpawn(kind="validator", milestone="MS1", validation_kind="scrutiny") under a new name');
+    expect(text).toContain('TowerPlan(milestone="MS1", origin="fix"); validation re-runs automatically once it merges');
+    expect(text).toContain("simplify or split it with TowerObjective(action=\"update\") — clearer qa_instructions or smaller milestones; contract changes need the human's approval again");
+    expect(text).toContain('TowerObjective(action="block", reason)');
+  });
+
+  it('omits the attempt list when nothing is known', () => {
+    expect(reviewStuckWake({ feature: FEATURE, attempts: 3, maxAttempts: 3 })).not.toContain('Recent attempts');
+    expect(reviewStuckWake({ feature: FEATURE, attempts: 3, maxAttempts: 3 })).toContain(
+      'ended without submitting a review; the tower',
     );
   });
 });

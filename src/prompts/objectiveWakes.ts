@@ -13,6 +13,7 @@ import type {
   PromptObjectiveContract,
   PromptValidationKind,
   PromptValidationRound,
+  PromptValidatorKind,
 } from './objectiveTypes.ts';
 
 export type ObjectiveRef = Pick<PromptObjectiveContract, 'id' | 'title'>;
@@ -77,6 +78,30 @@ export interface BlockerWakeInput {
 export interface MergeBlockedWakeInput {
   readonly feature: FeatureRef & Pick<PromptFeature, 'owner'>;
   readonly blocks: readonly { readonly reason: string; readonly message?: string }[];
+}
+
+export interface StuckAgentAttempt {
+  readonly name: string;
+  readonly status?: string;
+  readonly reason?: string;
+}
+
+export interface ReviewStuckWakeInput {
+  readonly feature: FeatureRef & { readonly branch: string };
+  readonly tip?: string;
+  readonly attempts: number;
+  readonly maxAttempts: number;
+  readonly recent?: readonly StuckAgentAttempt[];
+}
+
+export interface ValidationStuckWakeInput {
+  readonly objective: ObjectiveRef;
+  readonly milestone: MilestoneRef;
+  readonly validationKind: PromptValidatorKind;
+  readonly validatedCommit: string;
+  readonly attempts: number;
+  readonly maxAttempts: number;
+  readonly recent?: readonly StuckAgentAttempt[];
 }
 
 export interface BudgetPausedNoticeInput {
@@ -315,6 +340,42 @@ export function mergeBlockedWake(input: MergeBlockedWakeInput): string {
   ].join('\n\n');
 }
 
+export function reviewStuckWake(input: ReviewStuckWakeInput): string {
+  const { feature } = input;
+  const tip = input.tip !== undefined ? ` on tip ${shortCommit(input.tip)}` : '';
+  return [
+    [
+      `review-stuck: ${featureLabel(feature)} is stuck in review — ${String(input.attempts)} of ${String(input.maxAttempts)} reviewers ended without submitting a review${tip}; the tower will not spawn another reviewer by itself.`,
+      ...attemptLines(input.recent ?? []),
+    ].join('\n'),
+    [
+      'Inspect, then act:',
+      '1. Find out why the reviewers ended without TowerReview: the reasons above, their final messages (TowerTaskOutput), and TowerTasks with active_only=false — look for crashes, timeouts, rate limits, or a diff too large to review in one run.',
+      `2. Transient cause → spawn a fresh reviewer with TowerSpawn(kind="reviewer", review_target="${feature.branch}") under a new name.`,
+      `3. The diff is too large or tangled to review → have the worker simplify it (TowerSend, or TowerResume when it is idle), or split the feature: abandon ${feature.id} with TowerMission(id="${feature.id}", status="abandoned") and plan smaller replacement features into ${feature.milestone ?? 'its milestone'} with TowerPlan.`,
+      '4. Nothing works → call TowerObjective(action="block", reason) with what the human must decide.',
+    ].join('\n'),
+  ].join('\n\n');
+}
+
+export function validationStuckWake(input: ValidationStuckWakeInput): string {
+  const { milestone, validationKind } = input;
+  return [
+    [
+      `validation-stuck: the ${validationKind} validation of ${milestoneLabel(milestone)} on ${shortCommit(input.validatedCommit)} is stuck — ${String(input.attempts)} of ${String(input.maxAttempts)} validators ended without a verdict (${objectiveLabel(input.objective)}); the tower will not start another one by itself.`,
+      ...attemptLines(input.recent ?? []),
+    ].join('\n'),
+    [
+      'Inspect, then act:',
+      '1. Find out why the validators ended without TowerValidate: the reasons above, their final messages (TowerTaskOutput), and TowerTasks with active_only=false — look for crashes, timeouts, a validation worktree that cannot build or start the product, or a milestone too large to validate in one run.',
+      `2. Transient cause → spawn a fresh validator with TowerSpawn(kind="validator", milestone="${milestone.id}", validation_kind="${validationKind}") under a new name.`,
+      `3. The product cannot build or start on this commit → plan a fix feature into ${milestone.id} with TowerPlan(milestone="${milestone.id}", origin="fix"); validation re-runs automatically once it merges.`,
+      "4. The milestone is too large or too vague to validate in one run → simplify or split it with TowerObjective(action=\"update\") — clearer qa_instructions or smaller milestones; contract changes need the human's approval again.",
+      '5. Nothing works → call TowerObjective(action="block", reason) with what the human must decide.',
+    ].join('\n'),
+  ].join('\n\n');
+}
+
 export function budgetPausedNotice(input: BudgetPausedNoticeInput): string {
   const usage =
     input.limit === 'cost'
@@ -452,6 +513,17 @@ const MERGE_BLOCK_GUIDANCE: Readonly<Record<string, (missionId: string) => strin
   'review-mission-mismatch': () =>
     '- review-mission-mismatch → the latest review belongs to another mission: spawn a fresh reviewer for this branch.',
 };
+
+function attemptLines(attempts: readonly StuckAgentAttempt[]): string[] {
+  if (attempts.length === 0) return [];
+  return [
+    'Recent attempts:',
+    ...attempts.map((attempt) => {
+      const reason = attempt.reason?.trim();
+      return `- ${attempt.name}${attempt.status !== undefined ? `: ${attempt.status}` : ''}${reason !== undefined && reason.length > 0 ? ` — ${reason}` : ''}`;
+    }),
+  ];
+}
 
 function failedRoundBlock(round: PromptValidationRound): string {
   const header = `### ${round.kind} round ${String(round.round)} by ${round.validator}${round.file !== undefined ? ` — report: ${round.file}` : ''}`;
