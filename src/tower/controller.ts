@@ -5,6 +5,7 @@ import type {
   BeforeAgentStartEventResult,
   ExtensionAPI,
   ExtensionContext,
+  MessageEndEvent,
   SessionStartEvent,
   ToolCallEvent,
   ToolCallEventResult,
@@ -174,6 +175,7 @@ export class TowerController implements TowerToolHost {
   private wakeScheduled = false;
   private wakeFlushing = false;
   private wakeWaitingForIdle = false;
+  private orchestratorCostUsd = 0;
 
   constructor(options: TowerControllerOptions) {
     this.pi = options.pi;
@@ -254,6 +256,10 @@ export class TowerController implements TowerToolHost {
 
   rateLimitSnapshot(): TowerRateLimitSnapshot {
     return this.runtime?.limiter.snapshot() ?? DEFAULT_RATE_LIMIT_SNAPSHOT;
+  }
+
+  totalCostUsd(): number {
+    return (this.runtimeInstance?.usage().cost ?? 0) + this.orchestratorCostUsd;
   }
 
   publishInboxSent(event: TowerInboxSentPayload): void {
@@ -602,6 +608,11 @@ export class TowerController implements TowerToolHost {
 
   onAfterProviderResponse(event: AfterProviderResponseEvent): void {
     if (event.status === 429) this.runtime?.limiter.reportRateLimited();
+  }
+
+  onMessageEnd(event: MessageEndEvent): void {
+    if (!this.active || event.message.role !== 'assistant') return;
+    this.orchestratorCostUsd += event.message.usage.cost.total;
   }
 
   onAgentSettled(_event: AgentSettledEvent, ctx: ExtensionContext): void {

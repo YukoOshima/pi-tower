@@ -129,6 +129,7 @@ export class FakeRuntime implements TowerRuntime {
   steerResult: TowerSteerResult | undefined;
   finishOnSpawn: { readonly status: TowerAgentEndStatus; readonly stopReason?: string } | undefined;
   disposedAll: string | undefined;
+  usageTotal: TowerAgentUsage = ZERO_USAGE;
   now: () => number = () => Date.now();
   private readonly agents = new Map<string, FakeAgentRecord>();
   private readonly listeners = new Set<TowerAgentEventListener>();
@@ -299,6 +300,10 @@ export class FakeRuntime implements TowerRuntime {
         .filter((record) => record.status === 'running' || record.windingDown)
         .map((record) => record.agentId),
     );
+  }
+
+  usage(): TowerAgentUsage {
+    return this.usageTotal;
   }
 
   async dispose(id: string): Promise<boolean> {

@@ -2,8 +2,10 @@ import { mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import type { SessionStartEvent } from '@earendil-works/pi-coding-agent';
+import type { MessageEndEvent, SessionStartEvent } from '@earendil-works/pi-coding-agent';
 import { afterEach, describe, expect, it } from 'vitest';
+
+import { assistantMessage } from '../runtime/fakeSession.ts';
 
 import { TOWER_OBJECTIVE_DEFAULTS } from '../../src/config/index.ts';
 import { TOWER_VALIDATOR_ROLE, TOWER_WORKER_ROLE } from '../../src/prompts/index.ts';
@@ -40,6 +42,7 @@ interface Harness {
 interface HarnessOptions {
   readonly config?: unknown;
   readonly models?: boolean;
+  readonly runtime?: boolean;
 }
 
 const cleanups: string[] = [];
@@ -73,10 +76,11 @@ async function harness(options: HarnessOptions = {}): Promise<Harness> {
     pi,
     ...(models === undefined ? {} : { models }),
     isProcessAlive: () => true,
-    createRuntime: () => runtime,
+    ...(options.runtime === false ? {} : { createRuntime: () => runtime }),
   });
   controllers.push(controller);
   await controller.onSessionStart(START, ctx.asContext);
+  if (options.runtime !== false) expect(controller.runtime).toBe(runtime);
   return { repo, ctx, pi, runtime, controller };
 }
 
@@ -157,6 +161,36 @@ describe('objective settings', () => {
     const h = await harness({ models: false });
 
     expect(h.controller.objectiveSettings()).toEqual(objectiveSettingsView(TOWER_OBJECTIVE_DEFAULTS));
+  });
+});
+
+describe('cost accounting', () => {
+  function messageEnd(message: MessageEndEvent['message']): MessageEndEvent {
+    return { type: 'message_end', message };
+  }
+
+  it('sums the agent runtime usage and the orchestrator turns taken while tower mode is on', async () => {
+    const h = await harness();
+    h.controller.onMessageEnd(messageEnd(assistantMessage('before tower mode', { cost: { total: 0.5 } })));
+    await h.controller.enter();
+
+    h.runtime.usageTotal = { ...h.runtime.usageTotal, totalTokens: 100, cost: 1.25 };
+    h.controller.onMessageEnd(messageEnd(assistantMessage('planning', { cost: { total: 0.25 } })));
+    h.controller.onMessageEnd(messageEnd({ role: 'user', content: 'go on', timestamp: 0 }));
+
+    expect(h.controller.totalCostUsd()).toBe(1.5);
+    await h.controller.exit();
+    h.controller.onMessageEnd(messageEnd(assistantMessage('after tower mode', { cost: { total: 2 } })));
+    expect(h.controller.totalCostUsd()).toBe(1.5);
+  });
+
+  it('counts no agent usage before an agent runtime exists', async () => {
+    const h = await harness({ runtime: false });
+    await h.controller.enter();
+
+    h.controller.onMessageEnd(messageEnd(assistantMessage('planning', { cost: { total: 0.25 } })));
+
+    expect(h.controller.totalCostUsd()).toBe(0.25);
   });
 });
 

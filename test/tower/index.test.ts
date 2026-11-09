@@ -23,6 +23,7 @@ const EVENTS = [
   'before_agent_start',
   'tool_call',
   'after_provider_response',
+  'message_end',
   'agent_settled',
   'model_select',
   'thinking_level_select',

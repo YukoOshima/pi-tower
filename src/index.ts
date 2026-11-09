@@ -75,6 +75,9 @@ export default function towerExtension(pi: ExtensionAPI): void {
   pi.on('after_provider_response', (event) => {
     controller.onAfterProviderResponse(event);
   });
+  pi.on('message_end', (event) => {
+    controller.onMessageEnd(event);
+  });
   pi.on('agent_settled', (event, ctx) => {
     controller.onAgentSettled(event, ctx);
   });

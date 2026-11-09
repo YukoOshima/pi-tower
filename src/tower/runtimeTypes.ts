@@ -3,6 +3,7 @@ import type {
   TowerAgentInfo,
   TowerAgentOutput,
   TowerAgentSpec,
+  TowerAgentUsage,
   TowerRateLimitSnapshot,
   TowerRunStartResult,
   TowerSteerResult,
@@ -43,6 +44,7 @@ export interface TowerRuntime {
   output(id: string): TowerAgentOutput | undefined;
   list(activeOnly?: boolean): TowerAgentInfo[];
   activeAgentIds(): ReadonlySet<string>;
+  usage(): TowerAgentUsage;
   dispose(id: string, reason?: string): Promise<boolean>;
   disposeAll(reason?: string): Promise<void>;
 }

@@ -14,6 +14,7 @@ import type {
   TowerAgentSessionFactory,
   TowerAgentSpec,
   TowerAgentStatus,
+  TowerAgentUsage,
   TowerRunStartResult,
   TowerSteerDisposition,
   TowerSteerResult,
@@ -131,6 +132,7 @@ export class TowerAgentRuntime {
   private readonly taskOwners = new Map<string, string>();
   private readonly reservedIds = new Set<string>();
   private readonly listeners = new Set<TowerAgentEventListener>();
+  private readonly totals = emptyUsage();
   private disposed = false;
 
   constructor(options: TowerAgentRuntimeOptions) {
@@ -282,6 +284,10 @@ export class TowerAgentRuntime {
         .filter((record) => isActive(record))
         .map((record) => record.agentId),
     );
+  }
+
+  usage(): TowerAgentUsage {
+    return { ...this.totals };
   }
 
   async dispose(id: string, reason = 'disposed'): Promise<boolean> {
@@ -583,6 +589,7 @@ export class TowerAgentRuntime {
     record.streaming = undefined;
     addUsage(run.usage, message.usage);
     addUsage(record.usage, message.usage);
+    addUsage(this.totals, message.usage);
     const text = assistantText(message);
     if (text !== undefined) {
       run.lastText = text;
