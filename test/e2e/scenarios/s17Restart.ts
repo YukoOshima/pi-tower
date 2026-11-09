@@ -12,7 +12,6 @@ import {
   planToApproval,
   recordObjectiveUsage,
   toolCallCount,
-  transcriptOf,
   waitForObjective,
   writeText,
 } from '../objective.ts';
@@ -55,7 +54,7 @@ function liveWorker(repo: string): { mission: MissionRecord; worker: RosterEntry
   for (const mission of state?.missions ?? []) {
     if (mission.milestone === undefined || mission.status !== 'active') continue;
     const worker = state?.roster.agents.find((agent) => agent.kind === 'worker' && agent.missionId === mission.id && agent.diedAt === undefined);
-    if (worker !== undefined && toolCallCount(transcriptOf(repo, worker.agentId)) > 0) return { mission, worker };
+    if (worker !== undefined && toolCallCount(agentTranscriptPath(repo, worker.agentId)) > 0) return { mission, worker };
   }
   return undefined;
 }
@@ -70,7 +69,7 @@ async function runningFeatureWorker(rpc: PiRpc, repo: string): Promise<Victim> {
       const line = agents.text.split('\n').find((candidate) => candidate.startsWith(`- ${live.worker.name} `)) ?? '';
       const current = towerState(repo)?.missions.find((mission) => mission.id === live.mission.id);
       if (runningAgents(agents.text).includes(live.worker.name) && current?.status === 'active') {
-        return { ...live, toolCalls: toolCallCount(transcriptOf(repo, live.worker.agentId)), agentsLine: line };
+        return { ...live, toolCalls: toolCallCount(agentTranscriptPath(repo, live.worker.agentId)), agentsLine: line };
       }
     }
     await sleep(1000);

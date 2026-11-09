@@ -96,7 +96,7 @@ export function writeText(path: string, text: string): string {
   return path;
 }
 
-export const OBJECTIVE_END = new Set(['completed', 'blocked', 'paused']);
+const OBJECTIVE_END = new Set(['completed', 'blocked', 'paused']);
 
 export function objectiveOf(repo: string): ObjectiveRecord | undefined {
   return towerState(repo)?.objective;
@@ -192,7 +192,6 @@ export interface WaitObjectiveOptions {
   readonly timeoutMs: number;
   readonly rpc?: PiRpc;
   readonly human?: HumanScript;
-  readonly failOnEnd?: boolean;
 }
 
 export async function waitForObjective(ctx: ScenarioContext, repo: string, done: (state: TowerState) => boolean, options: WaitObjectiveOptions): Promise<TowerState> {
@@ -204,7 +203,7 @@ export async function waitForObjective(ctx: ScenarioContext, repo: string, done:
     const state = towerState(repo);
     if (state !== undefined && done(state)) return state;
     const objective = state?.objective;
-    if (options.failOnEnd !== false && objective !== undefined && OBJECTIVE_END.has(objective.status)) {
+    if (objective !== undefined && OBJECTIVE_END.has(objective.status)) {
       throw new Error(`objective ${objective.id} ended ${objective.status} while waiting for ${options.label}: ${objective.blockedReason ?? objective.pausedReason ?? 'completed'}`);
     }
     if (options.rpc?.exitCode !== undefined) throw new Error(`pi exited (${String(options.rpc.exitCode)}) while waiting for ${options.label}`);
@@ -229,8 +228,9 @@ export async function planToApproval(ctx: ScenarioContext, rpc: PiRpc, repo: str
     if (human.replies >= human.maxReplies) throw new Error(`the orchestrator did not request approval after ${String(human.replies)} scripted human replies (objective ${String(state?.objective?.status)})`);
     human.replies += 1;
     ctx.report.note(`scripted human reply ${String(human.replies)} during planning (objective ${String(state?.objective?.status ?? 'not drafted')}): orchestrator said "${clip(lastAssistantText(rpc, 0).slice(-300), 300)}"`);
+    const mark = rpc.events.length;
     await rpc.send({ type: 'prompt', message: human.reply, streamingBehavior: 'followUp' });
-    await rpc.waitFor((event) => event.type === 'agent_start', 60_000, 'the orchestrator to take the scripted reply').catch(() => undefined);
+    await rpc.waitFor((event) => event.type === 'agent_start', 60_000, 'the orchestrator to take the scripted reply', mark).catch(() => undefined);
   }
 }
 
@@ -303,7 +303,7 @@ export function describeObjective(state: TowerState | undefined): string[] {
   return lines;
 }
 
-export function sessionTranscripts(dir: string): string[] {
+function sessionTranscripts(dir: string): string[] {
   const found: string[] = [];
   const walk = (current: string): void => {
     if (!existsSync(current)) return;
@@ -371,13 +371,6 @@ export function killProcesses(processes: readonly ProcessInfo[]): void {
       continue;
     }
   }
-}
-
-export function transcriptOf(repo: string, agentId: string): string | undefined {
-  const dir = join(repo, '.tower', 'agents');
-  if (!existsSync(dir)) return undefined;
-  const name = readdirSync(dir).find((file) => file.endsWith(`_${agentId}.jsonl`));
-  return name === undefined ? undefined : join(dir, name);
 }
 
 export function toolCallCount(path: string | undefined): number {
