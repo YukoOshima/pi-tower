@@ -1546,6 +1546,11 @@ export class TowerStore {
           `milestone ${milestone.id} is validated on the current base tip ${baseTip.slice(0, 7)} of "${state.base}", not on ${resolved.slice(0, 7)}`,
         );
       }
+      if (milestone.status === 'failed' && milestone.validationCommit === baseTip) {
+        throw new TowerProtocolError(
+          `milestone ${milestone.id} failed validation on ${baseTip.slice(0, 7)}, which is still the base tip — a new validation needs a new base tip: merge a fix planned into ${milestone.id} first`,
+        );
+      }
       if (
         milestone.status === 'passed' &&
         milestone.validationCommit === baseTip &&

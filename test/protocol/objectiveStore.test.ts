@@ -1276,3 +1276,46 @@ describe('reordering milestones around existing dependencies', () => {
     expect(reordered.objective).toMatchObject({ status: 'awaiting-approval', approvalReason: 'contract-changed' });
   });
 });
+
+describe('restarting a validation', () => {
+  async function registerScrutiny(name: string, commit: string): Promise<void> {
+    await store.registerAgent({
+      name,
+      agentId: `agent-${name}`,
+      kind: 'validator',
+      milestoneId: 'MS1',
+      validationKind: 'scrutiny',
+      validatedCommit: commit,
+      spawnedAt: '2026-04-04T00:00:00.000Z',
+    });
+  }
+
+  it('refuses to restart a failed milestone on the commit it failed on, until the base tip moves', async () => {
+    const tip = await validatingMilestone();
+    await registerScrutiny('val-fail', tip);
+    await store.submitValidation('val-fail', {
+      milestone: 'MS1',
+      kind: 'scrutiny',
+      verdict: 'fail',
+      failures: ['broken'],
+    });
+    const before = await readFile(store.abs(STATE_FILE), 'utf8');
+    await expect(store.startMilestoneValidation('MS1', tip)).rejects.toThrow(
+      new RegExp(`MS1 failed validation on ${tip.slice(0, 7)}, which is still the base tip — a new validation needs a new base tip`),
+    );
+    expect(await readFile(store.abs(STATE_FILE), 'utf8')).toBe(before);
+    await commitFile(repo, 'fix.txt', 'fixed\n', 'fix merged');
+    const fixed = await git(repo, 'rev-parse', 'main');
+    const restarted = await store.startMilestoneValidation('MS1', fixed);
+    expect(restarted.milestone).toMatchObject({ status: 'validating', validationCommit: fixed });
+  });
+
+  it('restarts a validating milestone on the same commit and prepares a worktree for a missing kind', async () => {
+    const tip = await validatingMilestone();
+    await store.prepareValidationWorktree('MS1', 'scrutiny');
+    const restarted = await store.startMilestoneValidation('MS1', tip);
+    expect(restarted.milestone).toMatchObject({ status: 'validating', validationCommit: tip });
+    const missing = await store.prepareValidationWorktree('MS1', 'user-testing');
+    expect(missing).toMatchObject({ worktree: 'val-ms1-user-testing-r1', commit: tip });
+  });
+});
