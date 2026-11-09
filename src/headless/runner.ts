@@ -1,7 +1,7 @@
 import { fileURLToPath } from 'node:url';
 
 import type { HeadlessRunOptions } from './args.ts';
-import { noticeOf, PI_DIALOG_METHODS, recordField, stringField, type PiCommandResult, type PiEvent, type PiExit, type PiRpcOptions, type PiUiResponse } from './rpc.ts';
+import { isCommandError, noticeOf, PI_DIALOG_METHODS, recordField, stringField, type PiCommandResult, type PiEvent, type PiExit, type PiRpcOptions, type PiUiResponse } from './rpc.ts';
 import type { HeadlessFeature, HeadlessMilestone, HeadlessObjective, HeadlessSnapshot } from './state.ts';
 
 export const HEADLESS_EXIT = {
@@ -349,7 +349,7 @@ class HeadlessRun {
       return;
     }
     if (event.type === 'extension_error') {
-      this.fail(`pi extension error: ${String(event.error)}`);
+      if (!(isCommandError(event) && this.commandsInFlight > 0)) this.fail(`pi extension error: ${String(event.error)}`);
       return;
     }
     const notice = noticeOf(event);

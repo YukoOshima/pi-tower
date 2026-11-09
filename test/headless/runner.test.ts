@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
+import type { PiEvent } from '../../src/headless/rpc.ts';
 import { formatElapsed, HEADLESS_EXIT, renderPlan, runHeadless } from '../../src/headless/runner.ts';
 import type { HeadlessSnapshot } from '../../src/headless/state.ts';
 import { feature, milestone, objective, type Json } from './harness.ts';
@@ -14,6 +15,10 @@ function plain(lines: readonly string[]): string[] {
 
 function stage(status: string, ms1: string, ms2: string, extra: Json = {}): Json {
   return objective(status, { milestones: [milestone('MS1', ms1, 1), milestone('MS2', ms2, 2)], ...extra });
+}
+
+function commandError(error: string): PiEvent {
+  return { type: 'extension_error', extensionPath: 'command:tower', event: 'command', error };
 }
 
 function merged(...ids: string[]): Json[] {
@@ -566,6 +571,57 @@ describe('runHeadless', () => {
     });
     expect(await runHeadless(runOptions({ autoApprove: true }), run.deps)).toBe(HEADLESS_EXIT.stopped);
     expect(plain(run.errors)).toEqual(['/tower approve --auto failed: Objective O1 is not awaiting approval.']);
+  });
+
+  it('exits 1 once when the approve handler throws, although pi answers handled', async () => {
+    const run = stubRun((pi, state) => {
+      towerOn(pi, state);
+      drafts(pi, state);
+      pi.reactions['/tower approve --auto'] = {
+        effect: (stub) => {
+          stub.emit(commandError('objective O1 cannot be approved: the first milestone MS1 has no build feature'));
+        },
+      };
+    });
+    expect(await runHeadless(runOptions({ autoApprove: true, timeoutMs: 60_000 }), run.deps)).toBe(HEADLESS_EXIT.stopped);
+    expect(run.pi().commands.filter((command) => command === '/tower approve --auto')).toHaveLength(1);
+    expect(plain(run.errors)).toEqual(['/tower approve --auto failed: objective O1 cannot be approved: the first milestone MS1 has no build feature']);
+    expect(run.info.some((line) => line.includes('auto-approved'))).toBe(false);
+  });
+
+  it.each([
+    ['/tower on', '/tower on'],
+    ['/tower objective', OBJECTIVE_COMMAND],
+  ])('exits 4 when the %s handler throws, although pi answers handled', async (prefix, sent) => {
+    const run = stubRun((pi, state) => {
+      towerOn(pi, state);
+      pi.reactions[prefix] = {
+        effect: (stub) => {
+          stub.emit(commandError('an objective O7 is already executing — finish or block it first'));
+        },
+      };
+    });
+    expect(await runHeadless(runOptions(), run.deps)).toBe(HEADLESS_EXIT.startup);
+    expect(plain(run.errors)).toEqual([`${sent} failed: an objective O7 is already executing — finish or block it first`]);
+    expect(plain(run.info)).not.toContain('objective handed to the orchestrator: /work/objective.md');
+  });
+
+  it('still reports a command extension error that arrives while none of its commands is in flight', async () => {
+    const run = stubRun((pi, state) => {
+      towerOn(
+        pi,
+        state,
+        snapshot(stage('executing', 'active', 'pending')),
+        snapshot(stage('executing', 'active', 'pending')),
+        snapshot(stage('executing', 'active', 'pending')),
+        snapshot(stage('completed', 'passed', 'passed')),
+      );
+      state.onRead = (reads) => {
+        if (reads === 2) pi.emit(commandError('a /tower command typed elsewhere failed'));
+      };
+    });
+    expect(await runHeadless(runOptions(), run.deps)).toBe(HEADLESS_EXIT.completed);
+    expect(plain(run.errors)).toEqual(['pi extension error: a /tower command typed elsewhere failed']);
   });
 });
 

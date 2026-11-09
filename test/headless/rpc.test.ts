@@ -63,6 +63,30 @@ describe('PiRpcClient', () => {
     expect(pi.stderrTail()).toBe('错误：验证失败');
   });
 
+  it('reports a command whose handler threw: pi still answers handled, after a command extension_error', async () => {
+    const { pi } = start({
+      commands: [
+        {
+          match: '/tower approve',
+          before: [
+            {
+              emit: [
+                { type: 'extension_error', extensionPath: '/ext/other.ts', event: 'tool_call', error: 'unrelated tool hook failure' },
+                { type: 'extension_error', extensionPath: 'command:tower', event: 'command', error: 'objective O1 cannot be approved: MS1 has no build feature' },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+    expect(await pi.command('/tower approve --auto')).toEqual({
+      success: true,
+      disposition: 'handled',
+      error: undefined,
+      notices: [{ level: 'error', text: 'objective O1 cannot be approved: MS1 has no build feature' }],
+    });
+  });
+
   it('reports a rejected command', async () => {
     const { pi } = start({ commands: [{ match: '/x', error: 'No model selected' }] });
     expect(await pi.command('/x')).toEqual({ success: false, disposition: undefined, error: 'No model selected', notices: [] });

@@ -1,5 +1,5 @@
 import type { HeadlessRunOptions } from '../../src/headless/args.ts';
-import type { PiCommandResult, PiEvent, PiExit, PiNotice, PiRpcOptions, PiUiResponse } from '../../src/headless/rpc.ts';
+import { commandNoticeOf, type PiCommandResult, type PiEvent, type PiExit, type PiNotice, type PiRpcOptions, type PiUiResponse } from '../../src/headless/rpc.ts';
 import type { HeadlessClock, HeadlessDeps, HeadlessPi, HeadlessSignal } from '../../src/headless/runner.ts';
 import { parseHeadlessSnapshot, type HeadlessSnapshot } from '../../src/headless/state.ts';
 import type { Json } from './harness.ts';
@@ -89,13 +89,22 @@ export class StubPi implements HeadlessPi {
     this.commands.push(text);
     const key = Object.keys(this.reactions).find((prefix) => text.startsWith(prefix));
     const reaction: StubReaction = key === undefined ? { disposition: 'started' } : (this.reactions[key] ?? {});
-    reaction.effect?.(this);
+    const collected: PiNotice[] = [];
+    const unsubscribe = this.onEvent((event) => {
+      const notice = commandNoticeOf(event);
+      if (notice !== undefined) collected.push(notice);
+    });
+    try {
+      reaction.effect?.(this);
+    } finally {
+      unsubscribe();
+    }
     const success = reaction.success ?? true;
     return {
       success,
       disposition: success ? (reaction.disposition ?? 'handled') : undefined,
       error: success ? undefined : (reaction.error ?? 'rejected'),
-      notices: reaction.notices ?? [],
+      notices: [...collected, ...(reaction.notices ?? [])],
     };
   }
 

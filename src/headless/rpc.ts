@@ -59,6 +59,15 @@ export function noticeOf(event: PiEvent): PiNotice | undefined {
   return { level: stringField(event, 'notifyType') ?? 'info', text: stringField(event, 'message') ?? '' };
 }
 
+export function isCommandError(event: PiEvent): boolean {
+  return event.type === 'extension_error' && event.event === 'command';
+}
+
+export function commandNoticeOf(event: PiEvent): PiNotice | undefined {
+  if (!isCommandError(event)) return noticeOf(event);
+  return { level: 'error', text: stringField(event, 'error') ?? String(event.error) };
+}
+
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, boundedDelay(ms)));
 }
@@ -250,7 +259,7 @@ export class PiRpcClient {
   async command(text: string, timeoutMs = 30_000): Promise<PiCommandResult> {
     const notices: PiNotice[] = [];
     const unsubscribe = this.onEvent((event) => {
-      const notice = noticeOf(event);
+      const notice = commandNoticeOf(event);
       if (notice !== undefined) notices.push(notice);
     });
     try {

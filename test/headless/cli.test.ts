@@ -92,6 +92,10 @@ function stage(status: string, ms1: string, ms2: string, extra: Json = {}): Json
   return objective(status, { milestones: [milestone('MS1', ms1, 1), milestone('MS2', ms2, 2)], ...extra });
 }
 
+function commandError(error: string): Json {
+  return { type: 'extension_error', extensionPath: 'command:tower', event: 'command', error };
+}
+
 const TOWER_ON: FakeCommand = { match: '/tower on', before: [{ missions: [] }, { notify: { text: 'Tower mode: ON' } }] };
 
 const DRAFT: FakeCommand = {
@@ -195,6 +199,17 @@ describe('pi-tower CLI (bin/pi-tower.js)', () => {
     expect(result.stderr).toContain(message);
   });
 
+  it('exits 1 after a single approve when the approve handler throws, although pi answers handled', { timeout: 20_000 }, async () => {
+    const fake = world();
+    const thrown: FakeCommand = { match: '/tower approve --auto', before: [{ emit: [commandError('objective O1 cannot be approved: the first milestone MS1 has no build feature')] }] };
+    const result = await cli(runArgs(fake, { commands: [TOWER_ON, DRAFT, thrown] }, ['--auto-approve', '--timeout', '15000']));
+    expect(result.code).toBe(1);
+    expect(result.stderr).toMatch(/\] \/tower approve --auto failed: objective O1 cannot be approved: the first milestone MS1 has no build feature\n$/);
+    expect(result.stderr).not.toContain('pi extension error');
+    expect(result.stdout).not.toContain('auto-approved');
+    expect(fake.commands().filter((command) => command === '/tower approve --auto')).toHaveLength(1);
+  });
+
   it('exits 1 with the pi stderr tail when pi crashes after the run started', { timeout: 20_000 }, async () => {
     const fake = world();
     const crash: FakeCommand = { match: '/tower approve --auto', before: [{ objective: stage('executing', 'active', 'pending') }], after: [{ delayMs: 100, stderr: 'FATAL: worker pool exploded\n', exit: 9 }] };
@@ -217,6 +232,11 @@ describe('pi-tower CLI (bin/pi-tower.js)', () => {
     ['a pi without get_commands sends /tower on to the model', { noGetCommands: true, commands: [] }, 'pi did not run /tower on as a pi-tower command (the prompt was started)'],
     ['pi crashes during startup', { stderr: 'Error: cannot find module x\n', startupExit: 1 }, 'pi did not start (FAKE_PI): pi is gone (exited with code 1)'],
     ['/tower on fails', { commands: [{ match: '/tower on', before: [{ notify: { level: 'error', text: 'Tower mode could not be enabled — not a git repository.' } }] }] }, '/tower on failed: Tower mode could not be enabled — not a git repository.'],
+    [
+      'the /tower objective handler throws (pi still answers handled)',
+      { commands: [TOWER_ON, { match: '/tower objective', before: [{ emit: [commandError('an objective O7 is already executing — finish or block it first')] }] }] },
+      'failed: an objective O7 is already executing — finish or block it first',
+    ],
   ] as const)('exits 4 when %s', { timeout: 20_000 }, async (_label, scenario, message) => {
     const fake = world();
     const result = await cli(runArgs(fake, scenario));
