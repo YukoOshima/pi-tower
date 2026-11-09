@@ -209,9 +209,15 @@ export type AutopilotWakeReason =
   | 'merge-blocked'
   | 'review-stuck'
   | 'validation-stuck'
-  | 'stalled';
+  | 'stalled'
+  | 'worker-idle';
 
-export type AutopilotResumeReason = 'review-findings' | 'rebase-conflict';
+/**
+ * `continue`: the worker of an active feature went idle without TowerComplete, a blocker or a
+ * message, with no unread findings and no rebase conflict. It is resumed once per (mission, tip);
+ * idle again on that tip — or at once in manual mode — it becomes a 'worker-idle' wake instead.
+ */
+export type AutopilotResumeReason = 'review-findings' | 'rebase-conflict' | 'continue';
 
 export type AutopilotBlockReason = 'stalled' | 'milestone-blocked';
 
@@ -227,7 +233,11 @@ export interface AutopilotResumeWorker {
   readonly mission: string;
   readonly worker: string;
   readonly reason: AutopilotResumeReason;
-  /** Dedupe key `resume-${reason}:${mission}:${revision}`; record it with the sent wake keys. */
+  /**
+   * Dedupe key `resume-${reason}:${mission}:${revision}`; record it with the sent wake keys. The
+   * revision is `${tip}#${reviewCount}` for review-findings, `${tip}@${baseTip}` for rebase-conflict
+   * and `${tip}` for continue.
+   */
   readonly key: string;
 }
 

@@ -372,5 +372,7 @@ export function orchestratorWakeText(
         openFeatures: objectiveMissions(state).filter(isOpenMission),
       });
     }
+    case 'worker-idle':
+      return fallbackWake(wake);
   }
 }
