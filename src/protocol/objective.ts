@@ -9,6 +9,7 @@ import type {
   TowerObjective,
   TowerObjectiveAutopilotState,
   TowerObjectiveLimits,
+  TowerObjectiveMode,
   TowerObjectiveStatus,
   TowerState,
   TowerValidationKind,
@@ -22,6 +23,7 @@ export const TOWER_VALIDATION_KINDS: readonly TowerValidationKind[] = [
   'user-testing',
   'commands',
 ];
+export const TOWER_OBJECTIVE_MODES: readonly TowerObjectiveMode[] = ['interactive', 'headless'];
 
 export interface TowerValidationSettings {
   readonly skipScrutiny?: boolean;
@@ -101,6 +103,10 @@ export function isTerminalObjectiveStatus(status: TowerObjectiveStatus): boolean
 
 export function isObjectiveOpen(objective: TowerObjective | undefined): boolean {
   return objective !== undefined && !isTerminalObjectiveStatus(objective.status);
+}
+
+export function canPlanObjective(objective: TowerObjective | undefined): boolean {
+  return !isObjectiveOpen(objective) || objective?.status === 'planning';
 }
 
 function isOpenFeature(mission: Pick<TowerMission, 'status'>): boolean {

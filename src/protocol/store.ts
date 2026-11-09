@@ -53,6 +53,7 @@ import {
   applyObjectiveUpdate,
   applyValidationRound,
   buildObjective,
+  canPlanObjective,
   contractRevisionOf,
   currentMilestone,
   estimateObjectiveRuns,
@@ -72,6 +73,7 @@ import {
   planPlacement,
   requiredValidationKinds,
   sortedMilestones,
+  TOWER_OBJECTIVE_MODES,
   TOWER_VALIDATION_KINDS,
   TowerObjectiveCompletionError,
   validationResultSubject,
@@ -125,6 +127,7 @@ import type {
   TowerMissionStatus,
   TowerObjective,
   TowerObjectiveAutopilotState,
+  TowerObjectiveMode,
   TowerReviewInfo,
   TowerRosterEntry,
   TowerState,
@@ -1644,6 +1647,28 @@ export class TowerStore {
       const autopilot = applyAutopilotPatch(this.requireObjective(state), patch);
       await this.save(state);
       return autopilot;
+    });
+  }
+
+  async setObjectiveMode(mode: TowerObjectiveMode): Promise<void> {
+    if (!TOWER_OBJECTIVE_MODES.includes(mode)) {
+      throw new TowerProtocolError(
+        `objective mode must be ${TOWER_OBJECTIVE_MODES.join(' | ')}, got "${String(mode)}"`,
+      );
+    }
+    await this.withStateLock(async () => {
+      const state = await this.load();
+      const objective = state.objective;
+      if (!canPlanObjective(objective)) {
+        throw new TowerProtocolError(
+          `objective ${objective!.id} is ${objective!.status} — the objective mode is chosen while an objective is planned, so it changes only when no objective is open or the open one is still planning`,
+        );
+      }
+      if (state.objectiveMode === mode) return;
+      const from = state.objectiveMode;
+      state.objectiveMode = mode;
+      await this.save(state);
+      await this.appendLog(TOWER_NAME, 'objective.mode', { mode, from });
     });
   }
 

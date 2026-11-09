@@ -10,6 +10,7 @@ export type TowerMilestoneStatus = 'pending' | 'active' | 'validating' | 'passed
 export type TowerValidationKind = 'scrutiny' | 'user-testing' | 'commands';
 export type TowerValidationVerdict = 'pass' | 'fail';
 export type TowerMissionOrigin = 'plan' | 'fix';
+export type TowerObjectiveMode = 'interactive' | 'headless';
 
 export interface TowerMilestoneValidationSpec {
   scrutiny: boolean;
@@ -166,6 +167,7 @@ export interface TowerState {
   missions: TowerMission[];
   objective?: TowerObjective;
   objectiveHistory?: TowerObjective[];
+  objectiveMode?: TowerObjectiveMode;
 }
 
 export type TowerFindingType = 'bug' | 'improve' | 'vuln' | 'idea';
