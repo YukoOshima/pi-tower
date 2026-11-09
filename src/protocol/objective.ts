@@ -871,6 +871,7 @@ export function applyObjectiveUpdate(
   const reopened = reopenChangedMilestones(before, next);
   if (contractChanged) next.contractRevision = contractRevisionOf(next) + 1;
   if (contractChanged && next.approvedAt !== undefined) {
+    if (before.status === 'blocked' || before.status === 'paused') next.approvalRequiresHuman = true;
     next.status = 'awaiting-approval';
     next.approvalReason = 'contract-changed';
     delete next.approvedBy;

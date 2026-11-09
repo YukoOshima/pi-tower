@@ -1357,6 +1357,7 @@ export class TowerStore {
         changes: result.changes.join(','),
         status: result.objective.status,
         reopened: result.reopened.length > 0 ? result.reopened.join(',') : undefined,
+        approval: result.objective.approvalRequiresHuman === true ? 'human' : undefined,
       });
       return result;
     });
@@ -1397,6 +1398,11 @@ export class TowerStore {
           `objective ${objective.id} is ${objective.status} — only an objective awaiting approval can be approved; the orchestrator requests approval first`,
         );
       }
+      if (by === 'auto' && objective.approvalRequiresHuman === true) {
+        throw new TowerProtocolError(
+          `objective ${objective.id} changed its contract while it was blocked or paused, so only a human can approve it — auto-approval stays refused until a human approves`,
+        );
+      }
       this.assertApprovable(state, objective, 'be approved');
       const now = new Date().toISOString();
       objective.status = 'executing';
@@ -1404,6 +1410,7 @@ export class TowerStore {
       objective.approvedAt = now;
       objective.startedAt ??= now;
       delete objective.approvalReason;
+      delete objective.approvalRequiresHuman;
       const activated = this.activateCurrentMilestoneLocked(objective, now);
       await this.saveObjective(state, 'objective.approve', {
         id: objective.id,
@@ -4113,6 +4120,7 @@ function objectiveSection(state: TowerState, objective: TowerObjective): string[
     objective.status,
     ...(objective.approvedBy === undefined ? [] : [`approved by ${objective.approvedBy}`]),
     ...(objective.approvalReason === undefined ? [] : [`approval: ${objective.approvalReason}`]),
+    ...(objective.approvalRequiresHuman === true ? ['only a human can approve'] : []),
     ...(objective.pausedReason === undefined ? [] : [`paused: ${objective.pausedReason}`]),
     ...(objective.blockedReason === undefined ? [] : [`blocked: ${objective.blockedReason}`]),
   ].join(' · ');

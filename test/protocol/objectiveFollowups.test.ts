@@ -6,7 +6,13 @@ import { promisify } from 'node:util';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { ACTIVITY_LOG, STATE_FILE, TowerStore, canPlanObjective } from '../../src/protocol/index.ts';
+import {
+  ACTIVITY_LOG,
+  MISSIONS_INDEX,
+  STATE_FILE,
+  TowerStore,
+  canPlanObjective,
+} from '../../src/protocol/index.ts';
 import type { TowerObjective, TowerState } from '../../src/protocol/index.ts';
 
 const execFileAsync = promisify(execFile);
@@ -232,5 +238,72 @@ describe('starting a validation whose required kinds already passed', () => {
     await report('v-scrutiny-2', 'scrutiny', 'pass');
     const moved = await store.startMilestoneValidation('MS1', next, { skipUserTesting: true });
     expect(moved.milestone).toMatchObject({ status: 'validating', validationCommit: next });
+  });
+});
+
+describe('approval after a contract change while blocked or paused', () => {
+  async function missionsIndex(): Promise<string> {
+    return readFile(store.abs(MISSIONS_INDEX), 'utf8');
+  }
+
+  it('refuses auto-approval after a change while paused until a human approves', async () => {
+    await approvedObjective();
+    await store.pauseObjective('the human wants to rethink');
+    const changed = await store.updateObjective({ definitionOfDone: ['works', 'documented'] });
+    expect(changed.objective).toMatchObject({
+      status: 'awaiting-approval',
+      approvalReason: 'contract-changed',
+      approvalRequiresHuman: true,
+    });
+    expect(changed.objective.pausedReason).toBeUndefined();
+    expect(await activityLog()).toContain(
+      'objective.update id=O1 changes=definitionOfDone status=awaiting-approval approval=human',
+    );
+    expect(await missionsIndex()).toContain(
+      'Status: awaiting-approval · approval: contract-changed · only a human can approve\n',
+    );
+
+    const before = await rawState();
+    await expect(store.approveObjective('auto')).rejects.toThrow(
+      /objective O1 changed its contract while it was blocked or paused, so only a human can approve it — auto-approval stays refused until a human approves/,
+    );
+    expect(await rawState()).toBe(before);
+
+    const approved = await store.approveObjective('human');
+    expect(approved).toMatchObject({ status: 'executing', approvedBy: 'human' });
+    expect('approvalRequiresHuman' in (await readState()).objective!).toBe(false);
+    expect(await missionsIndex()).not.toContain('only a human can approve');
+
+    await store.updateObjective({ acceptanceCommands: ['npm test'] });
+    expect((await readState()).objective).toMatchObject({ status: 'awaiting-approval' });
+    expect('approvalRequiresHuman' in (await readState()).objective!).toBe(false);
+    expect((await store.approveObjective('auto')).approvedBy).toBe('auto');
+  });
+
+  it('keeps requiring a human after a change while blocked, through further changes, a block and a resume', async () => {
+    await approvedObjective();
+    await store.blockObjective('MS1 cannot converge');
+    await store.updateObjective({ goal: 'ship it properly' });
+    await store.updateObjective({ definitionOfDone: ['works', 'tested'] });
+    expect((await readState()).objective).toMatchObject({ status: 'awaiting-approval', approvalRequiresHuman: true });
+    await store.blockObjective('waiting for the human');
+    expect((await store.resumeObjective()).status).toBe('planning');
+    await store.requestObjectiveApproval();
+    await expect(store.approveObjective('auto')).rejects.toThrow(/only a human can approve it/);
+    expect((await store.approveObjective('human')).status).toBe('executing');
+  });
+
+  it('never requires a human for a change while executing or planning, or before the first approval', async () => {
+    await draftWithFeature();
+    await store.updateObjective({ goal: 'ship it now' });
+    await store.blockObjective('paused planning');
+    await store.updateObjective({ definitionOfDone: ['works', 'fast'] });
+    expect((await readState()).objective).toMatchObject({ status: 'blocked' });
+    await store.resumeObjective();
+    await store.requestObjectiveApproval();
+    expect((await store.approveObjective('auto')).status).toBe('executing');
+    await store.updateObjective({ definitionOfDone: ['works'] });
+    expect((await store.approveObjective('auto')).status).toBe('executing');
+    expect(await rawState()).not.toContain('approvalRequiresHuman');
   });
 });

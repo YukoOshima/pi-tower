@@ -72,6 +72,7 @@ export interface TowerObjective {
   approvedBy?: 'human' | 'auto';
   approvedAt?: string;
   approvalReason?: string;
+  approvalRequiresHuman?: boolean;
   createdAt: string;
   startedAt?: string;
   completedAt?: string;
