@@ -8,14 +8,19 @@ Once tower mode is on, pi's main agent becomes the *tower*, which is the orchest
 
 Tower is neither an ordinary subagent call nor a swarm. You turn it on explicitly. It keeps its state in the repository (`.tower/`), and it comes with merge checks and cleanup commands. Its strengths are **responsiveness** and **parallel development**.
 
+**Objective mode** (new in 0.2) makes the tower keep going until the job is verifiably done, in the style of [Factory's Droid Missions](https://docs.factory.com/missions/overview): you approve a plan of milestones with a validation contract, validators check every milestone, every failure becomes a fix, and the objective completes only when the whole contract holds. The difference is in the execution. Missions work through features one after another; pi-tower runs the features of a milestone in parallel, each in its own git worktree with its own independent review and merge gate. See [Objective mode](#objective-mode).
+
 > [!WARNING]
-> Workers and reviewers run unattended. They never ask you to approve individual actions. Read [Safety and resource cost](#safety-and-resource-cost) before you start.
+> Workers, reviewers and validators run unattended. They never ask you to approve individual actions. Read [Safety and resource cost](#safety-and-resource-cost) before you start.
 
 ## Contents
 
 - [Three models, one per role](#three-models-one-per-role)
 - [Installation](#installation)
 - [Quick start](#quick-start)
+- [Objective mode](#objective-mode)
+- [Headless runs: `pi-tower run`](#headless-runs-pi-tower-run)
+- [Droid Missions and pi-tower](#droid-missions-and-pi-tower)
 - [When Tower fits](#when-tower-fits)
 - [Run a workflow](#run-a-workflow)
 - [Check status and intervene](#check-status-and-intervene)
@@ -25,6 +30,7 @@ Tower is neither an ordinary subagent call nor a swarm. You turn it on explicitl
 - [Command reference](#command-reference)
 - [Tool reference](#tool-reference)
 - [Safety and resource cost](#safety-and-resource-cost)
+- [Known limitations](#known-limitations)
 - [Differences from kimi-code Tower](#differences-from-kimi-code-tower)
 - [Development](#development)
 - [License and credits](#license-and-credits)
@@ -88,10 +94,213 @@ pi
 ```
 
 1. Run `/tower on`. The footer shows `tower: on`, and the main session switches to your orchestrator model if you configured one.
-2. Type your objective as a normal message, for example: "Split the checkout documentation update into independent missions, test each one, and merge only branches that pass independent review."
-3. Follow the progress with `/tower status` and `/tower agents`. The tower wakes up by itself when a worker finishes or a message arrives, so you do not need to poll.
+2. Describe the work as a normal message, for example: "Split the checkout documentation update into independent missions, test each one, and merge only branches that pass independent review." For work that must be finished and verified against a contract you approve, hand it over with `/tower objective <what you want done>` instead; [Objective mode](#objective-mode) walks through it.
+3. Follow the progress with `/tower status` and `/tower agents` (and `/tower objective status` for an objective). The tower wakes up by itself when a worker finishes or a message arrives, so you do not need to poll.
 4. Check the merged result yourself: `git status`, `git log --graph`, and your tests.
 5. Run `/tower teardown` to remove the finished worktrees, then `/tower off`.
+
+## Objective mode
+
+A plain tower run ends when the orchestrator decides the work is done. An **objective** ends only when its validation contract is met. Objective mode follows the shape of [Factory's Droid Missions](https://docs.factory.com/missions/overview): you agree on a plan, you approve it, and the fleet keeps working, validating each milestone and fixing what fails, until everything checks out. What changes is the execution: the features of a milestone run in parallel.
+
+### What it guarantees
+
+- **You approve the plan.** The orchestrator turns your request into a contract: a goal, a definition of done, optional acceptance commands, and ordered milestones, each with its own validation. No feature starts before you run `/tower approve`. The orchestrator cannot approve for you: none of its tools can.
+- **Every milestone is validated.** When all features of a milestone are merged (or abandoned), validators check the integrated result on one exact commit, the tip of the base branch.
+- **Failures get fixed.** A failed validation goes back to the orchestrator, which plans fix features into the same milestone. Once they merge, validation runs again on the new tip. This repeats until the milestone passes.
+- **Completion is gated.** The objective completes only when every milestone has passed, no feature is still open, and the final milestone passed on the current base tip. Nobody can mark it done otherwise, the orchestrator included.
+- **The contract stays yours.** Changing it after approval (the goal, the definition of done, the acceptance commands, a milestone's validation, removing or reordering milestones) sends the plan back to you for approval. Appending milestones at the end and adding notes do not.
+- **It stops instead of spinning.** A validation kind that keeps failing, a stall that the orchestrator cannot resolve, or a used-up budget blocks or pauses the objective, and you are told why.
+
+**How the execution differs from Droid Missions.** Missions work through features one after another. pi-tower starts every feature of the current milestone whose dependencies are met at the same time, up to `maxRunningAgents`. Each feature is an ordinary tower mission with its own branch and worktree, its own worker, an independent reviewer, and the merge gate. Milestones still run in order: the next one starts only after the previous one has passed. [Droid Missions and pi-tower](#droid-missions-and-pi-tower) compares the two in detail.
+
+### Five-minute walkthrough
+
+1. **Start pi on the branch that should receive the work**, and turn tower mode on with `/tower on`.
+
+2. **Hand over the objective**, inline or from a Markdown file such as [`examples/objective.md`](examples/objective.md):
+
+   ```text
+   /tower objective Add a --format csv|json option to `shop report`; the table output must not change; npm test must pass
+   /tower objective @docs/csv-export.md
+   ```
+
+   If `.tower/` does not exist yet, this creates it and records the current branch as the base. The orchestrator then asks you what done looks like, what is out of scope, how a user would try the result, and which commands prove it. Answer in normal messages.
+
+3. **Review the plan.** The orchestrator drafts the contract, plans the features of the first milestone, and asks for your approval. You get an approval request like this one:
+
+   ```text
+   Objective O1 "CSV and JSON export for shop report" is ready for your approval.
+
+   Goal: Add a --format option to shop report so the monthly report can be exported as CSV or JSON; the table output stays as it is.
+
+   Definition of done:
+   1. shop report --format csv writes RFC 4180 CSV with a header row
+   2. shop report --format json writes a JSON array of the same rows
+   3. shop report without --format prints exactly what it prints today
+   4. npm test and npm run typecheck pass
+
+   Acceptance commands (run on the final milestone): `npm ci && npm run typecheck && npm test`
+
+   Milestones — in order; the features inside a milestone run in parallel:
+   1. MS1 "Serializers" — 2 features: M1 "CSV serializer", M2 "JSON serializer"
+      CSV and JSON serializers for report rows, with unit tests.
+      validation: scrutiny · commands `npm ci && npm test`
+   2. MS2 "CLI options and docs" — features are planned when it becomes current
+      validation: scrutiny · user-testing · commands `npm ci && npm run typecheck && npm test`
+
+   Assumptions and notes:
+   - Assumed: --output overwrites an existing file.
+
+   Estimated runs: ≈ 6 (2 features + 2 × 2 milestones). This is a floor, not a ceiling: failed validations add fix features and further validation rounds.
+
+   To approve, run: /tower approve
+   Only you can approve — the orchestrator cannot. To change the plan, tell the orchestrator what to change; it updates the plan and asks for approval again.
+   ```
+
+   To change anything, say so in a normal message. The orchestrator revises the plan and asks again.
+
+4. **Approve** with `/tower approve`. From now on the autopilot does the mechanics: it starts the workers, sends finished branches to reviewers, merges what passes the gate, runs the validators and moves on to the next milestone. The orchestrator is woken only when judgment is needed.
+
+5. **Watch.** `/tower objective status` shows the dashboard without starting a model turn:
+
+   ```text
+   Objective O1 — CSV and JSON export for shop report
+   🔵 executing · elapsed 37m 00s · cost $4.37 of $25.00 · approved by human
+   Goal: shop report prints the monthly sales report as a table. Add a --format option so the same report can be exported as CSV or JSON.
+
+   ## Milestones
+   ✅ MS1 Serializers — passed · features 3/3 merged (1 fix) · scrutiny r2 pass · user-testing r2 pass · commands r2 pass
+   🔵 MS2 CLI options and docs — active · features 0/2 merged · validation: scrutiny · user-testing · commands `npm ci && npm run typecheck && npm test`
+
+   ## Current milestone MS2 — features (run in parallel)
+   - 🔵 M4 --format and --output options — active · worker ap-w-M4-1
+   - 🟢 M5 README for report export — completed
+
+   ## Live agents (2)
+   - ap-w-M4-1 — worker · M4 --format and --output options
+   - ap-r-M5-1 — reviewer · feat/readme-for-report-export
+
+   ## Next
+   2 of 2 features of MS2 still open, running in parallel — validation starts once every feature is merged or abandoned.
+   ```
+
+   Here the first scrutiny round of MS1 failed, the orchestrator planned the fix feature M3, and the second round passed on the new tip. You can keep talking to the tower the whole time. `/tower pause` stops new work, and `/tower resume` continues.
+
+6. **Done.** When the final milestone has passed on the current base tip, the objective completes and you get a summary: every milestone with its passing rounds, the merged features, the elapsed time and the cost. Check the result yourself, then run `/tower teardown` and `/tower off`.
+
+If the objective blocks instead, you get the reason and the latest failures. Tell the orchestrator what to change or answer its question, then run `/tower resume`.
+
+### Lifecycle
+
+An objective moves through these states:
+
+| Status | What happens | How it moves on |
+| --- | --- | --- |
+| `planning` | The orchestrator drafts the contract and plans features, with you, or on its own in a headless run | The orchestrator requests approval. That needs a goal, at least one definition-of-done item, at least one milestone, and at least one build feature in the first milestone. |
+| `awaiting-approval` | The plan waits for you, and you are notified with the approval request | `/tower approve`, or automatic approval if you configured it |
+| `executing` | The autopilot drives the work, milestone by milestone | It completes through the gate. `/tower pause` or a budget pauses it, and it blocks when the work cannot converge. |
+| `paused` | Nothing new starts. Running agents finish their current turn. | `/tower resume` |
+| `blocked` | Nothing new starts, and you are told why | You decide: answer the orchestrator or have it change the plan, then run `/tower resume`. Or start a new objective. |
+| `completed` | Every milestone passed, and the final validation is on the current base tip | Start the next one with `/tower objective` |
+
+Milestones have their own states. A milestone is `pending` until it becomes current, `active` while its features run, and `validating` while its validation runs. Then it is `passed`, or `failed`, which reopens it for fix features, or `blocked` once one validation kind has failed `maxValidationRounds` times. The current milestone is the first one that has not passed. Features of later milestones can be planned early, but they start only when their milestone is current. A current milestone without features wakes the orchestrator to plan them.
+
+- **One objective at a time.** A workspace has at most one open objective. `/tower objective` is accepted when there is none, when the previous one is completed or blocked (it is archived when the new one is drafted), and while the open one is still planning (the orchestrator then revises it). It is refused while an objective is awaiting approval, executing or paused.
+- **Resuming.** `/tower resume` works on a paused or blocked objective. It first reloads the objective's limits from your current [objective settings](#the-objective-section), so raise a budget in `tower.json` before you resume. It also resets the stall counter and reopens a blocked milestone so that the orchestrator can plan fixes. An objective that was never approved goes back to planning.
+- **Tower mode off.** The autopilot runs only while tower mode is on. After `/tower off`, an executing objective does not advance until you turn tower mode on again.
+
+### Validation
+
+Every milestone says which kinds of validation it needs. When all of its features are merged or abandoned, the required kinds start together on the current base tip.
+
+| Kind | Run by | What it checks | Required when |
+| --- | --- | --- | --- |
+| `scrutiny` | A validator agent | Reviews the milestone's merged changes against the tasks of every feature and the definition of done, looks for broken seams between the features that were built in parallel, and runs typecheck, lint and tests | The milestone's `scrutiny` switch is on (the default) and `skipScrutiny` is off |
+| `user-testing` | A validator agent | Uses the product the way a user would, following the milestone's QA instructions: CLI runs, scripts, HTTP calls. Every deviation is a failure with steps to reproduce it. | The milestone's `user_testing` switch is on (the default) and `skipUserTesting` is off |
+| `commands` | The tower itself, with no model | Runs the milestone's commands, plus the objective's acceptance commands on the final milestone. It passes when every command exits with 0. | The milestone has at least one command to run |
+
+A milestone passes when the latest round of every required kind passed on the same commit. A milestone that requires no kind passes as soon as its features are merged or abandoned.
+
+> [!IMPORTANT]
+> Validation commands run mechanically in a fresh, detached checkout of the base tip, without installed dependencies or build output. Each command must bring its own setup: write `npm ci && npm test`, not `npm test`.
+
+The commands run one after another, each in its own `bash -c` started at the root of that checkout, so `cd` and exported variables do not carry over from one command to the next. Every command runs, even after an earlier one failed. Each one gets 15 minutes before its process group is killed. Its stdin is closed, and the environment adds `CI=1`, `TERM=dumb`, `NO_COLOR=1` and similar variables. The last 4000 characters of each command's output go into the validation report.
+
+Validator agents work in a detached validation worktree, `.tower/worktrees/val-<milestone>-<kind>-r<round>`, checked out at the commit they validate. They may install dependencies, build and start the product there, but they cannot change files: they have no `write` or `edit` tool, and such calls are vetoed. Each validator reports its verdict exactly once with `TowerValidate`, and its worktree is removed afterwards. Every round, the mechanical ones included, is recorded under `.tower/comms/validations/`.
+
+- Rounds are numbered per milestone and kind. A kind that failed on a commit does not run again on that commit: the next round needs a new base tip, normally a merged fix.
+- When the failed rounds of one kind reach `maxValidationRounds` (default 3), the milestone blocks, and so does the objective.
+- When the base moves while a milestone is validating, or after the final milestone passed, validation runs again on the new tip. Rounds on an older commit are stale.
+- When the contract changes, only rounds recorded under the current contract count.
+
+### Autopilot and orchestrator
+
+After approval, the **autopilot** drives the mechanics. It is plain code, not a model. It reacts to every change of the tower state, to every agent that ends, to inbox messages, and to a watchdog timer. It acts only through the same tower operations that the orchestrator uses, so every rule still applies: no merge without a clean independent review on the exact branch tip, and no change outside a feature's scope.
+
+The autopilot:
+
+- starts a worker for each feature of the current milestone whose dependencies are merged or abandoned, up to `maxRunningAgents`;
+- spawns a reviewer for each review request on the current branch tip;
+- resumes an idle worker that received review findings or has a rebase conflict to resolve;
+- replaces a worker that failed or timed out with a fresh one on the same branch, up to `maxFeatureAttempts` workers per feature, but never a worker you stopped;
+- rebases stale branches and merges the branches that pass the gate;
+- starts validation: it spawns the validators and runs the commands;
+- advances to the next milestone, and completes the objective through the gate;
+- pauses the objective when a budget is used up, and blocks it after too many failed validation rounds or stall wakes.
+
+The orchestrator is woken only for judgment, with one of these reasons:
+
+- `plan-milestone`: the current milestone has no features yet;
+- `validation-failed`: plan fix features from the failures;
+- `blocker`: a worker reported a blocker or asked a question;
+- `feature-attempts-exhausted`: a feature used up its worker attempts;
+- `merge-blocked`: the merge gate is blocked for a reason that needs judgment, such as files outside the feature's scope;
+- `rebase-conflict`: a conflict that no worker can take over;
+- `review-stuck` and `validation-stuck`: reviewers or validators keep ending without a result;
+- `stalled`: nothing has moved for `stallTimeoutMs`.
+
+Each wake is sent once per situation. While the autopilot drives an executing objective, the finished agents and the inbox messages that it handles itself reach the orchestrator as context without starting a model turn, so the orchestrator spends tokens on judgment only. When the same autopilot action is refused on three ticks in a row, the orchestrator gets the exact error and a suggested remedy.
+
+You stay in charge. Talk to the orchestrator as usual, stop an agent for good with `/tower stop <agent>` (the autopilot never replaces a worker you stopped), or stop all new work with `/tower pause`.
+
+**Manual mode.** With `"objective": { "autopilot": false }` in `tower.json`, the orchestrator drives feature execution itself, as in a plain tower run: it spawns workers and reviewers, resumes and replaces workers, rebases and merges with the tower tools. Validation, milestone advancement, completion, the watchdog and the budgets stay automatic.
+
+### Watchdog, stall wakes and budgets
+
+- **Watchdog.** Besides reacting to events, the autopilot checks the objective every `watchdogIntervalMs` (default 60 seconds).
+- **Stall wakes.** The objective stalls when nothing has changed for `stallTimeoutMs` (default 3 minutes) while no agent or validation is running and the orchestrator is idle. "Nothing" covers the missions, the branch tips, the reviews, the validation rounds, the base tip and the inbox. The orchestrator is then woken to re-evaluate. After `maxStallWakes` (default 3) stall wakes in a row without progress, the objective blocks.
+- **Headless planning.** In a headless run, an objective that stays in planning without progress for `stallTimeoutMs` gets a wake that tells the orchestrator to finish the plan and request approval.
+- **Budgets.** `maxWallTimeMs` counts from the first approval. `maxCostUsd` counts the cost that pi reports for every tower agent and for the orchestrator's own turns, so it is only as accurate as the prices pi knows for your models. When either is reached, the objective pauses and you are notified. To go on, raise or remove the limit in `tower.json` and run `/tower resume`. Both are unset by default.
+
+`maxValidationRounds`, `maxFeatureAttempts`, `maxWallTimeMs` and `maxCostUsd` are copied into the objective when it is drafted, and `/tower resume` refreshes them. The orchestrator cannot change them.
+
+### Restarts
+
+An objective lives in git and in `.tower/comms/state.json`, so it survives a restart of pi. Agents do not (see [Stop, teardown, and restart](#stop-teardown-and-restart)). When tower mode comes back on with an executing objective, through `/tower on` in a new pi process or a continued session, the autopilot picks the objective up at once:
+
+- each feature whose worker was lost gets a fresh worker on its existing branch, which continues from where the branch history shows it stopped. This counts as a new attempt toward `maxFeatureAttempts`;
+- validations cut short by the restart run again, and their leftover validation worktrees are removed;
+- reviews, merges and milestones continue from the recorded state.
+
+A paused objective stays paused until `/tower resume`, and an objective awaiting approval still waits for you. In manual mode, the orchestrator replaces lost workers itself, as in a plain tower run.
+
+### Objective commands and tools
+
+| Command | What it does |
+| --- | --- |
+| `/tower objective [--headless] <text \| @file>` | Hands an objective to the orchestrator, as text or from a file (`@path`, relative to pi's working directory), and returns at once while the orchestrator plans. Tower mode must be on. With `--headless`, the orchestrator plans without asking questions: it decides open points itself, records each assumption as a note on the objective, and requests approval. `pi-tower run` uses this. |
+| `/tower objective status` | Shows the objective dashboard without a model turn |
+| `/tower approve [--auto]` | Approves the plan of the objective that awaits approval. The first milestone becomes active and the autopilot starts. `--auto` records the approval as automatic instead of human; this is what `pi-tower run --auto-approve` sends. After a contract change while the objective was blocked or paused, only a plain `/tower approve` is accepted. |
+| `/tower pause [reason]` | Pauses the executing objective. Running agents finish their current turn, and nothing new starts. |
+| `/tower resume` | Resumes a paused or blocked objective, after reloading its limits from the current objective settings |
+
+Two tools exist for objectives only:
+
+- **`TowerObjective`** (orchestrator only) manages the objective with the actions `draft`, `update`, `request-approval`, `status` and `block`. It has no approve action and no complete action, and it cannot change the limits.
+- **`TowerValidate`** (validators only) submits a validator's verdict for its milestone and kind: `pass` or `fail`, with failures, checks and evidence. A validator calls it exactly once.
+
+Two existing tools gain objective parameters. `TowerPlan` takes a `milestone` for every feature (required for build missions while an objective is open) and an `origin` of `plan` or `fix`. `TowerSpawn` takes `kind: "validator"` with a `milestone` and a `validation_kind` (`scrutiny` or `user-testing`), which the orchestrator uses to recover a stuck validation. See the [Tool reference](#tool-reference).
 
 ## When Tower fits
 
@@ -103,7 +312,11 @@ Good candidates:
 - The requirements are still moving, and you expect to add input, redirect work, or change priorities often.
 - You want every change reviewed carefully, with its own branch and its own review.
 
+Choose objective mode when you can say up front what done means and how to check it, and you want the tower to keep going until those checks pass. Steer a free-form run with messages when you are still exploring.
+
 ## Run a workflow
+
+This section describes a free-form tower run, steered by your messages. An objective uses the same workspace, branches, reviews and merge gate; [Objective mode](#objective-mode) describes what it adds.
 
 ### Before you start
 
@@ -123,11 +336,11 @@ Tower merges only into a local branch, never into a remote-tracking ref or a tag
 
 ### Steps
 
-1. **Turn Tower on.** In most cases run `/tower on`. This command only turns the mode on. It sends no objective. On the first initialization the tower records the current local branch as the base. Later activations reuse the recorded base.
+1. **Turn Tower on.** In most cases run `/tower on`. This command only turns the mode on. It sends no task. On the first initialization the tower records the current local branch as the base. Later activations reuse the recorded base.
 
    If HEAD is detached (no branch is checked out), or you want another base, run `/tower <base-branch>` instead, for example `/tower feature/my-objective`.
 
-2. **Send the objective.** Type the task as a normal chat message, and say how to verify the work and what counts as done. The tower initializes `.tower/`, plans missions, and starts every worker whose dependencies are satisfied. When a worker finishes or a message reaches the tower's inbox, the tower resumes by itself. If the tower is busy at that moment, the wake-up waits until its current turn ends.
+2. **Describe the task.** Type the task as a normal chat message, and say how to verify the work and what counts as done. The tower initializes `.tower/`, plans missions, and starts every worker whose dependencies are satisfied. When a worker finishes or a message reaches the tower's inbox, the tower resumes by itself. If the tower is busy at that moment, the wake-up waits until its current turn ends.
 
 3. **Let the work run in the background.** Each worker works and commits on its own branch, in its own worktree. The tower assigns independent reviewers, rebases when needed, and merges approved missions in dependency order. Answer the tower when it asks about scope or priority.
 
@@ -139,9 +352,10 @@ Tower merges only into a local branch, never into a remote-tracking ref or a tag
 
 You do not need to know the worker protocol to watch and steer Tower.
 
-- **Read the dashboard.** `/tower` or `/tower status` reads the current state directly and does not start a model turn. It shows the base, missions, the roster (with each agent's model), the review gate, the inbox count, the concurrency budget, and recent activity.
+- **Read the dashboard.** `/tower` or `/tower status` reads the current state directly and does not start a model turn. It shows the base, missions, the roster (with each agent's model), the review gate, the inbox count, the concurrency budget, and recent activity. While there is an objective, it adds a one-line summary of it.
+- **Follow an objective.** `/tower objective status` shows the objective dashboard, also without a model turn: the status, elapsed time and cost, every milestone with its features and validation rounds, the live agents, and the next expected step.
 - **Redirect work.** While Tower is on, send a normal message to add constraints, change priorities, or ask for a summary. When the tower relays a message to a running worker, the worker sees it at its next step boundary. The tool call in flight is never interrupted.
-- **Inspect or stop an agent.** `/tower agents` lists the workers and reviewers of this session with their status, model, thinking level and mission. `/tower stop <agent>` stops a running one. A worker or reviewer you stop is *dead by intent*: the tower does not resume, reassign, or replace it unless you say so.
+- **Inspect or stop an agent.** `/tower agents` lists the workers, reviewers and validators of this session with their status, model, thinking level and assignment. `/tower stop <agent>` stops a running one. A worker or reviewer you stop is *dead by intent*: the tower does not resume, reassign, or replace it unless you say so. During an executing objective, the autopilot never resumes or replaces a worker you stopped. It does start a fresh reviewer or validator when a review or validation is still missing, up to `maxFeatureAttempts`; pause the objective if you want nothing new to start.
 - **Change the base.** Run `/tower <base-branch>` again. Tower re-checks the open missions against the new base, and only stale branches need a rebase. The main checkout must be on the recorded base before anything is merged.
 - **Read the diagnostics.** pi-tower writes its own diagnostics, such as failed notifications and errors from extensions inside agent sessions, to `.tower/pi-tower.log`. Before `.tower/` exists they go to `pi-tower.log` in the pi agent directory.
 
@@ -169,13 +383,13 @@ These actions clean up different things:
 
 | Action | What it does | What remains |
 | --- | --- | --- |
-| `/tower off` | Leaves tower mode in this session and switches back to the model you used before `/tower on`. Background agents keep running and no files are removed. | `.tower/`, mission branches and worktrees |
-| `/tower teardown` | Asks the tower to remove the mission worktrees that are safe to remove and report the result. Worktrees of running agents are always kept. Worktrees with uncommitted changes are kept unless the removal is forced. | Mission branches and the `.tower/comms/` audit records. Tower mode stays on. |
-| Quit pi, or replace the session with `/new`, `/resume`, `/fork`, `/clone` or `/reload` | Stops every worker and reviewer of the tower. They have to be spawned again later. | The `.tower/` state on disk, branches and worktrees |
+| `/tower off` | Leaves tower mode in this session and switches back to the model you used before `/tower on`. Background agents keep running and no files are removed. The autopilot stops, so an executing objective does not advance until tower mode is on again. | `.tower/`, mission branches and worktrees |
+| `/tower teardown` | Asks the tower to remove the mission worktrees that are safe to remove and report the result. Worktrees of running agents are always kept. Worktrees with uncommitted changes are kept unless the removal is forced. Run it once the objective, if any, has completed. | Mission branches and the `.tower/comms/` audit records. Tower mode stays on. |
+| Quit pi, or replace the session with `/new`, `/resume`, `/fork`, `/clone` or `/reload` | Stops every worker, reviewer and validator of the tower. They have to be spawned again later. | The `.tower/` state on disk, branches and worktrees |
 
 Tower mode is saved in the pi session. When you continue that session (`pi -c`, `/resume`, `/reload`), tower mode comes back on, unless another running pi process owns the workspace by then. In that case it turns off with a warning.
 
-Agents do not survive a restart. After pi restarts, missions and worktrees are still there, but the workers and reviewers of the previous run are gone. The tower spawns fresh workers under new names. `TowerResume` refuses old agents with a clear message. When a different session takes the workspace over, the previous session's roster entries are retired.
+Agents do not survive a restart. After pi restarts, missions and worktrees are still there, but the workers and reviewers of the previous run are gone. The tower spawns fresh workers under new names. `TowerResume` refuses old agents with a clear message. When a different session takes the workspace over, the previous session's roster entries are retired. An executing objective continues by itself once tower mode is back on; see [Restarts](#restarts).
 
 ## Model configuration
 
@@ -344,22 +558,27 @@ With Kimi Code, you cannot give reviewers a model different from the tower's wit
 | Command | What it does |
 | --- | --- |
 | `/tower` or `/tower status` | Shows the compact tower status without a model turn |
-| `/tower on` | Turns tower mode on: activates the tower tools, adopts an existing `.tower/` workspace, and switches to the orchestrator model. It sends no objective. |
+| `/tower on` | Turns tower mode on: activates the tower tools, adopts an existing `.tower/` workspace, and switches to the orchestrator model. It sends no task. An executing objective continues at once. |
 | `/tower <base-branch>` | Turns tower mode on if it is off, and makes this local branch the base: a new workspace is initialized with it, an existing one is re-anchored to it. A missing branch is created from the current checkout, and uncommitted changes are committed onto it. In the interactive UI, pi-tower asks before it creates a branch. |
-| `/tower off` | Turns tower mode off and switches back to the previous model. Agents keep running and `.tower/` stays. The tower tools remain available, but `TowerInit`, `TowerPlan` and `TowerSpawn` refuse until tower mode is on again. |
+| `/tower off` | Turns tower mode off and switches back to the previous model. Agents keep running and `.tower/` stays, but the autopilot stops. The tower tools remain available, but `TowerInit`, `TowerPlan`, `TowerSpawn` and `TowerObjective` (except its `status` action) refuse until tower mode is on again. |
 | `/tower teardown` | Asks the tower, in a normal message, to run `TowerTeardown` and report what it did. Tower mode stays on. |
-| `/tower models` | Shows the role and pool models, their sources, the config files and any problems |
+| `/tower models` | Shows the role and pool models, their sources, the config files, any problems, and the objective settings |
 | `/tower models <role\|alias> <provider/modelId[:thinking]> [--project]` | Sets a role or pool model in the global `tower.json`, or in the project file with `--project` |
 | `/tower models <role\|alias> --clear [--project]` | Removes a role or pool model |
-| `/tower agents` | Lists this session's workers and reviewers, including finished ones, with status, model and mission |
-| `/tower stop <agent>` | Stops a running worker or reviewer, given its roster name, agent id or task id. This is a human stop: the tower never resumes, reassigns or replaces it unless you say so. |
+| `/tower agents` | Lists this session's workers, reviewers and validators, including finished ones, with status, model and assignment |
+| `/tower stop <agent>` | Stops a running worker, reviewer or validator, given its roster name, agent id or task id. This is a human stop: the tower never resumes, reassigns or replaces it unless you say so. During an objective, the autopilot may still start a fresh reviewer or validator for a missing review or validation. |
+| `/tower objective [--headless] <text \| @file>` | Hands an objective to the orchestrator, inline or from a file. Tower mode must be on, and no other objective may be awaiting approval, executing or paused. `--headless` plans without questions. See [Objective commands and tools](#objective-commands-and-tools). |
+| `/tower objective status` | Shows the objective dashboard without a model turn |
+| `/tower approve [--auto]` | Approves the plan of the objective awaiting approval. `--auto` records an automatic approval. |
+| `/tower pause [reason]` | Pauses the executing objective: running agents finish their turn, and nothing new starts |
+| `/tower resume` | Resumes a paused or blocked objective, after reloading its limits from the current objective settings |
 | `/tower help` | Shows the usage of every subcommand (`--help` and `-h` work too) |
 
-Subcommands are case-insensitive. The base branch keeps its case. Tab completion covers subcommands, agent names, model targets and the `--clear`/`--project` options.
+Subcommands are case-insensitive. The base branch keeps its case. Tab completion covers subcommands, agent names, model targets, the `--clear`/`--project` options, `objective status`/`--headless`, and `approve --auto`.
 
 Common slips are refused with a "did you mean" hint instead of being taken as a branch name:
 
-- the near-miss words `model`, `config`, `configure`, `agent`, `task`, `tasks`, `list`, `ls`, `start`, `enable`, `disable`, `stat`, `state` and `kill`;
+- the near-miss words `model`, `config`, `configure`, `agent`, `task`, `tasks`, `list`, `ls`, `start`, `enable`, `disable`, `stat`, `state`, `kill`, `objectives`, `goal`, `approval`, `accept`, `unpause` and `continue`;
 - extra words after a subcommand that takes none, such as `/tower on now`;
 - base branch names with spaces.
 
@@ -369,15 +588,15 @@ Only you can turn tower mode on. The model cannot enable it by itself.
 
 ## Tool reference
 
-pi-tower has 17 tools. The orchestrator gets 16 of them. Workers and reviewers get 7, and `TowerComplete` exists only for them.
+pi-tower has 19 tools. The orchestrator gets 17 of them. Workers and reviewers get 7, and `TowerComplete` exists only for them. Validators get 5, and `TowerValidate` exists only for them.
 
 **Orchestrator tools.** They become active with `/tower on`, and only the main session has them.
 
 | Tool | Purpose |
 | --- | --- |
 | `TowerInit` | Initializes (or adopts) the `.tower/` workspace and records the base branch |
-| `TowerPlan` | Splits the objective into missions with ids, branches, scopes, tasks and dependencies |
-| `TowerSpawn` | Starts a worker for a mission in its own worktree, or a reviewer for a branch, with the role model or an explicit choice |
+| `TowerPlan` | Splits the work into missions with ids, branches, scopes, tasks and dependencies. During an objective, each feature also names its `milestone` and an `origin` of `plan` or `fix`. |
+| `TowerSpawn` | Starts a worker for a mission in its own worktree, a reviewer for a branch, or a validator for a validating milestone (`milestone`, `validation_kind`), with the role model or an explicit choice |
 | `TowerMerge` | Merges a mission branch into the base (`--no-ff`) once the merge gate passes |
 | `TowerRebase` | Rebases a stale mission branch onto the current base inside its worktree |
 | `TowerTeardown` | Removes finished mission worktrees (dry run, exclude and force options), keeping branches and `.tower/comms/` |
@@ -386,11 +605,12 @@ pi-tower has 17 tools. The orchestrator gets 16 of them. Workers and reviewers g
 | `TowerFinding` | Files a structured finding (bug, improve, vuln, idea) about something outside a mission's scope |
 | `TowerReview` | Submits a review verdict. The tower uses it only as an exceptional break-glass. |
 | `TowerMission` | Reads or updates a mission: status, notes, blockers, done or dropped tasks, scope |
-| `TowerStatus` | Shows the full dashboard: missions, awaiting spawns, dead workers, roster, review gate, inbox, concurrency, activity |
-| `TowerResume` | Continues a stopped or finished worker in the background with a new prompt. The worker keeps its context. |
-| `TowerTasks` | Lists the background workers and reviewers with status, model and assignment |
+| `TowerStatus` | Shows the full dashboard: the objective, missions, awaiting spawns, dead workers, roster, review gate, inbox, concurrency, activity |
+| `TowerResume` | Continues a stopped or finished worker in the background with a new prompt. The worker keeps its context. Validators cannot be resumed. |
+| `TowerTasks` | Lists the background workers, reviewers and validators with status, model and assignment |
 | `TowerTaskOutput` | Shows a snapshot of one agent: status, latest text, recent tool calls, usage, final message |
-| `TowerTaskStop` | Stops a running worker or reviewer. The tower can resume a worker it stopped itself. |
+| `TowerTaskStop` | Stops a running worker, reviewer or validator. The tower can resume a worker it stopped itself. |
+| `TowerObjective` | Manages the objective: `draft`, `update`, `request-approval`, `status` and `block`. There is no approve and no complete action. |
 
 **Worker and reviewer tools.** They exist only inside agent sessions.
 
@@ -404,39 +624,51 @@ pi-tower has 17 tools. The orchestrator gets 16 of them. Workers and reviewers g
 | `TowerSend` | Messages the tower or another agent |
 | `TowerStatus` | Reads the dashboard |
 
-Besides these, workers get pi's `read`, `bash`, `edit`, `write`, `grep`, `find` and `ls` tools. Reviewers get `read`, `bash`, `grep`, `find` and `ls`, with no `write` or `edit`.
+**Validator tools.** They exist only inside validator sessions.
 
-While tower mode is off, `TowerInit`, `TowerPlan` and `TowerSpawn` refuse. The other tools keep working, so pending merges and messages can still be finished.
+| Tool | Purpose |
+| --- | --- |
+| `TowerValidate` | Validators only: submits the verdict (`pass` or `fail`, with failures, checks and evidence) for the assigned milestone and kind, exactly once |
+| `TowerFinding` | Files a finding about a problem outside the milestone |
+| `TowerInbox` | Reads messages from the tower and other agents |
+| `TowerSend` | Messages the tower or another agent |
+| `TowerStatus` | Reads the dashboard |
+
+Besides these, workers get pi's `read`, `bash`, `edit`, `write`, `grep`, `find` and `ls` tools. Reviewers and validators get `read`, `bash`, `grep`, `find` and `ls`, with no `write` or `edit`.
+
+While tower mode is off, `TowerInit`, `TowerPlan`, `TowerSpawn` and `TowerObjective` (except its `status` action) refuse. The other tools keep working, so pending merges and messages can still be finished.
 
 ## Safety and resource cost
 
 Worktrees isolate writes, but they are not a security sandbox.
 
 - Workers can read the repository and run tools with your permissions, and they never ask for approval.
-- Workers and reviewers run headless. They cannot spawn subagents: pi-tower is not loaded inside them, and their tool list contains no subagent tool.
+- Workers, reviewers and validators run headless. They cannot spawn subagents: pi-tower is not loaded inside them, and their tool list contains no subagent tool.
+- The validation commands of an objective come from the plan you approve, and the tower runs them with your permissions, unattended. Read them in the approval request before you approve.
 - Mission scopes, merge checks and the guards below are process rules, not security boundaries.
 
 pi-tower adds three guards:
 
-- **Bash guard.** It is active while the workspace has an owner, and it checks the bash calls of the orchestrator and of every worker and reviewer. It blocks:
+- **Bash guard.** It is active while the workspace has an owner, and it checks the bash calls of the orchestrator and of every worker, reviewer and validator. It blocks:
   - `rm` on `.tower/comms`;
   - recursive `rm` on `.tower` or on a directory that contains it;
   - `git clean` with force and `-x`/`-X` when it covers the main checkout;
   - `git reset --hard` in the main checkout.
 
-  The same commands are allowed inside a mission worktree. A command that mentions `rm`, `git clean` or `git reset` is blocked as a precaution when the parser cannot analyze it safely, for example because it uses command substitution or a heredoc, or because a path it would delete depends on a variable. The guard models only these commands, so other destructive commands are not caught, the same as in Kimi Code. It checks pi's `bash` tool only; the Windows `powershell` tool is not guarded.
+  The same commands are allowed inside a mission or validation worktree. A command that mentions `rm`, `git clean` or `git reset` is blocked as a precaution when the parser cannot analyze it safely, for example because it uses command substitution or a heredoc, or because a path it would delete depends on a variable. The guard models only these commands, so other destructive commands are not caught, the same as in Kimi Code. It checks pi's `bash` tool only; the Windows `powershell` tool is not guarded.
 
   Because it errs on the side of blocking, it also stops some harmless commands, for example `source "$HOME/x" && rm -rf y`, `ENV=x bash script && rm -rf y`, or `cd <worktree> || exit 1; git reset --hard` run from the main checkout. Splitting such a command into simpler ones avoids this.
 - **Write guard.** A worker's `write` and `edit` calls outside its own worktree are denied.
-- **Read-only reviewers.** Reviewers have no `write` or `edit` tools.
+- **Read-only reviewers and validators.** Reviewers and validators have no `write` or `edit` tools. For validators, a `write` or `edit` call is also vetoed outright.
 
 Resource cost:
 
-- Every worker and reviewer has its own model context and consumes tokens separately. The tower's planning, message routing, recovery and merge turns also consume tokens. More agents put more pressure on your quota, CPU and disk.
-- `maxRunningAgents` limits how many workers and reviewers run at the same time. Without a value the limit is 256.
+- Every worker, reviewer and validator has its own model context and consumes tokens separately. The tower's planning, message routing, recovery and merge turns also consume tokens. More agents put more pressure on your quota, CPU and disk.
+- `maxRunningAgents` limits how many workers, reviewers and validators run at the same time. Without a value the limit is 256. The mechanical `commands` validation does not count against it.
 - When a provider answers with a rate limit (HTTP 429), the limit shrinks to fit and new spawns pause for about a minute.
 - `/tower status` shows the current budget and the number of running agents without starting a model turn.
 - A run that exceeds `agentTimeoutMs` (default 2 hours) ends as timed out, and the tower is notified.
+- An objective takes at least one agent run per feature and two per milestone, and every failed validation adds fix features and validation rounds. Bound it with `maxCostUsd` and `maxWallTimeMs` in the [objective settings](#the-objective-section).
 
 Start with a few independent missions, and remove finished worktrees to get disk space back.
 
@@ -444,9 +676,14 @@ Start with a few independent missions, and remove finished worktrees to get disk
 
 pi-tower ports Kimi Code's Tower: the protocol store, the 13 Tower tools, their descriptions and refusals, the worker and reviewer briefings, the reminders, the merge gate and the status dashboard. Where pi works differently, pi-tower adapts. Each item below matches the code as shipped.
 
+**Objective mode**
+
+- **An addition of pi-tower.** Kimi Code's Tower has no objectives, milestones, validators or autopilot. `TowerObjective`, `TowerValidate`, the `validator` role, `/tower objective`, `/tower approve`, `/tower pause`, `/tower resume` and `pi-tower run` exist only in pi-tower. Underneath, the ported protocol is unchanged: every feature of an objective is an ordinary mission with the same review and merge gate.
+- **Nothing changes without an objective.** In a workspace that never starts an objective, missions, reviews, merges and the state files work exactly as in pi-tower 0.1.
+
 **Models**
 
-- **Three role models instead of two.** `orchestrator`, `worker` and `reviewer` can each be set separately, plus a pool. In Kimi Code, the tower and reviewers share the primary model, and workers default to `[secondary_model]`.
+- **Three role models instead of two.** `orchestrator`, `worker` and `reviewer` can each be set separately, plus a pool, and objective mode adds an optional `validator`. In Kimi Code, the tower and reviewers share the primary model, and workers default to `[secondary_model]`.
 - **Configuration.** Settings come from `tower.json` (global, or project if trusted), `PI_TOWER_*_MODEL`, `--tower-*-model` and `/tower models`, instead of `config.toml`.
 - **The session model follows the mode.** `/tower on` switches the session to the orchestrator model, and `/tower off` switches back.
 - **The `model` parameter of `TowerSpawn` always exists.** Its choices are the roles and pool aliases. Kimi Code hides the parameter when there is no pool.
@@ -463,7 +700,7 @@ pi-tower ports Kimi Code's Tower: the protocol store, the 13 Tower tools, their 
 
 - **Agent tools.** Kimi Code uses its generic `Agent` (resume), `TaskList`, `TaskOutput` and `TaskStop` tools and the `/tasks` panel. pi has none of these. pi-tower adds `TowerResume`, `TowerTasks`, `TowerTaskOutput` and `TowerTaskStop`, plus `/tower agents` and `/tower stop <agent>`.
 - **Resumes.** `TowerResume` always runs in the background, and a resumed run counts against the concurrency limit.
-- **Workers run inside their worktree.** A worker's session uses its worktree as the working directory. In Kimi Code, workers run in the main checkout with absolute paths. Reviewers use the main checkout in both.
+- **Workers run inside their worktree.** A worker's session uses its worktree as the working directory. In Kimi Code, workers run in the main checkout with absolute paths. Reviewers use the main checkout in both. Validators, which exist only in pi-tower, work in a detached validation worktree.
 - **Agent tool set.** Workers get `read`, `bash`, `edit`, `write`, `grep`, `find`, `ls` and the 7 agent Tower tools. Kimi Code workers also get web, todo, cron, wait and MCP tools. pi does not ship the first four, and agent sessions do not load pi's built-in MCP support.
 - **Agent sessions.** They load your pi settings, skills, context files and configured extensions, except pi-tower itself. Only the tools listed above are enabled in them. Their transcripts are stored in `.tower/agents/`.
 - **Reviewers cannot write.** They get no `write`/`edit` at all. Kimi Code gives reviewers write tools and relies on their briefing.
