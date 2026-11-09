@@ -24,7 +24,6 @@ export interface HeadlessObjective {
   readonly definitionOfDone: readonly string[];
   readonly acceptanceCommands: readonly string[];
   readonly milestones: readonly HeadlessMilestone[];
-  readonly approvedAt: string | undefined;
   readonly approvalReason: string | undefined;
   readonly blockedReason: string | undefined;
   readonly pausedReason: string | undefined;
@@ -100,7 +99,6 @@ export function parseHeadlessObjective(value: unknown): HeadlessObjective | unde
     definitionOfDone: texts(raw, 'definitionOfDone'),
     acceptanceCommands: texts(raw, 'acceptanceCommands'),
     milestones,
-    approvedAt: text(raw, 'approvedAt'),
     approvalReason: text(raw, 'approvalReason'),
     blockedReason: text(raw, 'blockedReason'),
     pausedReason: text(raw, 'pausedReason'),
