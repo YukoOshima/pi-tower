@@ -136,6 +136,11 @@ describe('pi-tower CLI (bin/pi-tower.js)', () => {
       stdout: '',
       stderr: 'pi-tower: --timeout must be a positive whole number of milliseconds, got "soon"\nRun pi-tower --help for usage.\n',
     });
+    expect(await cli(['run', '-f', 'x.md', '--timeout', '3000000000'])).toEqual({
+      code: 4,
+      stdout: '',
+      stderr: 'pi-tower: --timeout must be at most 2147483647 milliseconds (about 24.8 days), got "3000000000"\nRun pi-tower --help for usage.\n',
+    });
     const fake = world();
     expect(await cli(['run', '-f', join(fake.dir, 'missing.md'), '--cwd', fake.repo])).toMatchObject({ code: 4, stderr: `pi-tower: objective file ${join(fake.dir, 'missing.md')} does not exist\n` });
     expect(await cli(['run', '-f', fake.objectiveFile, '--cwd', join(fake.dir, 'nowhere')])).toMatchObject({ code: 4, stderr: `pi-tower: --cwd ${join(fake.dir, 'nowhere')} does not exist\n` });

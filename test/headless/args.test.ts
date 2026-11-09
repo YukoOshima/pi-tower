@@ -71,6 +71,8 @@ describe('parseHeadlessArgs', () => {
     expect(error(['run', '-f', 'a.md', '--timeout', '0'])).toBe('--timeout must be a positive whole number of milliseconds, got "0"');
     expect(error(['run', '-f', 'a.md', '--timeout=1.5'])).toBe('--timeout must be a positive whole number of milliseconds, got "1.5"');
     expect(error(['run', '-f', 'a.md', '--timeout', '-5'])).toBe('--timeout needs a value');
+    expect(error(['run', '-f', 'a.md', '--timeout', '2147483648'])).toBe('--timeout must be at most 2147483647 milliseconds (about 24.8 days), got "2147483648"');
+    expect(parseHeadlessArgs(['run', '-f', 'a.md', '--timeout', '2147483647'], BASE)).toMatchObject({ kind: 'run', options: { timeoutMs: 2_147_483_647 } });
   });
 
   it('documents every exit code in the usage text', () => {

@@ -1,5 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 
+import { boundedDelay } from './timers.ts';
+
 export type PiEvent = { readonly type: string } & Readonly<Record<string, unknown>>;
 
 export interface PiNotice {
@@ -58,7 +60,7 @@ export function noticeOf(event: PiEvent): PiNotice | undefined {
 }
 
 function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+  return new Promise((resolve) => setTimeout(resolve, boundedDelay(ms)));
 }
 
 export class PiRpcClient {
@@ -179,7 +181,7 @@ export class PiRpcClient {
       const timer = setTimeout(() => {
         this.pending.delete(id);
         reject(new PiTimeoutError(`timeout after ${String(timeoutMs)}ms waiting for the ${String(command.type)} response`));
-      }, timeoutMs);
+      }, boundedDelay(timeoutMs));
       this.pending.set(id, {
         resolve: (event) => {
           clearTimeout(timer);
@@ -220,7 +222,7 @@ export class PiRpcClient {
       });
       const timer = setTimeout(() => {
         finish(new PiTimeoutError(`timeout after ${String(timeoutMs)}ms waiting for ${label}`));
-      }, timeoutMs);
+      }, boundedDelay(timeoutMs));
       this.goneListeners.add(gone);
     });
   }
@@ -278,7 +280,7 @@ export class PiRpcClient {
     if (this.exit !== undefined) return true;
     let timer: NodeJS.Timeout | undefined;
     const timedOut = new Promise<false>((resolve) => {
-      timer = setTimeout(() => resolve(false), ms);
+      timer = setTimeout(() => resolve(false), boundedDelay(ms));
     });
     const result = await Promise.race([this.exited.then(() => true as const), timedOut]);
     clearTimeout(timer);

@@ -4,6 +4,7 @@ import { HEADLESS_USAGE, parseHeadlessArgs, type HeadlessRunOptions } from './ar
 import { PiRpcClient } from './rpc.ts';
 import { HEADLESS_EXIT, runHeadless, type HeadlessClock, type HeadlessDeps, type HeadlessOutput, type HeadlessSignal } from './runner.ts';
 import { readHeadlessSnapshot } from './state.ts';
+import { MAX_DELAY_MS } from './timers.ts';
 
 export const systemClock: HeadlessClock = {
   now: () => Date.now(),
@@ -13,12 +14,19 @@ export const systemClock: HeadlessClock = {
         resolve();
         return;
       }
+      let remaining = Math.max(0, ms);
+      let timer: NodeJS.Timeout | undefined;
       const done = (): void => {
         clearTimeout(timer);
         signal.removeEventListener('abort', done);
         resolve();
       };
-      const timer = setTimeout(done, ms);
+      const step = (): void => {
+        const chunk = Math.min(remaining, MAX_DELAY_MS);
+        remaining -= chunk;
+        timer = setTimeout(remaining > 0 ? step : done, chunk);
+      };
+      step();
       signal.addEventListener('abort', done, { once: true });
     }),
 };

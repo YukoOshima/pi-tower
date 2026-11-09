@@ -1,5 +1,7 @@
 import { resolve } from 'node:path';
 
+import { MAX_DELAY_MS } from './timers.ts';
+
 export interface HeadlessRunOptions {
   readonly objectiveFile: string;
   readonly autoApprove: boolean;
@@ -25,7 +27,7 @@ export const HEADLESS_USAGE = [
   'Options:',
   '  -f, --file <path>   objective file (markdown); required',
   '  --auto-approve      approve the plan without a human (sends /tower approve)',
-  '  --timeout <ms>      give up after this many milliseconds (exit 2)',
+  '  --timeout <ms>      give up after this many milliseconds, at most 2147483647 (exit 2)',
   '  --cwd <dir>         repository to run in (default: the current directory)',
   '  --pi <path>         pi executable: a path, or a command looked up on PATH (default: pi)',
   '  -- <args>           everything after -- is passed to pi unchanged',
@@ -99,6 +101,9 @@ export function parseHeadlessArgs(argv: readonly string[], baseDir: string): Hea
     timeoutMs = /^\d+$/.test(values.timeout) ? Number(values.timeout) : Number.NaN;
     if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) {
       return failure(`--timeout must be a positive whole number of milliseconds, got "${values.timeout}"`);
+    }
+    if (timeoutMs > MAX_DELAY_MS) {
+      return failure(`--timeout must be at most ${String(MAX_DELAY_MS)} milliseconds (about 24.8 days), got "${values.timeout}"`);
     }
   }
   return {
