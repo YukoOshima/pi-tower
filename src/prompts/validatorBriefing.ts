@@ -1,3 +1,4 @@
+import { numberedList, shortCommit } from './objectiveFormat.ts';
 import type {
   PromptFeature,
   PromptMilestone,
@@ -197,17 +198,11 @@ function validatorReportSection(input: ValidatorBriefingInput): string {
 }
 
 function numbered(items: readonly string[]): string {
-  return items.length === 0
-    ? '(none recorded)'
-    : items.map((item, index) => `${String(index + 1)}. ${item.trim()}`).join('\n');
+  return items.length === 0 ? '(none recorded)' : numberedList(items);
 }
 
 function commandList(commands: readonly string[]): string {
   return commands.map((command) => `- \`${command}\``).join('\n');
-}
-
-function shortCommit(commit: string): string {
-  return commit.slice(0, 7);
 }
 
 function truncate(text: string, maxChars: number): string {
