@@ -4,9 +4,9 @@ import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-export const SCENARIO_IDS = ['S1', 'S2', 'S3', 'S8', 'S4', 'S7', 'S13', 'S15', 'S16', 'S17'] as const;
+export const SCENARIO_IDS = ['S1', 'S2', 'S3', 'S8', 'S4', 'S7', 'S13', 'S15', 'S16', 'S17', 'S18', 'S19'] as const;
 export type ScenarioId = (typeof SCENARIO_IDS)[number];
-export const OBJECTIVE_SCENARIOS: readonly ScenarioId[] = ['S15', 'S16', 'S17'];
+export const OBJECTIVE_SCENARIOS: readonly ScenarioId[] = ['S15', 'S16', 'S17', 'S18', 'S19'];
 export const DEFAULT_SCENARIOS: readonly ScenarioId[] = SCENARIO_IDS.filter((id) => !OBJECTIVE_SCENARIOS.includes(id));
 export const DEFAULT_SCENARIO_TIMEOUT_MS = 20 * 60_000;
 export const DEFAULT_GLOBAL_TIMEOUT_MS = 75 * 60_000;
@@ -62,7 +62,7 @@ function positiveInt(name: string): number | undefined {
 
 const SCENARIO_GROUPS: Readonly<Record<string, readonly ScenarioId[]>> = { ALL: DEFAULT_SCENARIOS, OBJECTIVE: OBJECTIVE_SCENARIOS };
 
-function parseScenarios(raw: string | undefined): readonly ScenarioId[] {
+export function parseScenarios(raw: string | undefined): readonly ScenarioId[] {
   if (raw === undefined) return DEFAULT_SCENARIOS;
   const picked = raw
     .split(',')

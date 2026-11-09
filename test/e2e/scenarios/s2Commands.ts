@@ -1,7 +1,7 @@
 import { clip } from '../rpc.ts';
 import { firstLine, recordUsage, runsOf, startSession, TURN_TIMEOUT_MS, type ScenarioDefinition } from '../scenario.ts';
 
-export const MODE_OFF_REFUSAL = 'tower mode is not active — only the user can enable it (with /tower on), never the agent.';
+export const MODE_OFF_REFUSAL = 'tower mode is not active — only the user can enable it (with /mission or /tower on), never the agent.';
 
 const TOWER_TOOLS = ['TowerInit', 'TowerPlan', 'TowerSpawn', 'TowerMerge', 'TowerStatus', 'TowerReview', 'TowerSend', 'TowerInbox', 'TowerMission'];
 
