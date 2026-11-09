@@ -925,3 +925,12 @@ export function applyValidationRound(
     objectiveBlocked,
   };
 }
+
+export type TowerMilestoneOrderOf = (mission: Pick<TowerMission, 'milestone'>) => number | undefined;
+
+export function milestoneOrderOf(state: TowerState): TowerMilestoneOrderOf {
+  const objective = state.objective;
+  if (objective === undefined || objective.status === 'completed') return () => undefined;
+  const orders = new Map(objective.milestones.map((milestone) => [milestone.id, milestone.order]));
+  return (mission) => (mission.milestone === undefined ? undefined : orders.get(mission.milestone));
+}

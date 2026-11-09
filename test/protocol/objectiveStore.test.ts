@@ -1158,3 +1158,56 @@ describe('re-validating the final milestone', () => {
     expect(again.requiredKinds).toEqual(['scrutiny', 'user-testing']);
   });
 });
+
+describe('dependencies across milestones', () => {
+  async function twoMilestones(): Promise<void> {
+    await store.draftObjective({
+      title: 'Ship',
+      goal: 'g',
+      definitionOfDone: ['d'],
+      milestones: [{ title: 'A' }, { title: 'B' }],
+    });
+    await store.plan([
+      { title: 'A feature', scope: ['src/a/**'], milestone: 'MS1' },
+      { title: 'B feature', scope: ['src/b/**'], milestone: 'MS2' },
+    ]);
+    await store.requestObjectiveApproval();
+    await store.approveObjective('human');
+  }
+
+  it('does not make a fix wait for an overlapping feature of a later milestone', async () => {
+    await twoMilestones();
+    await mutateState((state) => {
+      state.objective!.milestones[0]!.status = 'failed';
+    });
+    const [fix] = await store.plan([
+      { title: 'Fix A touches b', scope: ['src/a/fix.ts', 'src/b/shared.ts'], milestone: 'MS1' },
+    ]);
+    expect(fix).toMatchObject({ milestone: 'MS1', origin: 'fix', deps: ['M1'] });
+    expect(fix!.notes).toEqual([expect.stringMatching(/^auto dependency on M1:/)]);
+    expect((await readState()).objective!.milestones[0]!.status).toBe('active');
+  });
+
+  it('refuses an explicit dependency on a later milestone and changes nothing', async () => {
+    await twoMilestones();
+    const before = await readFile(store.abs(STATE_FILE), 'utf8');
+    await expect(
+      store.plan([{ title: 'Another A fix', scope: ['src/a2/**'], milestone: 'MS1', deps: ['M2'] }]),
+    ).rejects.toThrow(
+      /mission M3 \(milestone MS1\) cannot depend on M2 — M2 belongs to the later milestone MS2, whose features start only after MS1 passes/,
+    );
+    expect(await readFile(store.abs(STATE_FILE), 'utf8')).toBe(before);
+  });
+
+  it('keeps dependencies onto earlier milestones and serializes cross-milestone overlaps by milestone order', async () => {
+    await twoMilestones();
+    const [later] = await store.plan([
+      { title: 'More B', scope: ['src/a/b-hook.ts'], milestone: 'MS2', deps: ['M1'] },
+    ]);
+    expect(later!.deps).toEqual(['M1']);
+    const [overlap] = await store.plan([{ title: 'B reads a', scope: ['src/a/reader.ts'], milestone: 'MS2' }]);
+    expect(overlap!.deps).toEqual(['M1']);
+    const widened = await store.updateMission('tower', 'M1', { scope: ['src/a/**', 'src/b/**'] });
+    expect(widened.deps).toEqual([]);
+  });
+});

@@ -62,6 +62,7 @@ import {
   isTerminalObjectiveStatus,
   latestValidationRound,
   milestoneMissions,
+  milestoneOrderOf,
   milestonePassesOn,
   nextValidationRound,
   objectiveApprovalProblems,
@@ -73,6 +74,7 @@ import {
   validationResultSubject,
 } from './objective.ts';
 import type {
+  TowerMilestoneOrderOf,
   TowerObjectiveAutopilotPatch,
   TowerObjectiveDraftInput,
   TowerObjectiveEvaluation,
@@ -386,10 +388,14 @@ function addAutoDeps(
   mission: TowerMission,
   candidates: readonly TowerMission[],
   byId: ReadonlyMap<string, TowerMission>,
+  orderOf: TowerMilestoneOrderOf = () => undefined,
 ): void {
   if (mission.kind === 'survey') return;
+  const own = orderOf(mission);
   for (const other of candidates) {
     if (other.id === mission.id || other.kind === 'survey') continue;
+    const theirs = orderOf(other);
+    if (own !== undefined && theirs !== undefined && theirs > own) continue;
     if (!scopesOverlap(mission.scope, other.scope)) continue;
     if (depPathExists(mission.id, other.id, byId) || depPathExists(other.id, mission.id, byId)) {
       continue;
@@ -1697,6 +1703,20 @@ export class TowerStore {
           }
         }
       }
+      const orderOf = milestoneOrderOf(state);
+      const everyMission = new Map([...state.missions, ...missions].map((m): [string, TowerMission] => [m.id, m]));
+      for (const mission of missions) {
+        const own = orderOf(mission);
+        if (own === undefined) continue;
+        for (const dep of mission.deps) {
+          const target = everyMission.get(dep)!;
+          const theirs = orderOf(target);
+          if (theirs === undefined || theirs <= own) continue;
+          throw new TowerProtocolError(
+            `mission ${mission.id} (milestone ${mission.milestone ?? '?'}) cannot depend on ${dep} — ${dep} belongs to the later milestone ${target.milestone ?? '?'}, whose features start only after ${mission.milestone ?? '?'} passes, so the dependency could never be met; drop it, milestone order already runs ${mission.milestone ?? '?'} first`,
+          );
+        }
+      }
       const takenBranches = new Map(state.missions.map((m): [string, TowerMission] => [m.branch, m]));
       for (const mission of missions) {
         const existing = takenBranches.get(mission.branch);
@@ -1720,9 +1740,9 @@ export class TowerStore {
           ...openExisting,
           ...missions.filter((m) => missionNumber(m.id) < missionNumber(mission.id)),
         ];
-        addAutoDeps(mission, older, byId);
+        addAutoDeps(mission, older, byId, orderOf);
       }
-      this.assertScopesDisjoint([...openExisting, ...missions]);
+      this.assertScopesDisjoint([...openExisting, ...missions], orderOf);
 
       const reactivated = new Set<string>();
       for (const placement of placements) {
@@ -1751,7 +1771,10 @@ export class TowerStore {
     });
   }
 
-  private assertScopesDisjoint(missions: readonly TowerMission[]): void {
+  private assertScopesDisjoint(
+    missions: readonly TowerMission[],
+    orderOf: TowerMilestoneOrderOf = () => undefined,
+  ): void {
     const scopes: Array<{ readonly id: string; readonly raw: string; readonly stem: string }> = [];
     for (const mission of missions) {
       if (mission.kind === 'survey') continue;
@@ -1771,6 +1794,9 @@ export class TowerStore {
         const a = scopes[i]!;
         const b = scopes[j]!;
         if (a.id === b.id) continue;
+        const orderA = orderOf(byId.get(a.id)!);
+        const orderB = orderOf(byId.get(b.id)!);
+        if (orderA !== undefined && orderB !== undefined && orderA !== orderB) continue;
         if (a.stem === b.stem || a.stem.startsWith(`${b.stem}/`) || b.stem.startsWith(`${a.stem}/`)) {
           if (depPathExists(a.id, b.id, byId) || depPathExists(b.id, a.id, byId)) continue;
           throw new TowerProtocolError(
@@ -1897,8 +1923,9 @@ export class TowerStore {
       const others = state.missions.filter((m) => m.id !== id && isOpenMission(m));
       const byId = new Map(state.missions.map((m) => [m.id, m]));
       byId.set(id, patched);
-      addAutoDeps(patched, others, byId);
-      this.assertScopesDisjoint([...others, patched]);
+      const orderOf = milestoneOrderOf(state);
+      addAutoDeps(patched, others, byId, orderOf);
+      this.assertScopesDisjoint([...others, patched], orderOf);
       mission.scope = [...patch.scope];
       mission.deps = patched.deps;
       mission.notes = patched.notes;
