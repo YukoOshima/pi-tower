@@ -1,5 +1,46 @@
 # Changelog
 
+## [0.2.0] - 2026-11-09
+
+Objective mode: the tower keeps working on a plan you approved until every milestone has passed validation, in the style of Factory's Droid Missions. Unlike Missions, the features of a milestone run in parallel, each with its own worktree, independent review and merge gate.
+
+### Added
+
+- **Objective mode.** `/tower objective [--headless] <text | @file>` hands a goal to the orchestrator. It plans the goal with you, or alone with recorded assumptions when `--headless` is given, into a contract: a goal, a definition of done, optional acceptance commands, and ordered milestones, each with its own validation.
+  - Only a human approves the plan with `/tower approve`, unless auto-approval is configured. The orchestrator has no approve tool. A contract change after approval needs a new approval; after a change made while the objective was blocked or paused, only a human approval is accepted.
+  - The features of the current milestone run in parallel as ordinary tower missions. Milestones run in order.
+  - Once a milestone's features are merged or abandoned, its validation runs on the base tip: `scrutiny` and `user-testing` validator agents, plus a mechanical `commands` kind that the tower runs without a model (the milestone's commands, and the acceptance commands on the final milestone).
+  - Failures go back to the orchestrator, which plans fix features into the milestone, and validation runs again on the new tip until the milestone passes. A kind that fails `maxValidationRounds` times blocks the objective.
+  - Completion is automatic and gated: every milestone passed, no feature is open, and the final validation is on the current base tip.
+  - Lifecycle `planning → awaiting-approval → executing ⇄ paused → completed | blocked`, with `/tower objective status`, `/tower pause [reason]` and `/tower resume`.
+- **Autopilot.** After approval, code rather than a model drives the mechanics, through the same tower operations and gates as the orchestrator. It spawns workers, reviewers and validators, resumes workers that have review findings or a rebase conflict, nudges workers that go idle without finishing, replaces failed or timed-out agents while fewer than `maxFeatureAttempts` agents have been used (never one a human stopped: for any stopped worker, reviewer or validator it wakes the orchestrator instead, which asks the human how to continue), rebases, merges, runs validation, advances milestones and completes the objective.
+  - The orchestrator is woken only for judgment: `plan-milestone`, `validation-failed`, `blocker`, `feature-attempts-exhausted`, `worker-idle`, `worker-stopped`, `merge-blocked`, `rebase-conflict`, `review-stuck`, `validation-stuck` and `stalled`. Agent ends, review traffic and validation results of objective features reach it as context without a model turn.
+  - `"autopilot": false` selects manual mode: the orchestrator drives feature execution, while validation, milestones, completion, the watchdog and the budgets stay automatic.
+- **Watchdog and budgets.** The autopilot also ticks every `watchdogIntervalMs`. After `stallTimeoutMs` without progress the orchestrator is woken, and `maxStallWakes` stall wakes in a row block the objective. `maxWallTimeMs` and `maxCostUsd` pause it; the cost counts every tower agent and the orchestrator's own turns.
+- **Restart continuation.** An executing objective continues when tower mode comes back on: lost workers are replaced on their branches, interrupted validations run again, and leftover validation worktrees are removed.
+- **Validator role.** An optional fourth model role, `validator`: `PI_TOWER_VALIDATOR_MODEL`, `--tower-validator-model`, `"validator"` in `tower.json`, and `/tower models validator`. When unset, it inherits the reviewer, then the orchestrator. Validators work read-only in a detached validation worktree at the validated commit and report once with `TowerValidate`.
+- **Headless runner.** `pi-tower run -f <file> [--auto-approve] [--timeout <ms>] [--cwd <dir>] [--pi <path>] [-- <pi args>]`, the package's `pi-tower` bin, drives `pi --mode rpc` until the objective ends. Exit codes: 0 completed, 1 blocked or paused (or pi exited), 2 timeout, 3 approval needed, 4 usage or startup error, 130/143 on SIGINT/SIGTERM.
+- **Tools.** `TowerObjective` for the orchestrator (`draft`, `update`, `request-approval`, `status`, `block`; no approve and no complete action) and `TowerValidate` for validators. `TowerPlan` takes `milestone` and `origin`, and `TowerSpawn` takes `kind: "validator"` with `milestone` and `validation_kind`. pi-tower now has 19 tools.
+- **Commands.** `/tower objective`, `/tower objective status`, `/tower approve [--auto]`, `/tower pause [reason]` and `/tower resume`, with tab completion and near-miss hints.
+- **Configuration.** A `tower.json` `"objective"` section with `autopilot`, `autoApprove`, `maxValidationRounds`, `maxFeatureAttempts`, `watchdogIntervalMs`, `stallTimeoutMs`, `maxStallWakes`, `maxWallTimeMs`, `maxCostUsd`, `skipScrutiny`, `skipUserTesting` and `autoTeardown`. The project file wins key by key. `/tower models` shows the validator and every objective setting with its source.
+- **Docs.** README sections in English and Simplified Chinese on objective mode, headless runs, a comparison with Droid Missions and the known limitations, `examples/objective.md`, and an `examples/tower.json` with a validator and an objective section.
+
+### Compatibility
+
+- A workspace without an objective behaves as in 0.1.0, and its state files keep the 0.1.0 format: no new mission fields and no change to `MISSIONS.md`.
+- `tower.json` files from 0.1.0 keep loading, with one exception: `validator` is now a reserved name, so a pool alias called `validator` must be renamed.
+- The orchestrator has one more tool, `TowerObjective`, while tower mode is on.
+
+### Known limitations
+
+- With `objective.autoApprove` on, the orchestrator could draft a fresh objective after one blocked, and it would be approved automatically, which restarts the wall-time and cost budgets without a human. Keep `autoApprove` off for interactive use; the headless runner exits with 1 on a blocked objective first.
+- Validation commands run in a fresh checkout without installed dependencies and must include their own setup, for example `npm ci && npm test`.
+- Failed validation rounds are never reset: they count toward `maxValidationRounds` across commits, contract changes and `/tower resume`. Raise `maxValidationRounds` in `tower.json` before resuming an objective that blocked on failed validations.
+- User-testing validators have no browser or GUI tooling; behavioural QA uses CLIs, HTTP calls and scripts.
+- Whether a review request covers the branch tip is decided with commit timestamps of one-second resolution. This is harmless: reviewers always review the real tip.
+- The `pi-tower` bin was tested on Node 26 only; its Node 22.x code paths are untested.
+- `autoTeardown` is accepted but not used yet.
+
 ## [0.1.0] - 2026-11-09
 
 The first release. It ports the Tower multi-agent mode of [Kimi Code](https://github.com/MoonshotAI/kimi-code) to pi and gives the orchestrator, the workers and the reviewers separate models.
