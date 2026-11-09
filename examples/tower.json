@@ -6,6 +6,7 @@
     "thinkingLevel": "high",
     "description": "independent second opinion from another vendor"
   },
+  "validator": "openai/gpt-5.5:xhigh",
   "models": {
     "fast": {
       "model": "anthropic/claude-haiku-5-5",
@@ -13,5 +14,10 @@
     }
   },
   "maxRunningAgents": 4,
-  "agentTimeoutMs": 3600000
+  "agentTimeoutMs": 3600000,
+  "objective": {
+    "maxWallTimeMs": 14400000,
+    "maxCostUsd": 40,
+    "stallTimeoutMs": 300000
+  }
 }
