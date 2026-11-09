@@ -60,7 +60,7 @@ export function createTowerTaskStopTool(
               kind === 'reviewer'
                 ? 'A reviewer is one-shot: it is never resumed; spawn a fresh reviewer with a new name if the review is still needed.'
                 : kind === 'validator'
-                  ? 'A validator is one-shot: it is never resumed. Its round produced no verdict, so a fresh validator under a new name re-runs it only if the milestone still needs that verdict.'
+                  ? 'A validator is one-shot: it is never resumed. If its round produced no verdict, a fresh validator under a new name re-runs it only if the milestone still needs that verdict.'
                   : `Resume it later with TowerResume(agent="${after.name}", prompt="...") if its work should continue.`,
             ].join('\n'),
           };

@@ -201,6 +201,23 @@ describe('TowerSpawn kind="validator"', () => {
     expect((await store.load()).roster.agents).toEqual([]);
   });
 
+  it('names the worktree left behind when the cleanup after a failed spawn fails too', async () => {
+    await validatingMilestone(store);
+    host.runtime.failSpawn = 'provider unavailable';
+    vi.spyOn(TowerStore.prototype, 'removeValidationWorktree').mockRejectedValueOnce(
+      new Error('git worktree remove failed'),
+    );
+
+    const result = await spawn(SCRUTINY);
+
+    expect(result).toEqual({
+      isError: true,
+      output:
+        'tower spawn failed: provider unavailable — the validation worktree .tower/worktrees/val-ms1-scrutiny-r1 could not be removed and stays until TowerTeardown removes it',
+    });
+    expect(existsSync(worktreePath())).toBe(true);
+  });
+
   it('aborts the agent and removes the worktree when registration fails', async () => {
     await validatingMilestone(store);
     vi.spyOn(TowerStore.prototype, 'registerSpawnedAgent').mockRejectedValueOnce(

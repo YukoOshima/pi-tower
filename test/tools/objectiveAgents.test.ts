@@ -152,7 +152,9 @@ describe('agent tools with validators', () => {
 
     expect(result.isError).toBeUndefined();
     expect(result.output).toContain('stopped tower agent "val-a" (agent_id: agent-1, task_id: task-1)');
-    expect(result.output).toContain('A validator is one-shot: it is never resumed.');
+    expect(result.output).toContain(
+      'A validator is one-shot: it is never resumed. If its round produced no verdict, a fresh validator under a new name re-runs it',
+    );
     expect(result.output).not.toContain('TowerResume');
   });
 

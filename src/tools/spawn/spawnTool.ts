@@ -346,7 +346,15 @@ async function spawnLeasedValidator(
       throw error;
     }
   } catch (error) {
-    await store.removeValidationWorktree(prepared.worktree).catch(() => false);
+    const removed = await store.removeValidationWorktree(prepared.worktree).then(
+      () => true,
+      () => false,
+    );
+    if (!removed && (error instanceof TowerProtocolError || error instanceof GitError)) {
+      throw new TowerProtocolError(
+        `${error.message} — the validation worktree ${WORKTREES_DIR}/${prepared.worktree} could not be removed and stays until TowerTeardown removes it`,
+      );
+    }
     throw error;
   }
   host.agentRegistered(launched.agentId);
