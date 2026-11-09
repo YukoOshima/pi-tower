@@ -147,7 +147,7 @@ Your next message is the goal of the mission. It can be one sentence or a whole 
 Add a --format csv|json option to `shop report`; the table output must not change; npm test must pass
 ```
 
-- A message that is just `@path/to/file.md` reads the goal from that file, for example `@examples/mission.md`.
+- A message that is just `@path/to/file.md` reads the goal from that file, for example `@../missions/csv-export.md`. The path is relative to pi's working directory, and `~` is not expanded. Keep the file outside the repository, or commit it first: an untracked file in the main checkout is copied into the feature branches, and their merges are refused until you commit or stash it.
 - `/mission <goal>` and `/mission @<file>` skip the header and start planning at once.
 - A slash command is never taken as the goal.
 
@@ -210,11 +210,7 @@ Mission O1 "CSV and JSON export for shop report" — plan ready (2 milestones ·
   Approve and start mission
 ```
 
-- The dialog opens on **Not yet — keep planning**, so pressing Enter alone never approves. To approve, press ↓ and then Enter. You can also close the dialog and run `/mission approve`.
-- Typing or pasting while the dialog is open closes it, and the text goes to the editor, so a stray keystroke cannot approve the plan. For half a second after it opens, the dialog also ignores ↑, ↓ and Enter, so a keypress meant for something else cannot approve it either.
-- The dialog waits until the orchestrator has finished its turn, the editor is empty, no other extension's dialog is open, and the keyboard has been quiet for 2 seconds.
-- To change the plan, say what to change in a normal message. The orchestrator updates the plan and asks again, with a new dialog. When the contract changed after an approval, the dialog says **plan revised** and its second option reads **Approve the revised plan**.
-- Only you can approve. The orchestrator has no tool for it.
+The dialog's default is **Not yet — keep planning**. Typing goes to the editor; choose **Approve and start mission** with ↓ then Enter, or run `/mission approve`. To change the plan instead, say what to change in a normal message; the orchestrator updates it and asks again. Only you can approve. [The approval dialog](#the-approval-dialog) has the details.
 
 Once you approve, the mission starts:
 
@@ -240,14 +236,7 @@ models: orchestrator claude-opus-5-5 · worker claude-sonnet-5-5 · reviewer gpt
 next: 2 features of MS2 in flight — validation starts once all are merged
 ```
 
-From the top: the mission with its status, elapsed time and cost (and the budget, when you set one), the milestones, the features of the current milestone with their state and agent, the running agents, the models, and the next step. The footer mirrors it in one line: `mission O1 executing · MS2 1/3 merged · 2 agents`.
-
-The panel never takes more than 10 lines. When a milestone has more features than fit, the last feature line says how many more there are, and `/mission` lists them all. A model is shown without its provider unless two roles use the same model id from different providers. When the models do not fit on one line, in a narrow terminal or with long model ids, they take two roles per row, or one role per row:
-
-```text
-models: orchestrator claude-opus-5-5 · worker claude-sonnet-5-5
-        reviewer gpt-5.5 · validator gpt-5.5
-```
+From the top: the mission with its status, elapsed time and cost (and the budget, when you set one), the milestones, the features of the current milestone with their state and agent, the running agents, the models, and the next step. The footer mirrors it in one line: `mission O1 executing · MS2 1/3 merged · 2 agents`. [The Mission Control panel](#the-mission-control-panel) explains how it fits a narrow terminal.
 
 `/mission` prints the full view, without starting a model turn:
 
@@ -341,7 +330,7 @@ To keep the worktrees, set `"objective": { "autoTeardown": false }` in `tower.js
 | --- | --- |
 | `/mission` | Enters mission mode: turns tower mode on, switches the session to the orchestrator model, shows the models and asks for the goal. While a mission is open, it shows Mission Control instead. |
 | `/mission <goal>` | Plans a mission for this goal right away. For a goal whose first word is a subcommand, such as "stop …", run `/mission` first and then type the goal. |
-| `/mission @<file>` | The same, with the goal read from a file. The path is relative to pi's working directory. |
+| `/mission @<file>` | The same, with the goal read from a file. The path is relative to pi's working directory (`~` is not expanded). Keep the file outside the repository, or commit it first. |
 | `/mission approve` | Approves the plan and starts the mission |
 | `/mission pause [reason]` | Pauses the mission: running agents finish their turn, and nothing new starts |
 | `/mission resume` | Resumes a paused or blocked mission with the limits from the current settings |
@@ -370,9 +359,9 @@ To keep the worktrees, set `"objective": { "autoTeardown": false }` in `tower.js
 pi-tower exec --mission -f mission.md --auto-approve
 ```
 
-The run starts pi in RPC mode in your repository, turns tower mode on, hands the mission file over with `/tower objective --headless`, and follows the mission until it ends. In a headless run the orchestrator plans without asking questions. It decides open points itself, records each assumption as a note on the mission, and requests approval. The run's own lines say *objective*, the Tower name of a mission (see [Advanced](#advanced)).
+The run starts pi in RPC mode in your repository, turns tower mode on, hands the mission file over with `/tower objective --headless`, and follows the mission until it ends. In a headless run the orchestrator plans without asking questions. It decides open points itself, records each assumption as a note on the mission, and requests approval. The run's own lines say *objective*, the Tower name of a mission (see [Advanced](#advanced)). As with `/mission @<file>`, keep the mission file outside the repository, or commit it first.
 
-`pi-tower --help` prints this usage:
+`pi-tower --help` begins with this synopsis, followed by the options and exit codes described below:
 
 ```text
 Usage: pi-tower run -f <objective.md> [--auto-approve] [--timeout <ms>] [--cwd <dir>] [--pi <path>]
@@ -562,6 +551,26 @@ Milestones have their own states. A milestone is `pending` until it becomes curr
 - **One mission at a time.** A workspace has at most one open mission. A new goal is accepted when there is none, when the previous one is completed or blocked (it is archived when the new one is drafted), and while the open one is still planning (the orchestrator then revises it). It is refused while a mission is awaiting approval, executing or paused.
 - **Resuming.** `/mission resume` works on a paused or blocked mission. It first reloads the mission's limits from your current [objective settings](#the-objective-section), so raise a budget, or `maxValidationRounds` for a milestone that blocked on failed validations, in `tower.json` before you resume: the failed rounds are not reset, so otherwise the next failure of that kind blocks the mission again. It also resets the stall counter and reopens a blocked milestone so that the orchestrator can plan fixes. A mission that was never approved goes back to planning.
 - **Mission mode off.** The autopilot runs only while tower mode is on. After `/mission exit` or `/tower off`, an executing mission does not advance until you run `/mission` or `/tower on` again.
+
+#### The approval dialog
+
+In mission mode, a plan that awaits your approval opens a dialog with two options. **Not yet — keep planning** is selected when it opens, so Enter alone never approves; **Approve and start mission** takes ↓ then Enter. When a contract change after an approval needs a new approval, the title says **plan revised** and the second option reads **Approve the revised plan**. `/mission approve` works at any time, with or without the dialog.
+
+- The dialog opens only when the orchestrator has finished its turn, the editor is empty, no other extension's dialog is open, and the keyboard has been quiet for 2 seconds.
+- Typing or pasting while it is open closes it, and the text goes to the editor, so a stray keystroke cannot approve the plan. The dialog opens again once the editor is empty and the keyboard is quiet.
+- For half a second after it opens, it ignores ↑, ↓ and Enter, so a keypress meant for something else cannot approve the plan.
+- No dialog opens in a headless run, in a session without a UI, or while `objective.autoApprove` approves the plan anyway. A plan that already awaited approval when mission mode started gets no dialog either; approve it with `/mission approve`. [Known limitations](#known-limitations) describes the one case these rules do not cover.
+
+#### The Mission Control panel
+
+The panel above the editor takes at most 10 lines. When the current milestone has more features than fit, the last feature line says how many more there are, and `/mission` lists them all. A model is shown without its provider unless two roles use the same model id from different providers, and a validator without a model of its own shows `= reviewer` or `= orchestrator`. When the models do not fit on one line, in a narrow terminal or with long model ids, they take two roles per row, or one role per row:
+
+```text
+models: orchestrator claude-opus-5-5 · worker claude-sonnet-5-5
+        reviewer gpt-5.5 · validator gpt-5.5
+```
+
+The panel refreshes when the tower state changes, at most once a second, and on a 5-second timer. `/mission exit` and `/tower off` remove it.
 
 #### Validation
 

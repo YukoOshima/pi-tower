@@ -147,7 +147,7 @@ What do you want to build? Describe the goal. I'll ask a few questions, then pro
 Add a --format csv|json option to `shop report`; the table output must not change; npm test must pass
 ```
 
-- 如果消息只有 `@path/to/file.md`，目标会从该文件读取，例如 `@examples/mission.md`。
+- 如果消息只有 `@path/to/file.md`，目标会从该文件读取，例如 `@../missions/csv-export.md`。路径相对于 pi 的工作目录，`~` 不会被展开。请把文件放在仓库之外，或者先提交它：主 checkout 中未跟踪的文件会被复制到各个 feature 的 branch 中，在你提交或 stash 它之前，这些 branch 的合并都会被拒绝。
 - `/mission <goal>` 和 `/mission @<file>` 会跳过开头的信息，立即开始规划。
 - 斜杠命令永远不会被当作目标。
 
@@ -210,11 +210,7 @@ Mission O1 "CSV and JSON export for shop report" — plan ready (2 milestones ·
   Approve and start mission
 ```
 
-- 对话框打开时选中的是 **Not yet — keep planning**，因此只按 Enter 永远不会批准。要批准，请先按 ↓ 再按 Enter。也可以关闭对话框，然后运行 `/mission approve`。
-- 对话框打开时如果你开始输入或粘贴，对话框会关闭，内容会进入编辑器，因此误触按键不会批准计划。对话框打开后的半秒内，它还会忽略 ↑、↓ 和 Enter，因此原本要按给别处的按键也无法批准计划。
-- 对话框会等到 orchestrator 完成当前轮次、编辑器为空、没有其他扩展的对话框处于打开状态，并且键盘已经安静 2 秒之后才打开。
-- 想修改计划，就用普通消息说明要改什么。orchestrator 会更新计划并再次请你批准，届时会弹出新的对话框。如果是在批准之后修改了契约，对话框会显示 **plan revised**，第二个选项变为 **Approve the revised plan**。
-- 只有你可以批准，orchestrator 没有用来批准的工具。
+对话框默认选中 **Not yet — keep planning**。你输入的文字会进入编辑器；要批准，请按 ↓ 再按 Enter 选择 **Approve and start mission**，或者运行 `/mission approve`。如果想修改计划，就用普通消息说明要改什么，orchestrator 会更新计划并再次请你批准。只有你可以批准。详见[批准对话框](#批准对话框)。
 
 批准之后，mission 开始执行：
 
@@ -240,14 +236,7 @@ models: orchestrator claude-opus-5-5 · worker claude-sonnet-5-5 · reviewer gpt
 next: 2 features of MS2 in flight — validation starts once all are merged
 ```
 
-从上到下依次是：mission 及其状态、耗时和花费（设置了预算时还会显示预算）、各个里程碑、当前里程碑的 feature 及其状态和负责的 Agent、正在运行的 Agent、各角色的模型，以及下一步。底部状态栏用一行概括同样的信息：`mission O1 executing · MS2 1/3 merged · 2 agents`。
-
-面板最多占 10 行。如果一个里程碑的 feature 多到放不下，最后一行 feature 会说明还有多少个，`/mission` 会列出全部。模型显示时不带 provider，除非有两个角色使用了来自不同 provider 的同一个模型 id。如果各角色的模型在一行中放不下（例如终端较窄或模型 id 较长），就每行显示两个角色，或者每行一个：
-
-```text
-models: orchestrator claude-opus-5-5 · worker claude-sonnet-5-5
-        reviewer gpt-5.5 · validator gpt-5.5
-```
+从上到下依次是：mission 及其状态、耗时和花费（设置了预算时还会显示预算）、各个里程碑、当前里程碑的 feature 及其状态和负责的 Agent、正在运行的 Agent、各角色的模型，以及下一步。底部状态栏用一行概括同样的信息：`mission O1 executing · MS2 1/3 merged · 2 agents`。终端较窄时面板如何显示，见 [Mission Control 面板](#mission-control-面板)。
 
 `/mission` 会输出完整视图，不触发模型轮次：
 
@@ -341,7 +330,7 @@ Automatic teardown: removed 6 worktree(s), kept 0.
 | --- | --- |
 | `/mission` | 进入 mission 模式：开启 Tower 模式，把会话切换到 orchestrator 模型，显示各角色的模型并询问目标。已有未结束的 mission 时，改为显示 Mission Control。 |
 | `/mission <goal>` | 立即为这个目标规划一个 mission。如果目标的第一个词恰好是子命令（例如 "stop …"），请先运行 `/mission`，再输入目标。 |
-| `/mission @<file>` | 同上，但从文件读取目标，路径相对于 pi 的工作目录。 |
+| `/mission @<file>` | 同上，但从文件读取目标。路径相对于 pi 的工作目录（`~` 不会被展开）。请把文件放在仓库之外，或者先提交它。 |
 | `/mission approve` | 批准计划并开始执行 mission |
 | `/mission pause [reason]` | 暂停 mission：正在运行的 Agent 会完成当前轮次，不再启动新工作 |
 | `/mission resume` | 按当前配置中的限额恢复已暂停或已阻塞的 mission |
@@ -370,9 +359,9 @@ Automatic teardown: removed 6 worktree(s), kept 0.
 pi-tower exec --mission -f mission.md --auto-approve
 ```
 
-运行器会在你的仓库中以 RPC 模式启动 pi，开启 Tower 模式，用 `/tower objective --headless` 交出 mission 文件，然后一直跟进到 mission 结束。在无人值守运行中，orchestrator 规划时不会提问：它自己决定未明确的问题，把每个假设记为 mission 的备注，然后请求批准。运行器自己输出的行使用 *objective* 一词，这是 mission 在 Tower 中的名称（见[进阶](#进阶)）。
+运行器会在你的仓库中以 RPC 模式启动 pi，开启 Tower 模式，用 `/tower objective --headless` 交出 mission 文件，然后一直跟进到 mission 结束。在无人值守运行中，orchestrator 规划时不会提问：它自己决定未明确的问题，把每个假设记为 mission 的备注，然后请求批准。运行器自己输出的行使用 *objective* 一词，这是 mission 在 Tower 中的名称（见[进阶](#进阶)）。与 `/mission @<file>` 一样，请把 mission 文件放在仓库之外，或者先提交它。
 
-`pi-tower --help` 会输出以下用法：
+`pi-tower --help` 的输出以下面的用法概要开头，之后是下文介绍的选项和退出码：
 
 ```text
 Usage: pi-tower run -f <objective.md> [--auto-approve] [--timeout <ms>] [--cwd <dir>] [--pi <path>]
@@ -562,6 +551,26 @@ mission 会经历以下状态：
 - **同一时间只有一个 mission。** 每个工作区最多只有一个未结束的 mission。没有 mission、上一个已完成或已阻塞（起草新 mission 时会把它归档），或者当前的 mission 仍处于 planning（此时由 orchestrator 修订它）时，可以提交新的目标；mission 正在等待批准、执行中或已暂停时，新的目标会被拒绝。
 - **恢复。** `/mission resume` 适用于已暂停或已阻塞的 mission。它会先按当前的 [objective 配置](#objective-配置段)重新载入 mission 的限额，所以请在恢复之前先在 `tower.json` 中调高预算；如果里程碑是因验证失败次数过多而被阻塞，请调高 `maxValidationRounds`：失败轮数不会被清零，否则同类验证再失败一次，mission 就会再次被阻塞。它还会重置停滞计数，并重新开放被阻塞的里程碑，让 orchestrator 可以规划修复。从未被批准过的 mission 会回到 planning。
 - **mission 模式关闭时。** autopilot 只在 Tower 模式开启时运行。`/mission exit` 或 `/tower off` 之后，执行中的 mission 会停止推进，直到你重新运行 `/mission` 或 `/tower on`。
+
+#### 批准对话框
+
+在 mission 模式下，计划等待你批准时会弹出一个有两个选项的对话框。对话框打开时选中的是 **Not yet — keep planning**，因此只按 Enter 永远不会批准；要选择 **Approve and start mission**，需要先按 ↓ 再按 Enter。如果批准之后修改了契约、需要重新批准，标题会显示 **plan revised**，第二个选项变为 **Approve the revised plan**。无论有没有对话框，`/mission approve` 随时都可以使用。
+
+- 只有在 orchestrator 完成当前轮次、编辑器为空、没有其他扩展的对话框处于打开状态，并且键盘已经安静 2 秒之后，对话框才会打开。
+- 对话框打开时如果你开始输入或粘贴，对话框会关闭，内容会进入编辑器，因此误触按键不会批准计划。等编辑器清空、键盘重新安静下来后，对话框会再次打开。
+- 对话框打开后的半秒内，它会忽略 ↑、↓ 和 Enter，因此原本要按给别处的按键无法批准计划。
+- 无人值守运行、没有 UI 的会话，以及 `objective.autoApprove` 本来就会自动批准计划时，都不会弹出对话框。进入 mission 模式时已经在等待批准的计划也不会弹出对话框，请用 `/mission approve` 批准。这些规则唯一覆盖不到的情况见[已知限制](#已知限制)。
+
+#### Mission Control 面板
+
+编辑器上方的面板最多占 10 行。如果当前里程碑的 feature 多到放不下，最后一行 feature 会说明还有多少个，`/mission` 会列出全部。模型显示时不带 provider，除非有两个角色使用了来自不同 provider 的同一个模型 id；没有单独配置模型的 validator 显示为 `= reviewer` 或 `= orchestrator`。如果各角色的模型在一行中放不下（例如终端较窄或模型 id 较长），就每行显示两个角色，或者每行一个：
+
+```text
+models: orchestrator claude-opus-5-5 · worker claude-sonnet-5-5
+        reviewer gpt-5.5 · validator gpt-5.5
+```
+
+Tower 状态变化时面板会刷新（最多每秒一次），此外还有一个 5 秒的定时刷新。`/mission exit` 和 `/tower off` 会移除面板。
 
 #### 验证
 
