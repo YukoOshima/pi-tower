@@ -289,11 +289,6 @@ async function startValidation(
   const names = new Set(reserved);
   const launchedKinds: string[] = [];
   for (const kind of kinds) {
-    if (kind === 'commands') {
-      execution.runCommands(milestoneId, started.commit);
-      launchedKinds.push(kind);
-      continue;
-    }
     if (kind !== 'scrutiny' && kind !== 'user-testing') continue;
     const name = validatorAgentName(world.state, milestone, kind, names);
     names.add(name);
@@ -304,6 +299,10 @@ async function startValidation(
       start: () => effects.spawnValidator(milestoneId, kind, name),
     });
     launchedKinds.push(`${kind}=${name}`);
+  }
+  if (kinds.includes('commands')) {
+    execution.runCommands(milestoneId, started.commit);
+    launchedKinds.push('commands');
   }
   return {
     status: 'done',

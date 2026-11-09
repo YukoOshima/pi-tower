@@ -370,7 +370,8 @@ export class AutopilotRunner {
     const reserved = new Set(this.launches.keys());
     const wakeKeys: string[] = [];
     let current: AutopilotAction | undefined;
-    let launchedByCurrent = 0;
+    let launchedByCurrent: Promise<void>[] = [];
+    let commandsByCurrent = false;
     const execution: AutopilotExecution = {
       store,
       effects: this.effects,
@@ -380,24 +381,24 @@ export class AutopilotRunner {
       reserved,
       launch: (launch) => {
         reserved.add(launch.agent);
-        launchedByCurrent += 1;
-        this.startLaunch(store, launch, current!, tick);
+        launchedByCurrent.push(this.startLaunch(store, launch, current!, tick));
       },
       runCommands: (milestoneId, commit) => {
-        launchedByCurrent += 1;
-        this.startCommands(store, world, milestoneId, commit);
+        commandsByCurrent = true;
+        this.startCommands(store, world, milestoneId, commit, launchedByCurrent);
       },
     };
     for (const action of decision.actions) {
       const mission = autopilotActionMission(action);
       if (mission !== undefined && this.missionPending(mission)) continue;
       current = action;
-      launchedByCurrent = 0;
+      launchedByCurrent = [];
+      commandsByCurrent = false;
       const identity = autopilotActionIdentity(action);
       const outcome = await executeAutopilotAction(execution, action);
       if (outcome.status === 'refused') {
         this.refuse(identity, action.type, autopilotActionSubject(action), outcome.error, tick);
-      } else if (outcome.status === 'done' && launchedByCurrent === 0) {
+      } else if (outcome.status === 'done' && launchedByCurrent.length === 0 && !commandsByCurrent) {
         this.refusals.delete(identity);
       }
       if (outcome.status === 'done' && outcome.wakeKey !== undefined) wakeKeys.push(outcome.wakeKey);
@@ -476,7 +477,12 @@ export class AutopilotRunner {
     });
   }
 
-  private startLaunch(store: TowerStore, launch: AutopilotLaunch, action: AutopilotAction, tick: number): void {
+  private startLaunch(
+    store: TowerStore,
+    launch: AutopilotLaunch,
+    action: AutopilotAction,
+    tick: number,
+  ): Promise<void> {
     const pending: PendingLaunch = { launch, type: action.type, subject: autopilotActionSubject(action), tick };
     this.launches.set(launch.agent, pending);
     const run = async (): Promise<void> => {
@@ -510,16 +516,27 @@ export class AutopilotRunner {
           : { error: result.error.slice(0, 300) }),
       });
     };
-    this.track(run());
+    const promise = run();
+    this.track(promise);
+    return promise;
   }
 
-  private startCommands(store: TowerStore, world: AutopilotWorld, milestoneId: string, commit: string): void {
+  private startCommands(
+    store: TowerStore,
+    world: AutopilotWorld,
+    milestoneId: string,
+    commit: string,
+    after: readonly Promise<void>[],
+  ): void {
     if (this.commandRuns.has(milestoneId)) return;
     const controller = new AbortController();
     this.commandRuns.set(milestoneId, { milestone: milestoneId, commit, controller });
     const runCommands = this.deps.runCommands ?? runCommandsValidation;
+    const validatorsStarted = Promise.allSettled([...after]);
     const run = async (): Promise<void> => {
       try {
+        await validatorsStarted;
+        if (controller.signal.aborted) return;
         const outcome = await runCommands(store, {
           milestoneId,
           settings: validationSettings(world.settings),
