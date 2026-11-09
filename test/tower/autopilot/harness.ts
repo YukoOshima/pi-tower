@@ -2,6 +2,7 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 
 import {
+  TOWER_NAME,
   WORKTREES_DIR,
   contractRevisionOf,
   type TowerPlanInput,
@@ -56,6 +57,8 @@ export interface SimScript {
   work(missionTitle: string, turn: number): { readonly file: string; readonly content: string } | undefined;
   /** Final text of a worker turn that ends idle without committing or TowerComplete; undefined works as usual. */
   stopsSilently?(missionTitle: string, turn: number): string | undefined;
+  /** Body of a clarify-request a worker sends the tower before it ends its turn idle; undefined works as usual. */
+  asks?(missionTitle: string, turn: number): string | undefined;
   review(missionId: string, reviewNumber: number): string;
   validate(milestone: string, kind: AutopilotValidatorKind, round: number): 'pass' | 'fail';
   orchestrate(text: string, state: TowerState): readonly TowerPlanInput[] | undefined;
@@ -313,6 +316,13 @@ export class FakeTower implements AutopilotObservations, AutopilotEffects {
     const mission = state.missions.find((candidate) => candidate.id === agent.mission)!;
     const unread = await store.readUnreadInbox(agent.name, 100);
     if (unread.length > 0) await store.ackInbox(agent.name, unread.map((item) => item.messageId));
+    const question = this.script.asks?.(mission.title, agent.turns);
+    if (question !== undefined) {
+      await store.send(agent.name, { to: TOWER_NAME, subject: 'clarify-request', body: question });
+      agent.lastText = `I asked the tower and wait for the answer: ${question}`;
+      agent.status = 'idle';
+      return;
+    }
     const silent = this.script.stopsSilently?.(mission.title, agent.turns);
     if (silent !== undefined) {
       agent.lastText = silent;

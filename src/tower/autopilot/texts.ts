@@ -145,7 +145,7 @@ export function rebaseConflictResumePrompt(
 
 export function continueResumePrompt(mission: Pick<TowerMission, 'id' | 'title' | 'branch' | 'kind'>): string {
   return [
-    `continue: your mission ${mission.id} "${mission.title}" (branch ${mission.branch}) is still active, but your last turn ended without TowerComplete, a blocker or a message — a result or a question that is only in your final text reaches no one.`,
+    `continue: Read TowerInbox first — an answer may be waiting. Your mission ${mission.id} "${mission.title}" (branch ${mission.branch}) is still active, but you are idle without TowerComplete, a blocker or an unanswered message — a result or a question that is only in your final text reaches no one.`,
     `Check where you stopped with TowerMission(id="${mission.id}"), keep working until one of these applies, and end your turn with it:`,
     mission.kind === 'survey'
       ? '1. The investigation is done → finish with TowerComplete(report=the full result).'
@@ -181,7 +181,7 @@ export function workerIdleWake(input: {
       ? ''
       : ' With the autopilot off, nobody resumes it unless you do.';
   return [
-    `worker-idle: worker ${worker} on feature ${mission.id} "${mission.title}" (${details.join(', ')}) went idle without TowerComplete, a blocker or a message, and the feature is still active.${situation}`,
+    `worker-idle: worker ${worker} on feature ${mission.id} "${mission.title}" (${details.join(', ')}) is idle without TowerComplete, a blocker or an unanswered message, and the feature is still active.${situation}`,
     lastText.length > 0
       ? `Its last message:\n${quotedTail(lastText, WORKER_TEXT_MAX_CHARS)}`
       : `Its last message is not available here — read it with TowerTaskOutput(agent="${worker}").`,

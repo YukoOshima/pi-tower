@@ -8,7 +8,7 @@ describe('continue resume prompt', () => {
   it('names the three ways to end a turn and forbids stopping silently', () => {
     const lines = continueResumePrompt(BUILD).split('\n');
     expect(lines[0]).toBe(
-      'continue: your mission M3 "Core A" (branch feat/core-a) is still active, but your last turn ended without TowerComplete, a blocker or a message — a result or a question that is only in your final text reaches no one.',
+      'continue: Read TowerInbox first — an answer may be waiting. Your mission M3 "Core A" (branch feat/core-a) is still active, but you are idle without TowerComplete, a blocker or an unanswered message — a result or a question that is only in your final text reaches no one.',
     );
     expect(lines.slice(2)).toEqual([
       '1. The work is done → run the tests, commit, and finish with TowerComplete(report) — the autopilot spawns a reviewer for the new tip.',
@@ -43,7 +43,7 @@ describe('worker-idle wake', () => {
   it('says nothing about resuming when the autopilot has not nudged the worker yet', () => {
     const text = workerIdleWake({ mission: { ...BUILD, milestone: undefined }, worker: 'w', autopilot: true, nudged: false });
     expect(text.split('\n')[0]).toBe(
-      'worker-idle: worker w on feature M3 "Core A" (branch feat/core-a) went idle without TowerComplete, a blocker or a message, and the feature is still active.',
+      'worker-idle: worker w on feature M3 "Core A" (branch feat/core-a) is idle without TowerComplete, a blocker or an unanswered message, and the feature is still active.',
     );
   });
 });

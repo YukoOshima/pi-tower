@@ -348,7 +348,9 @@ describe('executing', () => {
     await tower.actAll();
     await settle(runner);
     expect(tower.calls).toEqual(['spawnWorker M1 ap-w-M1-1', 'resumeWorker ap-w-M1-1 continue']);
-    expect(prompts[0]).toMatch(/^continue: your mission M1 "Core A" \(branch feat\/core-a\) is still active, but your last turn ended without TowerComplete, a blocker or a message/);
+    expect(prompts[0]).toMatch(
+      /^continue: Read TowerInbox first — an answer may be waiting\. Your mission M1 "Core A" \(branch feat\/core-a\) is still active, but you are idle without TowerComplete, a blocker or an unanswered message/,
+    );
     expect(prompts[0]).toContain('finish with TowerComplete(report)');
     expect(prompts[0]).toContain('TowerMission(id="M1", blocker="...")');
     expect(prompts[0]).toContain('TowerSend(to="tower", subject="clarify-request"');
@@ -358,7 +360,7 @@ describe('executing', () => {
     await settle(runner);
     expect(tower.wakes).toHaveLength(1);
     expect(tower.wakes[0]).toMatch(
-      /^worker-idle: worker ap-w-M1-1 on feature M1 "Core A" \(milestone MS1, branch feat\/core-a\) went idle without TowerComplete, a blocker or a message, and the feature is still active\. The autopilot already resumed it once on this tip/,
+      /^worker-idle: worker ap-w-M1-1 on feature M1 "Core A" \(milestone MS1, branch feat\/core-a\) is idle without TowerComplete, a blocker or an unanswered message, and the feature is still active\. The autopilot already resumed it once on this tip/,
     );
     expect(tower.wakes[0]).toContain('Its last message:\n> Should core A store the value as JSON?\n> I stop here until someone decides.');
     expect(tower.wakes[0]).toContain('TowerSend(to="ap-w-M1-1", ...) and resume it with TowerResume(agent="ap-w-M1-1", prompt="...")');
@@ -379,6 +381,37 @@ describe('executing', () => {
     expect(activity).toMatch(/ autopilot wake-orchestrator reason=worker-idle subject=M1 result=done detail=key=worker-idle:M1:\w+\n/);
   });
 
+  it('leaves a worker waiting for the answer to its clarify-request alone, then nudges it to read the answer', async () => {
+    await draft();
+    await store.approveObjective('human');
+    const asks = (_title: string, turn: number): string | undefined =>
+      turn === 1 ? 'Should core A store the value as JSON?' : undefined;
+    const { runner, tower } = setup({}, true, { ...QUIET, asks });
+    const prompts: string[] = [];
+    const resume = tower.resumeWorker.bind(tower);
+    tower.resumeWorker = async (name, prompt) => {
+      prompts.push(prompt);
+      return resume(name, prompt);
+    };
+    await settle(runner);
+    await tower.actAll();
+    await settle(runner);
+    await settle(runner);
+    expect(tower.calls).toEqual(['spawnWorker M1 ap-w-M1-1']);
+    expect(tower.wakes).toEqual([]);
+
+    await store.send('tower', { to: 'ap-w-M1-1', subject: 'answer', body: 'Yes, store it as JSON.' });
+    await settle(runner);
+    expect(tower.calls).toEqual(['spawnWorker M1 ap-w-M1-1', 'resumeWorker ap-w-M1-1 continue']);
+    expect(prompts[0]).toMatch(/^continue: Read TowerInbox first — an answer may be waiting\./);
+
+    await tower.actAll();
+    await settle(runner);
+    expect((await store.load()).missions[0]!.status).toBe('completed');
+    expect(tower.calls.filter((call) => call.startsWith('resumeWorker'))).toHaveLength(1);
+    expect(tower.wakes).toEqual([]);
+  });
+
   it('with the autopilot off wakes the orchestrator once and never resumes the worker itself', async () => {
     await draft();
     await store.approveObjective('human');
@@ -388,7 +421,7 @@ describe('executing', () => {
     await settle(runner);
     await settle(runner);
     expect(tower.calls).toEqual(['spawnWorker M1 core-a-worker', 'wake worker-idle']);
-    expect(tower.wakes[0]).toContain('went idle without TowerComplete, a blocker or a message, and the feature is still active. With the autopilot off, nobody resumes it unless you do.');
+    expect(tower.wakes[0]).toContain('is idle without TowerComplete, a blocker or an unanswered message, and the feature is still active. With the autopilot off, nobody resumes it unless you do.');
     expect(tower.wakes[0]).toContain('Its last message is not available here — read it with TowerTaskOutput(agent="core-a-worker").');
   });
 
