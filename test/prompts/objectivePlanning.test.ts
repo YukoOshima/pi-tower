@@ -31,35 +31,78 @@ function ordered(text: string, markers: readonly string[]): void {
   expect([...positions].sort((a, b) => a - b)).toEqual(positions);
 }
 
+const SWARM: readonly string[] = [
+  '4. **Plan the features of every milestone — a parallel swarm.**',
+  'Before requesting approval, plan the features of all milestones with `TowerPlan`, passing `milestone` on every item; only fix features wait until a validation fails.',
+  'The features of a milestone run concurrently, each with its own worker, review, and merge, so split every milestone into as many small, independent features as the work allows:',
+  '   - give each feature a file scope disjoint from the other features of its milestone: the merge gate enforces scope, and features of one milestone whose scopes overlap get an automatic dependency, so they run one after another instead of in parallel — two features that must edit the same file belong together;',
+  "   - add `deps` only where a feature needs another feature's merged code: a feature starts only after its deps merge;",
+  "   - when a skill available in this session fits a feature, name it in the feature's `context` so its worker uses it;",
+  "   - when the mission text prescribes the plan's shape — milestones, features, scopes — follow it.",
+];
+
 describe('buildObjectivePlanningPrompt', () => {
-  it('hands the interactive objective over with the planning steps in order', () => {
+  it('hands the interactive mission over with the interview before the planning steps', () => {
     const prompt = buildObjectivePlanningPrompt({ mode: 'interactive', text: TEXT });
     ordered(prompt, [
-      '# New objective — plan it with the human',
-      'The human started an objective with `/tower objective`.',
-      '## Objective\n\nShip a CSV export command.\n\nUsers run `report export --format csv`.\n\n## Plan it',
+      '# New mission — plan it with the human',
+      'The human started a new mission.',
+      'The human calls this objective "the mission" and its features "features"',
+      '## Mission goal\n\nShip a CSV export command.\n\nUsers run `report export --format csv`.\n\n## Plan it',
       '1. **Check the workspace.**',
-      '2. **Settle the requirements with the human.**',
+      '2. **Interview the human before drafting.**',
       '3. **Draft the objective**',
-      '4. **Plan the features**',
+      '4. **Plan the features of every milestone — a parallel swarm.**',
       '5. **Request approval — never approve yourself.**',
       'Completion is automatic and gated: never declare it yourself.',
     ]);
     for (const sentence of [
-      'nothing executes until the human approves the plan with `/tower approve`',
-      'ask in your reply what done looks like, what is out of scope, how a user would exercise the result, and which commands prove it, then end your turn',
+      'interview first, then draft the plan and request approval — nothing executes until the human approves the plan, in the approval dialog or with `/mission approve`',
       "the `goal` in the human's key wording",
       'verifiable `definition_of_done` items',
+      '`milestones` — validation checkpoints, each leaving the product working and testable: one is enough for simple work; large or risky work needs more.',
       '`user_testing` with `qa_instructions`',
       'each includes its own setup (e.g. `npm ci && npm test`)',
       'Keep the draft current with `TowerObjective(action="update")`',
-      'passing `milestone` on every item',
-      'tell them to approve with `/tower approve`, and end your turn',
+      "   - write verifiable tasks, and keep the human's key wording in `context`;",
+      ...SWARM,
     ]) {
       expect(prompt).toContain(sentence);
     }
     expect(prompt).not.toContain('Source:');
     expect(prompt).not.toContain('never ask');
+    expect(prompt).not.toContain('/tower');
+  });
+
+  it('interviews the human about done, scope, user flows, commands, and constraints, and pushes back on vague goals', () => {
+    const prompt = buildObjectivePlanningPrompt({ mode: 'interactive', text: TEXT });
+    ordered(prompt, [
+      '2. **Interview the human before drafting.** Ask in your reply, then end your turn — a few questions per round, the most important first:',
+      '   - the goal and what done looks like;',
+      '   - what is out of scope;',
+      '   - how a user will exercise the result — the user flows a QA pass should drive;',
+      '   - which commands prove it (tests, builds, scripts);',
+      '   - the constraints: stack, compatibility, performance, areas of the code to leave alone.',
+      'Skip what the mission text already answers; when the human says it is complete as written, plan without questions.',
+      'Push back on a vague or contradictory goal: say what is unclear and propose concrete readings — never guess a material requirement.',
+      'Iterate with the human until the plan is solid.',
+      '3. **Draft the objective**',
+    ]);
+  });
+
+  it('asks the human to approve in the dialog or with /mission approve and reports the parallel plan', () => {
+    const prompt = buildObjectivePlanningPrompt({ mode: 'interactive', text: TEXT });
+    expect(prompt).toContain(
+      '5. **Request approval — never approve yourself.** Call `TowerObjective(action="request-approval")`, then summarize the plan in your reply: the milestones, the features of each and how many of them run in parallel, the validation, and the estimated runs (a floor, not a ceiling). Tell the human to approve it in the approval dialog or with `/mission approve` — only the human can approve — and that they can ask you for changes; then end your turn. When the human asks for changes, update the plan and request approval again.',
+    );
+  });
+
+  it('explains the mission terminology while keeping the Tower tool names', () => {
+    for (const mode of ['interactive', 'headless'] as const) {
+      expect(buildObjectivePlanningPrompt({ mode, text: TEXT })).toContain(
+        'The human calls this objective "the mission" and its features "features" — say "mission O1" and "feature M3" when you report to them. The Tower tools keep their names: the mission is the tower objective (`TowerObjective`), each feature is a tower mission (`TowerPlan`, `TowerMission`), and its milestones are validation checkpoints.',
+      );
+    }
   });
 
   it('plans headless without questions and records assumptions as notes', () => {
@@ -69,11 +112,13 @@ describe('buildObjectivePlanningPrompt', () => {
       file: '/work/specs/csv export.md',
     });
     ordered(prompt, [
-      '# New objective — plan it headless',
+      '# New mission — plan it headless',
       '`/tower objective --headless`',
-      '## Objective\nSource: /work/specs/csv export.md\n\nShip a CSV export command.',
+      'The human calls this objective "the mission"',
+      '## Mission goal\nSource: /work/specs/csv export.md\n\nShip a CSV export command.',
       '2. **Decide the open points yourself.**',
       "the `goal` in the objective's own wording",
+      '4. **Plan the features of every milestone — a parallel swarm.**',
       '5. **Request approval as soon as the plan is complete — never approve yourself.**',
     ]);
     for (const sentence of [
@@ -82,10 +127,18 @@ describe('buildObjectivePlanningPrompt', () => {
       'record each assumption as a `note` on the objective',
       'Block the objective with `TowerObjective(action="block", reason)` only when no reasonable decision exists',
       'the runner approves the plan or hands it to the human',
+      "   - write verifiable tasks, and keep the objective's own wording in `context`;",
+      ...SWARM,
     ]) {
       expect(prompt).toContain(sentence);
     }
-    for (const interactiveOnly of ['ask in your reply', '/tower approve`', 'Keep the draft current']) {
+    for (const interactiveOnly of [
+      'Interview the human',
+      'Ask in your reply',
+      'Push back',
+      '/mission approve',
+      'Keep the draft current',
+    ]) {
       expect(prompt).not.toContain(interactiveOnly);
     }
   });
@@ -99,7 +152,7 @@ describe('buildObjectivePlanningPrompt', () => {
     expect(planning).toContain(
       'Objective O2 "CSV export" is still planning: revise it into this objective with `TowerObjective(action="update")` instead of drafting — a draft is refused while it is open.',
     );
-    ordered(planning, ['Objective O2 "CSV export" is still planning', '## Objective']);
+    ordered(planning, ['Objective O2 "CSV export" is still planning', '## Mission goal']);
 
     for (const status of ['completed', 'blocked'] as const) {
       expect(

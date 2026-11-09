@@ -59,13 +59,17 @@ const CASES: readonly Omit<TowerModeReminderInput, 'objective'>[] = [
   { active: true, last: { index: 0, kind: 'sparse' }, history: [reminderEntry, ...assistants(5)] },
 ];
 
+const SWARM_STEP =
+  "3. **Plan every milestone's features up front, as a parallel swarm.** Before requesting approval, plan the features of all milestones with `TowerPlan(milestone)`, passing `milestone` on every item; only fix features are planned later, after a failed validation. The features of a milestone run concurrently, so split each milestone into as many small, independent features as the work allows. Give each feature a file scope disjoint from the other features of its milestone: the merge gate enforces scope, and features of one milestone whose scopes overlap get an automatic dependency, so they run one after another instead of in parallel. Add explicit deps only where a feature needs another feature's merged code — a feature starts only after its deps merge. Give every feature verifiable tasks and the human's key wording in `context`, and name there any skill available in this session that fits its work. When the human prescribes the plan's shape — milestones, features, scopes — follow it.";
+
 describe('TOWER_OBJECTIVE_PLAYBOOK', () => {
   it('walks the orchestrator through the objective lifecycle in order', () => {
     const steps = [
       '## Objective mode',
-      '1. **Plan with the human, then draft.**',
+      'The human calls the objective "the mission"',
+      '1. **Interview the human, then draft.**',
       '2. **Give every milestone a validation contract.**',
-      '3. **Plan features with `TowerPlan(milestone)`.**',
+      "3. **Plan every milestone's features up front, as a parallel swarm.**",
       '4. **Request approval — never self-approve.**',
       '5. **Let the autopilot run the mechanics.**',
       '6. **Own the judgment work.**',
@@ -73,6 +77,16 @@ describe('TOWER_OBJECTIVE_PLAYBOOK', () => {
     const positions = steps.map((step) => TOWER_OBJECTIVE_PLAYBOOK.indexOf(step));
     expect(positions.every((position) => position >= 0)).toBe(true);
     expect([...positions].sort((a, b) => a - b)).toEqual(positions);
+  });
+
+  it('interviews the human before drafting and pushes back on vague goals', () => {
+    for (const sentence of [
+      '1. **Interview the human, then draft.** Before writing the plan, ask in your reply and end your turn instead of guessing material requirements: the goal and what done looks like, what is out of scope, how a user will exercise the result (the user flows a QA pass should drive), which commands prove it, and the constraints (stack, compatibility, areas of the code to leave alone).',
+      'Skip what the human already answered, and plan without questions when the human says the goal is complete as written.',
+      'Push back on a vague or contradictory goal — say what is unclear and propose concrete readings — and iterate until the plan is solid.',
+    ]) {
+      expect(TOWER_OBJECTIVE_PLAYBOOK).toContain(sentence);
+    }
   });
 
   it('plans with the human before drafting and keeps the contract verifiable', () => {
@@ -95,12 +109,19 @@ describe('TOWER_OBJECTIVE_PLAYBOOK', () => {
   it('reserves approval for the human and completion for the gate', () => {
     for (const sentence of [
       'TowerObjective(action="request-approval")',
-      'tell them to approve with `/tower approve`',
+      'summarize the plan for the human (milestones, the features of each and how many of them run in parallel, validation, estimated runs)',
+      'tell them to approve it in the approval dialog or with `/mission approve` and that they can ask you for changes, and end your turn',
       'Approval belongs to the human alone: no tool can approve, and you never state or imply that the plan is approved.',
       'Completion is automatic and gated — never declare it yourself.',
     ]) {
       expect(TOWER_OBJECTIVE_PLAYBOOK).toContain(sentence);
     }
+  });
+
+  it('waits for the human to resume with /mission resume while paused', () => {
+    expect(TOWER_OBJECTIVE_PLAYBOOK).toContain(
+      'While the objective is paused (by the human with `/mission pause`, or by a budget limit), start nothing new and wait for the human to resume it with `/mission resume`.',
+    );
   });
 
   it('hands the mechanics to the autopilot and keeps the judgment duties', () => {
@@ -144,7 +165,7 @@ describe('TOWER_OBJECTIVE_HEADLESS_PLAYBOOK', () => {
     for (const shared of [
       'Milestone commands and acceptance commands run mechanically in a fresh detached checkout of the base tip with no installed dependencies or build output, so each command must include its own setup (e.g. `npm ci && npm test`).',
       '2. **Give every milestone a validation contract.**',
-      '3. **Plan features with `TowerPlan(milestone)`.**',
+      SWARM_STEP,
       '4. **Request approval — never self-approve.**',
       '5. **Let the autopilot run the mechanics.**',
       '6. **Own the judgment work.**',
@@ -152,6 +173,29 @@ describe('TOWER_OBJECTIVE_HEADLESS_PLAYBOOK', () => {
     ]) {
       expect(TOWER_OBJECTIVE_HEADLESS_PLAYBOOK).toContain(shared);
     }
+  });
+});
+
+describe('objective playbook planning shape', () => {
+  it.each(PLAYBOOKS)('the %s playbook plans every milestone up front as a parallel swarm', (_variant, playbook) => {
+    expect(playbook).toContain(SWARM_STEP);
+    expect(playbook).toContain(
+      'Milestones are validation checkpoints: order them so that each one leaves the product working and testable — one is enough for simple work; large or risky work needs more, so drift is caught early.',
+    );
+    expect(playbook).toContain(
+      '   - plan-milestone → the milestone that just became current has no features: plan them now as small parallel features with disjoint scopes.',
+    );
+    expect(playbook).toContain(
+      '   - validation-failed → read every failure, then plan fix features into the same milestone with `TowerPlan(milestone, origin="fix")`',
+    );
+    expect(playbook).not.toContain('Plan at least the first milestone');
+  });
+
+  it.each(PLAYBOOKS)('the %s playbook explains the mission terminology and the /mission commands', (_variant, playbook) => {
+    expect(playbook).toContain(
+      'The human calls the objective "the mission" and its features "features": `/mission` shows it, and in your replies you say "mission O1" and "feature M3". The Tower tools keep their names — the mission is the objective (`TowerObjective`), each feature is a tower mission (`TowerPlan`, `TowerMission`) — and the human steers it with `/mission approve`, `/mission pause`, and `/mission resume`.',
+    );
+    expect(playbook).not.toMatch(/\/tower\b/);
   });
 });
 
@@ -279,7 +323,14 @@ describe('selectTowerModeReminder with an objective', () => {
         objective: 'headless',
       }),
     ).toEqual({ kind: 'sparse', text: `${TOWER_MODE_SPARSE_REMINDER} ${TOWER_OBJECTIVE_SPARSE_REMINDER}` });
-    expect(TOWER_OBJECTIVE_SPARSE_REMINDER).toContain('approval comes only from `/tower approve`');
+    expect(TOWER_OBJECTIVE_SPARSE_REMINDER).toContain(
+      'Never approve yourself: approval comes only from the human (`/mission approve`) or an auto-approval the human configured.',
+    );
+    expect(TOWER_OBJECTIVE_SPARSE_REMINDER).toContain('the human calls it "the mission" and its features "features"');
+    expect(TOWER_OBJECTIVE_SPARSE_REMINDER).toContain(
+      "plan every milestone's features before approval as small parallel features with disjoint scopes",
+    );
+    expect(TOWER_OBJECTIVE_SPARSE_REMINDER).not.toMatch(/\/tower\b/);
     expect(TOWER_OBJECTIVE_SPARSE_REMINDER).toContain(
       'Validation start, milestone advancement, and completion are always automatic; the feature mechanics are too unless the autopilot is off.',
     );

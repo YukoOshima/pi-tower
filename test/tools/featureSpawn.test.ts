@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { MAIN_AGENT_ID, TowerStore } from '../../src/protocol/index.ts';
+import { objectiveFeatureSpawnRefusal } from '../../src/tools/spawn/objectiveFeature.ts';
 import type { TowerSpawnToolInput } from '../../src/tools/spawn/spawn.ts';
 import { createTowerSpawnTool } from '../../src/tools/spawn/spawnTool.ts';
 import { createRepo, git, removeDir } from '../tower/fakes.ts';
@@ -69,7 +70,7 @@ describe('TowerSpawn workers for objective features', () => {
 
     await expectRefused(
       { name: 'agent-model', kind: 'worker', mission_id: 'M1' },
-      `${FEATURE}, which is awaiting approval — nothing starts before the human approves it with /tower approve`,
+      `${FEATURE}, which is awaiting approval — nothing starts before the human approves it in the approval dialog or with /mission approve`,
     );
   });
 
@@ -79,15 +80,35 @@ describe('TowerSpawn workers for objective features', () => {
 
     await expectRefused(
       { name: 'agent-model', kind: 'worker', mission_id: 'M1' },
-      `${FEATURE}, which is paused (cost budget reached) — no new work starts until the human resumes it with /tower resume`,
+      `${FEATURE}, which is paused (cost budget reached) — no new work starts until the human resumes it with /mission resume`,
     );
 
     await store.resumeObjective();
     await store.blockObjective('the vendor API is down');
     await expectRefused(
       { name: 'agent-model', kind: 'worker', mission_id: 'M1' },
-      `${FEATURE}, which is blocked (the vendor API is down) — the human decides how to continue`,
+      `${FEATURE}, which is blocked (the vendor API is down) — the human decides how to continue and resumes it with /mission resume`,
     );
+  });
+
+  it('points a feature of a completed objective at a new mission the human starts with /mission', async () => {
+    await executingObjective(store);
+    const state = await store.load();
+    const completed = { ...state, objective: { ...state.objective!, status: 'completed' as const } };
+
+    expect(objectiveFeatureSpawnRefusal(completed, state.missions[0]!)).toBe(
+      `${FEATURE}, which is completed — plan further work into a new objective, which the human starts with /mission; no worktree or agent was created`,
+    );
+  });
+
+  it('never points the human at a /tower command', async () => {
+    await executingObjective(store);
+    const state = await store.load();
+    for (const status of ['planning', 'awaiting-approval', 'paused', 'blocked', 'completed'] as const) {
+      const refusal = objectiveFeatureSpawnRefusal({ ...state, objective: { ...state.objective!, status } }, state.missions[0]!);
+      expect(refusal, status).toBeDefined();
+      expect(refusal, status).not.toMatch(/\/tower\b/);
+    }
   });
 
   it('refuses a feature of a later milestone while an earlier one is current', async () => {

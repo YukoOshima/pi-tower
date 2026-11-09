@@ -18,7 +18,7 @@ describe('tower tool refusals', () => {
   it('keeps the upstream main-agent and user-enabled refusals', () => {
     expect(TOWER_MAIN_AGENT_ONLY).toBe('Tower orchestration tools are only supported by the main agent.');
     expect(TOWER_MODE_USER_ENABLED_ONLY).toBe(
-      'tower mode is not active — only the user can enable it (with /tower on), never the agent. Ask the user to turn tower mode on, then drive the tower protocol.',
+      'tower mode is not active — only the user can enable it (with /mission or /tower on), never the agent. Ask the user to turn tower mode on, then drive the tower protocol.',
     );
   });
 

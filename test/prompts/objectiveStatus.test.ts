@@ -87,7 +87,7 @@ describe('renderObjectiveStatus — header', () => {
   it('shows the title, status, elapsed time, cost, and approval', () => {
     const text = renderObjectiveStatus(input());
     expect(text.split('\n').slice(0, 3)).toEqual([
-      '# Objective O1 — CSV export',
+      '# Mission O1 — CSV export',
       '🔵 executing · elapsed 1h 23m · cost $8.40 of $20.00 · approved by human',
       'Goal: Users can export reports as CSV.',
     ]);
@@ -234,16 +234,24 @@ describe('renderObjectiveStatus — next expected step', () => {
     return text.slice(text.indexOf('## Next\n') + '## Next\n'.length);
   }
 
-  it('follows the objective lifecycle', () => {
-    expect(next({ objective: objective({ status: 'planning' }) })).toContain('requests approval');
-    expect(next({ objective: objective({ status: 'awaiting-approval' }) })).toBe(
-      'Waiting for the human: approve with /tower approve, or tell the orchestrator what to change.',
+  it('follows the mission lifecycle with the /mission commands', () => {
+    expect(next({ objective: objective({ status: 'planning' }) })).toBe(
+      'The orchestrator plans the mission with the human: it asks about the goal, drafts the milestones, plans the features of every milestone to run in parallel, and requests approval.',
     );
-    expect(next({ objective: objective({ status: 'paused', pausedReason: 'cost limit' }) })).toBe('Paused (cost limit) — /tower resume continues.');
-    expect(next({ objective: objective({ status: 'blocked' }) })).toBe('Blocked — the human decides; /tower resume continues.');
+    expect(next({ objective: objective({ status: 'awaiting-approval' }) })).toBe(
+      'Waiting for the human: approve in the approval dialog or with /mission approve, or tell the orchestrator what to change.',
+    );
+    expect(next({ objective: objective({ status: 'paused', pausedReason: 'cost limit' }) })).toBe('Paused (cost limit) — /mission resume continues.');
+    expect(next({ objective: objective({ status: 'blocked' }) })).toBe('Blocked — the human decides; /mission resume continues.');
     expect(next({ objective: objective({ status: 'completed', completedAt: '2026-11-09T11:00:00.000Z' }) })).toBe(
       'Done — completed at 2026-11-09T11:00:00.000Z.',
     );
+  });
+
+  it('never points the human at a /tower command', () => {
+    for (const status of ['planning', 'awaiting-approval', 'executing', 'paused', 'completed', 'blocked'] as const) {
+      expect(renderObjectiveStatus(input({ objective: objective({ status }) })), status).not.toMatch(/\/tower\b/);
+    }
   });
 
   it('follows the current milestone while executing', () => {
@@ -254,7 +262,7 @@ describe('renderObjectiveStatus — next expected step', () => {
     expect(next({ objective: blocked })).toBe('MS1 is blocked — the human decides how to continue.');
     const passed = objective({ milestones: [milestone({ id: 'MS1', order: 1, status: 'passed' })] });
     expect(next({ objective: passed })).toBe(
-      'Every milestone passed — the objective completes once the final validation is stamped on the current base tip.',
+      'Every milestone passed — the mission completes once the final validation is stamped on the current base tip.',
     );
   });
 

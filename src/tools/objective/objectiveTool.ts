@@ -105,8 +105,8 @@ async function draft(
       ...contractSummary(objective, skippedValidationKinds(settings)),
       '',
       first === undefined
-        ? 'Next: add the ordered milestones with TowerObjective(action="update", milestones=[...]), plan the first milestone\'s features with TowerPlan(milestone=...), then hand the plan to the human with TowerObjective(action="request-approval").'
-        : `Next: plan the features of ${first.id} with TowerPlan(milestone="${first.id}") (later milestones may be planned now or when they become current), refine the plan with TowerObjective(action="update"), then hand it to the human with TowerObjective(action="request-approval").`,
+        ? 'Next: add the ordered milestones with TowerObjective(action="update", milestones=[...]), plan the features of every milestone with TowerPlan(milestone=...), then hand the plan to the human with TowerObjective(action="request-approval").'
+        : `Next: plan the features of every milestone up front, starting with TowerPlan(milestone="${first.id}") — small features with disjoint scopes, so each milestone runs them in parallel — refine the plan with TowerObjective(action="update"), then hand it to the human with TowerObjective(action="request-approval").`,
     ].join('\n'),
   };
 }
@@ -159,7 +159,7 @@ async function update(
   ];
   if (result.contractChanged && objective.approvalReason === 'contract-changed') {
     lines.push(
-      `The validation contract changed after approval, so objective ${objective.id} is awaiting approval again: no new work starts until the human approves the revised plan with /tower approve. Tell the human what changed and why.`,
+      `The validation contract changed after approval, so objective ${objective.id} is awaiting approval again: no new work starts until the human approves the revised plan in the approval dialog or with /mission approve. Tell the human what changed and why.`,
     );
   } else if (result.contractChanged && objective.status === 'awaiting-approval') {
     lines.push(
@@ -192,7 +192,7 @@ async function requestApproval(
   });
   return {
     output: [
-      `objective ${objective.id} is now awaiting approval (estimated runs ≈ ${String(estimatedRuns)}). Only the human approves — with /tower approve, or auto-approval when the human configured it; never approve or claim approval on the human's behalf. No feature starts before approval: end your turn after presenting the plan.`,
+      `objective ${objective.id} is now awaiting approval (estimated runs ≈ ${String(estimatedRuns)}). Only the human approves — in the approval dialog or with /mission approve, or auto-approval when the human configured it; never approve or claim approval on the human's behalf. No feature starts before approval: end your turn after presenting the plan.`,
       '',
       'Approval request shown to the human:',
       '',
@@ -231,7 +231,7 @@ async function block(store: TowerStore, reason: string): Promise<TowerToolResult
       : milestone.rounds.filter((round) => round.verdict === 'fail').at(-1)?.failures ?? [];
   return {
     output: [
-      `objective ${objective.id} is blocked — the autopilot starts no new work. The human decides how to continue and resumes with /tower resume. Notice for the human:`,
+      `objective ${objective.id} is blocked — the autopilot starts no new work. The human decides how to continue and resumes with /mission resume. Notice for the human:`,
       '',
       objectiveBlockedNotice({
         objective,

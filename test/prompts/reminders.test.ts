@@ -116,7 +116,7 @@ describe('tower mode reminder texts', () => {
     expect(TOWER_MODE_EXIT_REMINDER).toContain('Tower mode is no longer active');
     expect(TOWER_MODE_EXIT_REMINDER).toContain('(including todo and subagent tools) are restored');
     expect(TOWER_MODE_EXIT_REMINDER).toContain('is preserved on disk');
-    expect(TOWER_MODE_EXIT_REMINDER).toContain('Re-enter tower mode with `/tower on`.');
+    expect(TOWER_MODE_EXIT_REMINDER).toContain('Re-enter tower mode with `/mission` or `/tower on`.');
   });
 });
 

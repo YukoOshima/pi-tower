@@ -8,12 +8,12 @@ export const TOWER_PARAMETER_DESCRIPTIONS = {
     title:
       'Short mission title; becomes the branch/worktree slug. Printable ASCII English only — any non-ASCII character is rejected. Include a unique identifier word (a business code, a module name, a ticket id).',
     scope:
-      'Files/globs this mission may touch (e.g. "src/build/**"). Scopes of different build missions should be disjoint; when they overlap, the store auto-adds a dependency that serializes their merges.',
+      'Files/globs this mission may touch (e.g. "src/build/**"). Scopes of different build missions should be disjoint; when they overlap, the store auto-adds a dependency that serializes their merges — and, in objective mode, their start, so the features of one milestone need disjoint scopes to run in parallel.',
     tasks:
       'Checklist the worker will tick off via TowerMission task_done — write each task as a verifiable item a reviewer can map to the diff',
     context:
-      "The user's own key sentences about this mission, copied verbatim — the tower's paraphrase supplements them, never replaces them. Fill this whenever the requirement could be misread; never paste the full conversation history.",
-    deps: 'Mission ids (e.g. "M1") that must merge before this one can merge',
+      "The user's own key sentences about this mission, copied verbatim — the tower's paraphrase supplements them, never replaces them. Fill this whenever the requirement could be misread; never paste the full conversation history. Name any available skill that fits the work, so the worker uses it.",
+    deps: 'Mission ids (e.g. "M1") that must merge before this one can merge. In objective mode a feature also starts only after its deps merge, so add one only where the feature needs that merged code.',
     kind: '"survey" = read-only investigation: the scope is informational and reserves nothing (other missions may overlap it), the worker must not change code, and closing it needs no review or git merge. Default "build".',
     milestone:
       'Objective mode: the milestone id this feature belongs to (e.g. "MS1"). Required while an objective is open, omitted otherwise. Planning into a failed milestone reopens it for fix work.',

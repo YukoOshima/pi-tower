@@ -214,6 +214,22 @@ describe('planMilestoneRequest', () => {
     expect(text).toContain('(with the autopilot off, spawn them yourself with TowerSpawn) — then end your turn.');
   });
 
+  it('asks for small parallel features with disjoint scopes, real deps only, and fitting skills', () => {
+    const text = planMilestoneRequest({
+      objective: OBJECTIVE,
+      milestone: { id: 'MS2', title: 'CLI polish', validation: { scrutiny: true, userTesting: false, commands: [] } },
+      finalMilestone: false,
+    });
+    for (const sentence of [
+      'as many small, independent features as the work allows',
+      'Give each feature a file scope disjoint from the others so the features run in parallel — features of one milestone whose scopes overlap run one after another',
+      "add deps only where a feature needs another feature's merged code",
+      'name any skill available in this session that fits a feature in its context',
+    ]) {
+      expect(text).toContain(sentence);
+    }
+  });
+
   it('lists only the validators that will actually run', () => {
     const text = planMilestoneRequest({
       objective: OBJECTIVE,
@@ -387,8 +403,10 @@ describe('stuck wakes', () => {
 describe('human notices', () => {
   it('explains a budget pause and how to resume', () => {
     const cost = budgetPausedNotice({ objective: OBJECTIVE, limit: 'cost', costUsd: 12.4, maxCostUsd: 12 });
-    expect(cost).toContain('Objective O1 "CSV export" is paused: its cost budget is used up — $12.40 spent of $12.00');
-    expect(cost).toContain('raise or remove the limit in tower.json, then run /tower resume');
+    expect(cost).toContain('Mission O1 "CSV export" is paused: its cost budget is used up — $12.40 spent of $12.00');
+    expect(cost).toContain('merged features, open branches, and the validation history are kept');
+    expect(cost).toContain('raise or remove the limit in tower.json, then run /mission resume');
+    expect(cost).not.toMatch(/\/tower\b/);
     const time = budgetPausedNotice({ objective: OBJECTIVE, limit: 'wall-time', elapsedMs: 7_500_000, maxWallTimeMs: 7_200_000 });
     expect(time).toContain('its wall-time limit is reached — 2h 05m elapsed of 2h 00m');
     const unknown = budgetPausedNotice({ objective: OBJECTIVE, limit: 'wall-time' });
@@ -413,23 +431,28 @@ describe('human notices', () => {
       elapsedMs: 4_980_000,
       costUsd: 8.4,
     });
-    expect(text).toContain('Objective O1 "CSV export" is complete: every milestone passed validation, and the final validation ran on main at c0ffee1.');
+    expect(text).toContain('Mission O1 "CSV export" is complete: every milestone passed validation, and the final validation ran on main at c0ffee1.');
     expect(text).toContain('- MS1 "Exporter core" — passed (scrutiny r2, user-testing r1)\n- MS2 "CLI polish" — passed (no validation required)');
     expect(text).toContain('Features: 2 merged (1 fix), 1 abandoned. Elapsed: 1h 23m. Cost: $8.40.');
     expect(text).toContain('1. CSV export works');
-    expect(text).toContain('/tower teardown removes the mission worktrees');
+    expect(text.endsWith(
+      'The result is on main. The mission worktrees are cleaned up automatically unless objective.autoTeardown is off — then /tower teardown removes them; branches and .tower/comms/ stay as the audit trail. /mission starts the next mission.',
+    )).toBe(true);
+    expect(text.match(/\/tower [a-z]+/g)).toEqual(['/tower teardown']);
   });
 
-  it('explains a blocked objective and the way back', () => {
+  it('explains a blocked mission and the way back', () => {
     const text = objectiveBlockedNotice({
       objective: OBJECTIVE,
       reason: 'milestone MS1 failed scrutiny 3 times',
       milestone: { id: 'MS1', title: 'Exporter core', status: 'blocked' },
       failures: ['header row missing'],
     });
-    expect(text).toContain('Objective O1 "CSV export" is blocked: milestone MS1 failed scrutiny 3 times.\nMilestone MS1 "Exporter core" is blocked.');
+    expect(text).toContain('Mission O1 "CSV export" is blocked: milestone MS1 failed scrutiny 3 times.\nMilestone MS1 "Exporter core" is blocked.');
     expect(text).toContain('Latest failures:\n1. header row missing');
-    expect(text).toContain('then run /tower resume (resuming also resets the stall counters)');
+    expect(text).toContain('merged features and open branches are kept');
+    expect(text).toContain('then run /mission resume (resuming also resets the stall counters) — or leave the mission blocked.');
+    expect(text).not.toMatch(/\/tower\b/);
     expect(objectiveBlockedNotice({ objective: OBJECTIVE, reason: 'Stalled!' })).toContain('is blocked: Stalled!\n\n');
   });
 });
@@ -442,28 +465,71 @@ describe('approvalRequest', () => {
 
   it('summarizes the plan, the estimate, and the exact approval command', () => {
     const text = approvalRequest(APPROVAL);
-    expect(text.startsWith('Objective O1 "CSV export" is ready for your approval.\n\nGoal: Users can export reports as CSV.')).toBe(true);
+    expect(text.startsWith('Mission O1 "CSV export" is ready for your approval.\n\nGoal: Users can export reports as CSV.')).toBe(true);
     expect(text).toContain('Definition of done:\n1. CSV export works\n2. Errors exit non-zero');
     expect(text).toContain('Acceptance commands (run on the final milestone): `npm run e2e`');
     expect(text).toContain(
       [
-        'Milestones — in order; the features inside a milestone run in parallel:',
-        '1. MS1 "Exporter core" — 3 features: M1 "Exporter", M2 "CLI flag", M3 "Help text"',
+        'Milestones — validation checkpoints, in order; the features of a milestone run in parallel:',
+        '1. MS1 "Exporter core" — 3 features, all 3 in parallel: M1 "Exporter", M2 "CLI flag", M3 "Help text"',
         '   Library and flag.',
         '   validation: scrutiny · user-testing · commands `npm test`',
         '2. MS2 "CLI polish" — features are planned when it becomes current',
         '   validation: scrutiny · commands `npm run e2e`',
       ].join('\n'),
     );
-    expect(text).toContain('Estimated runs: ≈ 7 (3 features + 2 × 2 milestones). This is a floor, not a ceiling');
+    expect(text).toContain(
+      'Estimated runs: ≈ 7 (3 features + 2 × 2 milestones). This is a floor, not a ceiling: failed validations add fix features and further validation rounds.',
+    );
     const stray = approvalRequest({
       ...APPROVAL,
       features: [...APPROVAL.features, { id: 'M9', title: 'Elsewhere', milestone: 'MS9' }, { id: 'M10', title: 'Unplanned' }],
     });
     expect(stray).toContain('Estimated runs: ≈ 7 (3 features + 2 × 2 milestones).');
     expect(stray).not.toContain('M9');
-    expect(text).toContain('To approve, run: /tower approve\nOnly you can approve — the orchestrator cannot.');
+    expect(text.endsWith(
+      'To approve, use the approval dialog or run: /mission approve\nOnly you can approve — the orchestrator cannot. To change the plan, tell the orchestrator what to change; it updates the plan and asks for approval again.',
+    )).toBe(true);
+    expect(text).not.toMatch(/\/tower\b/);
     expect(text).not.toContain('Assumptions and notes');
+  });
+
+  it('states how many features of each milestone run in parallel and which wait for their deps', () => {
+    const line = (features: ApprovalRequestInput['features']): string =>
+      approvalRequest({ ...APPROVAL, features }).split('\n').find((entry) => entry.startsWith('1. MS1 ')) ?? '';
+    expect(line([{ id: 'M1', title: 'Exporter', milestone: 'MS1' }])).toBe('1. MS1 "Exporter core" — 1 feature: M1 "Exporter"');
+    expect(
+      line([
+        { id: 'M1', title: 'Exporter', milestone: 'MS1', deps: [] },
+        { id: 'M2', title: 'CLI flag', milestone: 'MS1' },
+        { id: 'M3', title: 'Help text', milestone: 'MS1', deps: ['M1'] },
+      ]),
+    ).toBe('1. MS1 "Exporter core" — 3 features (2 start in parallel, 1 after its deps merge): M1 "Exporter", M2 "CLI flag", M3 "Help text" (after M1)');
+    expect(
+      line([
+        { id: 'M1', title: 'Exporter', milestone: 'MS1' },
+        { id: 'M2', title: 'CLI flag', milestone: 'MS1', deps: ['M1'] },
+        { id: 'M3', title: 'Help text', milestone: 'MS1', deps: ['M1', 'M2'] },
+      ]),
+    ).toBe('1. MS1 "Exporter core" — 3 features (1 starts at once, 2 after their deps merge): M1 "Exporter", M2 "CLI flag" (after M1), M3 "Help text" (after M1, M2)');
+  });
+
+  it('counts only deps inside the same milestone as waiting', () => {
+    const text = approvalRequest({
+      ...APPROVAL,
+      features: [
+        { id: 'M1', title: 'Exporter', milestone: 'MS1' },
+        { id: 'M2', title: 'CLI flag', milestone: 'MS1', deps: ['M7'] },
+        { id: 'M4', title: 'Flags', milestone: 'MS2', deps: ['M1', 'M2'] },
+        { id: 'M5', title: 'Docs', milestone: 'MS2', deps: ['M4'] },
+        { id: 'M6', title: 'Examples', milestone: 'MS2', deps: ['M6'] },
+      ],
+    });
+    expect(text).toContain('1. MS1 "Exporter core" — 2 features, both in parallel: M1 "Exporter", M2 "CLI flag"\n');
+    expect(text).toContain(
+      '2. MS2 "CLI polish" — 3 features (2 start in parallel, 1 after its deps merge): M4 "Flags", M5 "Docs" (after M4), M6 "Examples"\n',
+    );
+    expect(text).toContain('Estimated runs: ≈ 9 (5 features + 2 × 2 milestones).');
   });
 
   it('lists only the validators that will actually run', () => {
