@@ -281,6 +281,13 @@ export class PiRpcClient {
     return result;
   }
 
+  private release(): void {
+    if (this.exit === undefined) return;
+    this.child.stdin.destroy();
+    this.child.stdout.destroy();
+    this.child.stderr.destroy();
+  }
+
   async terminate(graceMs = 5_000): Promise<PiExit | undefined> {
     if (this.exit === undefined) {
       this.kill('SIGTERM');
@@ -289,6 +296,7 @@ export class PiRpcClient {
         await this.exitWithin(5_000);
       }
     }
+    this.release();
     return this.exit;
   }
 
@@ -301,6 +309,7 @@ export class PiRpcClient {
       }
       if (!(await this.exitWithin(graceMs))) return this.terminate(graceMs);
     }
+    this.release();
     return this.exit;
   }
 }
