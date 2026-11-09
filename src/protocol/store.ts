@@ -53,6 +53,7 @@ import {
   applyObjectiveUpdate,
   applyValidationRound,
   buildObjective,
+  canPlanObjective,
   contractRevisionOf,
   currentMilestone,
   estimateObjectiveRuns,
@@ -71,7 +72,9 @@ import {
   objectiveApprovalProblems,
   planPlacement,
   requiredValidationKinds,
+  roundContractRevision,
   sortedMilestones,
+  TOWER_OBJECTIVE_MODES,
   TOWER_VALIDATION_KINDS,
   TowerObjectiveCompletionError,
   validationResultSubject,
@@ -125,6 +128,7 @@ import type {
   TowerMissionStatus,
   TowerObjective,
   TowerObjectiveAutopilotState,
+  TowerObjectiveMode,
   TowerReviewInfo,
   TowerRosterEntry,
   TowerState,
@@ -1176,9 +1180,10 @@ export class TowerStore {
       lastInboxReadAt: entry.lastInboxReadAt ?? entry.spawnedAt,
     };
     state.roster.agents.push(
-      entry.kind === 'validator' && state.objective !== undefined
-        ? withContractRevision(stored, contractRevisionOf(state.objective))
-        : stored,
+      withContractRevision(
+        stored,
+        entry.kind === 'validator' && state.objective !== undefined ? contractRevisionOf(state.objective) : 0,
+      ),
     );
     if (entry.kind !== 'worker' || state.objective === undefined) return undefined;
     const mission = state.missions.find((candidate) => candidate.id === entry.missionId);
@@ -1220,9 +1225,21 @@ export class TowerStore {
         `validator "${entry.name}" needs a validatedCommit — the commit its validation worktree was checked out at, which stamps its round`,
       );
     }
-    if (entry.contractRevision !== undefined && entry.contractRevision !== contractRevisionOf(objective)) {
+    const revision = contractRevisionOf(objective);
+    const briefed: unknown = entry.contractRevision;
+    if (briefed !== undefined && (typeof briefed !== 'number' || !Number.isSafeInteger(briefed) || briefed < 0)) {
       throw new TowerProtocolError(
-        `validator "${entry.name}" was briefed under contract revision ${String(entry.contractRevision)}, but objective ${objective.id} is at revision ${String(contractRevisionOf(objective))} — brief a new validator on the current contract`,
+        `validator "${entry.name}" contractRevision must be the non-negative integer revision it was briefed under, got ${JSON.stringify(briefed)}`,
+      );
+    }
+    if (briefed === undefined && revision > 0) {
+      throw new TowerProtocolError(
+        `validator "${entry.name}" must state the contract revision it was briefed under (contractRevision) — objective ${objective.id} is at revision ${String(revision)}, and a round is stamped with the contract its validator checked`,
+      );
+    }
+    if (briefed !== undefined && briefed !== revision) {
+      throw new TowerProtocolError(
+        `validator "${entry.name}" was briefed under contract revision ${String(briefed)}, but objective ${objective.id} is at revision ${String(revision)} — brief a new validator on the current contract`,
       );
     }
     if (entry.validatedCommit !== milestone.validationCommit) {
@@ -1354,6 +1371,7 @@ export class TowerStore {
         changes: result.changes.join(','),
         status: result.objective.status,
         reopened: result.reopened.length > 0 ? result.reopened.join(',') : undefined,
+        approval: result.objective.approvalRequiresHuman === true ? 'human' : undefined,
       });
       return result;
     });
@@ -1394,6 +1412,11 @@ export class TowerStore {
           `objective ${objective.id} is ${objective.status} — only an objective awaiting approval can be approved; the orchestrator requests approval first`,
         );
       }
+      if (by === 'auto' && objective.approvalRequiresHuman === true) {
+        throw new TowerProtocolError(
+          `objective ${objective.id} changed its contract while it was blocked or paused, so only a human can approve it — auto-approval stays refused until a human approves`,
+        );
+      }
       this.assertApprovable(state, objective, 'be approved');
       const now = new Date().toISOString();
       objective.status = 'executing';
@@ -1401,6 +1424,7 @@ export class TowerStore {
       objective.approvedAt = now;
       objective.startedAt ??= now;
       delete objective.approvalReason;
+      delete objective.approvalRequiresHuman;
       const activated = this.activateCurrentMilestoneLocked(objective, now);
       await this.saveObjective(state, 'objective.approve', {
         id: objective.id,
@@ -1530,7 +1554,8 @@ export class TowerStore {
 
   /**
    * Wave 2 must pass the configured objective settings (skipScrutiny, skipUserTesting): they decide
-   * the required kinds (none passes the milestone immediately), whether a passed final milestone is
+   * the required kinds (the milestone passes immediately when none is required, or when every one
+   * already passed on the commit under the current contract), whether a passed final milestone is
    * stale, and which failed rounds block a same-tip restart. The default `{}` requires every kind.
    */
   async startMilestoneValidation(
@@ -1605,7 +1630,7 @@ export class TowerStore {
       milestone.validationCommit = resolved;
       delete milestone.passedAt;
       const requiredKinds = requiredValidationKinds(objective, milestone, settings);
-      if (requiredKinds.length === 0) {
+      if (milestonePassesOn(objective, milestone, resolved, settings)) {
         milestone.status = 'passed';
         milestone.passedAt = now;
       }
@@ -1644,6 +1669,28 @@ export class TowerStore {
       const autopilot = applyAutopilotPatch(this.requireObjective(state), patch);
       await this.save(state);
       return autopilot;
+    });
+  }
+
+  async setObjectiveMode(mode: TowerObjectiveMode): Promise<void> {
+    if (!TOWER_OBJECTIVE_MODES.includes(mode)) {
+      throw new TowerProtocolError(
+        `objective mode must be ${TOWER_OBJECTIVE_MODES.join(' | ')}, got "${String(mode)}"`,
+      );
+    }
+    await this.withStateLock(async () => {
+      const state = await this.load();
+      const objective = state.objective;
+      if (objective !== undefined && !canPlanObjective(objective)) {
+        throw new TowerProtocolError(
+          `objective ${objective.id} is ${objective.status} — the objective mode is chosen while an objective is planned, so it changes only when no objective is open or the open one is still planning`,
+        );
+      }
+      if (state.objectiveMode === mode) return;
+      const from = state.objectiveMode;
+      state.objectiveMode = mode;
+      await this.save(state);
+      await this.appendLog(TOWER_NAME, 'objective.mode', { mode, from });
     });
   }
 
@@ -3411,7 +3458,7 @@ export class TowerStore {
         await this.assertRebaseRecovered(worktreeAbs, gitDir, mission, fromCommit);
         if (inProgress && files.length > 0) {
           mission.blockers.push(
-            `tower rebase onto ${state.base} conflicted in: ${files.join(', ')} — the rebase was aborted and your worktree is back to the pre-rebase state. Resolve it yourself: run \`git rebase ${state.base}\` in your worktree, fix the listed conflicts, \`git add\` the resolved files, then continue with \`GIT_EDITOR=true git rebase --continue\` (a plain \`git rebase --continue\` opens an editor and hangs a non-interactive shell). Re-run your tests, then clear this blocker (TowerMission clear_blockers) and TowerSend the tower asking for a fresh review — a worker-run rebase is not covered by the clean-rebase waiver, so the moved tip needs a new clean review before the merge can land`,
+            `tower rebase onto ${state.base} conflicted in: ${files.join(', ')} — the rebase was aborted and your worktree is back to the pre-rebase state. Resolve it yourself: run \`git rebase ${state.base}\` in your worktree, fix the listed conflicts, \`git add\` the resolved files, then continue with \`GIT_EDITOR=true git rebase --continue\` (a plain \`git rebase --continue\` opens an editor and hangs a non-interactive shell). Re-run your tests, then clear this blocker (TowerMission clear_blockers) and finish with TowerComplete, which requests the fresh review — a worker-run rebase is not covered by the clean-rebase waiver, so the moved tip needs a new clean review before the merge can land`,
           );
           mission.status = 'blocked';
           await this.save(state);
@@ -4087,6 +4134,7 @@ function objectiveSection(state: TowerState, objective: TowerObjective): string[
     objective.status,
     ...(objective.approvedBy === undefined ? [] : [`approved by ${objective.approvedBy}`]),
     ...(objective.approvalReason === undefined ? [] : [`approval: ${objective.approvalReason}`]),
+    ...(objective.approvalRequiresHuman === true ? ['only a human can approve'] : []),
     ...(objective.pausedReason === undefined ? [] : [`paused: ${objective.pausedReason}`]),
     ...(objective.blockedReason === undefined ? [] : [`blocked: ${objective.blockedReason}`]),
   ].join(' · ');
@@ -4170,6 +4218,10 @@ function validationResultBody(
   if (finalBroken) {
     lines.push(
       `${milestone.id} is the final milestone and no longer passes on this commit — plan a fix into it (TowerPlan milestone=${milestone.id}).`,
+    );
+  } else if (roundContractRevision(round) !== contractRevisionOf(objective)) {
+    lines.push(
+      `This round was recorded but does not decide the milestone: it checked contract revision ${String(roundContractRevision(round))}, and objective ${objective.id} is now at revision ${String(contractRevisionOf(objective))} — only a round under the current contract counts.`,
     );
   } else if (!outcome.counted) {
     lines.push(

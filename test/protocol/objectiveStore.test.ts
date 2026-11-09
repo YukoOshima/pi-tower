@@ -539,7 +539,7 @@ describe('roster with objectives', () => {
       state.missions[0]!.status = 'merged';
     });
     await store.startMilestoneValidation('MS1', tip);
-    await store.registerAgent(scrutiny);
+    await store.registerAgent({ ...scrutiny, contractRevision: 1 });
     expect((await readState()).roster.agents).toEqual([
       {
         ...validator,
@@ -1636,6 +1636,7 @@ describe('contract revisions', () => {
       milestoneId: 'MS1',
       validationKind: 'scrutiny',
       validatedCommit: tip,
+      contractRevision: 1,
       spawnedAt: '2026-04-04T00:00:00.000Z',
     });
     const scrutiny = await store.submitValidation('val-scrutiny', { milestone: 'MS1', kind: 'scrutiny', verdict: 'pass' });
@@ -1690,7 +1691,7 @@ describe('contract revisions', () => {
       /briefed under contract revision 0, but objective O1 is at revision 1/,
     );
     expect(await readFile(store.abs(STATE_FILE), 'utf8')).toBe(before);
-    await registerValidator('v2', tip);
+    await registerValidator('v2', tip, 1);
     expect((await readState()).roster.agents.find((agent) => agent.name === 'v2')?.contractRevision).toBe(1);
     await expect(
       store.submitValidation('v2', { milestone: 'MS1', kind: 'scrutiny', verdict: 'pass', contractRevision: 0 }),
@@ -1717,7 +1718,7 @@ describe('contract revisions', () => {
     expect(stale.milestone.status).toBe('active');
     await store.approveObjective('human');
     await store.startMilestoneValidation('MS1', tip);
-    await registerValidator('v-scrutiny', tip);
+    await registerValidator('v-scrutiny', tip, 1);
     const scrutiny = await store.submitValidation('v-scrutiny', { milestone: 'MS1', kind: 'scrutiny', verdict: 'pass' });
     expect(scrutiny.milestone.status).toBe('validating');
     expect((await store.objectiveEvaluation()).completion.ready).toBe(false);

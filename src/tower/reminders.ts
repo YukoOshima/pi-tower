@@ -3,11 +3,15 @@ import {
   type TowerModeReminder,
   type TowerModeReminderKind,
   type TowerModeReminderMark,
+  type TowerObjectivePlaybookVariant,
   type TowerReminderHistoryEntry,
 } from '../prompts/index.ts';
+import { isTerminalObjectiveStatus, type TowerState } from '../protocol/index.ts';
 import { TOWER_REMINDER_MESSAGE } from './constants.ts';
 
 export type TowerReminderTrigger = 'user' | 'custom';
+
+export type TowerReminderObjectiveState = Pick<TowerState, 'objective' | 'objectiveMode'>;
 
 export interface TowerReminderDetails {
   readonly kind: TowerModeReminderKind;
@@ -50,13 +54,29 @@ export function projectReminderHistory(
   return last === undefined ? { history } : { history, last };
 }
 
+export function reminderObjectiveVariant(
+  state: TowerReminderObjectiveState | undefined,
+): TowerObjectivePlaybookVariant | undefined {
+  const objective = state?.objective;
+  if (objective !== undefined && isTerminalObjectiveStatus(objective.status)) return undefined;
+  if (objective === undefined && state?.objectiveMode === undefined) return undefined;
+  return state?.objectiveMode ?? 'interactive';
+}
+
 export function selectReminderForContext(
   active: boolean,
   entries: readonly ContextEntryLike[],
   trigger: TowerReminderTrigger,
+  state?: TowerReminderObjectiveState,
 ): TowerModeReminder | undefined {
   const { history, last } = projectReminderHistory(entries, trigger);
-  return selectTowerModeReminder(last === undefined ? { active, history } : { active, last, history });
+  const objective = reminderObjectiveVariant(state);
+  return selectTowerModeReminder({
+    active,
+    ...(last === undefined ? {} : { last }),
+    history,
+    ...(objective === undefined ? {} : { objective }),
+  });
 }
 
 function reminderKind(details: unknown): TowerModeReminderKind {

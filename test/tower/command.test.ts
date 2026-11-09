@@ -1,17 +1,23 @@
-import { readFile, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { TOWER_TEARDOWN_PROMPT } from '../../src/prompts/index.ts';
-import { STATE_FILE, TowerStore, type TowerState } from '../../src/protocol/index.ts';
+import { buildObjectivePlanningPrompt } from '../../src/prompts/objectivePlanning.ts';
+import { renderObjectiveStatus } from '../../src/prompts/objectiveStatus.ts';
+import { STATE_FILE, TowerStore, objectiveMissions, type TowerState } from '../../src/protocol/index.ts';
 import {
   TOWER_COMMAND_USAGE,
+  TOWER_OBJECTIVE_USAGE,
   commandUi,
   handleTowerCommand,
   towerCommandCompletions,
+  type ObjectiveSettingsValues,
   type TowerCommandDeps,
   type TowerCommandUi,
+  type TowerObjectiveCommandHooks,
 } from '../../src/tower/command.ts';
 import {
   HUMAN_STOP_REASON,
@@ -568,10 +574,14 @@ describe('towerCommandCompletions', () => {
       'models',
       'agents',
       'stop',
+      'objective',
+      'approve',
+      'pause',
+      'resume',
       'help',
     ]);
     expect(towerCommandCompletions('st')?.map((item) => item.value)).toEqual(['status', 'stop']);
-    expect(towerCommandCompletions('O')?.map((item) => item.value)).toEqual(['on', 'off']);
+    expect(towerCommandCompletions('O')?.map((item) => item.value)).toEqual(['on', 'off', 'objective']);
     expect(towerCommandCompletions('zzz')).toBeNull();
   });
 
@@ -652,5 +662,567 @@ describe('commandUi', () => {
     expect(errored).toContain('Failed to read tower status: boom\n');
     expect(written).not.toContain('Failed to read tower status: boom\n');
     expect(ctx.ui.notices).toEqual([]);
+  });
+});
+
+interface FakeObjectiveHooks extends TowerObjectiveCommandHooks {
+  readonly ticks: string[];
+  settings: ObjectiveSettingsValues;
+  tickError: Error | undefined;
+}
+
+function fakeObjectiveHooks(): FakeObjectiveHooks {
+  const hooks: FakeObjectiveHooks = {
+    ticks: [],
+    settings: {
+      autopilot: true,
+      autoApprove: false,
+      maxValidationRounds: 3,
+      maxFeatureAttempts: 3,
+      skipScrutiny: false,
+      skipUserTesting: false,
+    },
+    tickError: undefined,
+    async autopilotTick(reason) {
+      hooks.ticks.push(reason);
+      if (hooks.tickError !== undefined) throw hooks.tickError;
+    },
+    objectiveSettings: () => hooks.settings,
+  };
+  return hooks;
+}
+
+function objectiveDeps(h: Harness, hooks?: TowerObjectiveCommandHooks): TowerCommandDeps {
+  return {
+    sendUserMessage: (text, options) => {
+      h.pi.sendUserMessage(text, options);
+    },
+    ...(hooks === undefined ? {} : { objective: hooks }),
+  };
+}
+
+async function readTowerState(repo: string): Promise<TowerState> {
+  return JSON.parse(await readFile(join(repo, STATE_FILE), 'utf8')) as TowerState;
+}
+
+async function plannedObjective(repo: string): Promise<TowerStore> {
+  const store = new TowerStore(repo);
+  await store.init(SESSION_ID, 'main');
+  await store.draftObjective({
+    title: 'Ship',
+    goal: 'ship it',
+    definitionOfDone: ['works'],
+    milestones: [{ title: 'Core' }, { title: 'Polish' }],
+  });
+  await store.plan([{ title: 'Core work', scope: ['src/core/**'], milestone: 'MS1' }]);
+  return store;
+}
+
+async function approvedObjective(repo: string): Promise<TowerStore> {
+  const store = await plannedObjective(repo);
+  await store.requestObjectiveApproval();
+  await store.approveObjective('human');
+  return store;
+}
+
+describe('/tower objective', () => {
+  it('shows the usage for a missing or malformed objective before anything else', async () => {
+    const h = await harness();
+
+    for (const args of ['objective', 'objective   ', 'objective --headless', 'objective --verbose ship it', 'objective @', 'objective --headless @  ']) {
+      expect((await h.run(args)).errors, args).toEqual([TOWER_OBJECTIVE_USAGE]);
+    }
+    expect(h.pi.userMessages).toEqual([]);
+  });
+
+  it('requires tower mode and changes nothing while it is off', async () => {
+    const h = await harness();
+
+    const refused = await h.run('objective Ship a CSV export');
+
+    expect(refused.errors).toEqual([
+      'Tower mode is off — turn it on with /tower on, then hand the objective over with /tower objective.',
+    ]);
+    expect(refused.notices).toEqual([]);
+    expect(h.pi.userMessages).toEqual([]);
+    expect(await new TowerStore(h.repo).isInitialized()).toBe(false);
+  });
+
+  it('initializes the workspace, records the interactive mode and hands the planning prompt over at once', async () => {
+    const h = await harness();
+    await h.run('on');
+
+    const handed = await h.run('objective Ship a CSV export   with headers');
+
+    expect(handed.errors).toEqual([]);
+    expect(handed.notices).toEqual([
+      {
+        title: 'Objective handed to the tower',
+        body: 'Initialized the tower workspace on base "main". The orchestrator plans it with you, then asks you to approve the plan with /tower approve.',
+      },
+    ]);
+    expect(h.pi.userMessages).toEqual([
+      { text: buildObjectivePlanningPrompt({ mode: 'interactive', text: 'Ship a CSV export   with headers' }) },
+    ]);
+    const state = await readTowerState(h.repo);
+    expect(state).toMatchObject({ base: 'main', sessionId: SESSION_ID, objectiveMode: 'interactive' });
+    expect(state.objective).toBeUndefined();
+  });
+
+  it('reads an @file whose path has spaces, plans headless, and queues behind a busy agent', async () => {
+    const h = await harness();
+    await new TowerStore(h.repo).init(SESSION_ID, 'main');
+    await mkdir(join(h.repo, 'specs dir'));
+    const file = join(h.repo, 'specs dir', 'objective file.md');
+    await writeFile(file, '# CSV export\n\nUsers export reports as CSV.\n');
+    await h.run('on');
+    h.ctx.idle = false;
+
+    const handed = await h.run(`Objective --Headless @${file}`);
+
+    expect(handed.errors).toEqual([]);
+    expect(handed.notices).toEqual([
+      {
+        title: 'Objective handed to the tower (headless)',
+        body: 'The orchestrator plans it without asking questions, records its assumptions as notes, and requests approval.',
+      },
+    ]);
+    expect(h.pi.userMessages).toEqual([
+      {
+        text: buildObjectivePlanningPrompt({ mode: 'headless', text: '# CSV export\n\nUsers export reports as CSV.\n', file }),
+        options: { deliverAs: 'followUp' },
+      },
+    ]);
+    expect((await readTowerState(h.repo)).objectiveMode).toBe('headless');
+
+    h.ctx.idle = true;
+    await h.run('objective @specs dir/objective file.md');
+    expect(h.pi.userMessages[1]).toEqual({
+      text: buildObjectivePlanningPrompt({ mode: 'interactive', text: '# CSV export\n\nUsers export reports as CSV.\n', file }),
+    });
+    expect((await readTowerState(h.repo)).objectiveMode).toBe('interactive');
+  });
+
+  it('reports an unreadable or empty objective file', async () => {
+    const h = await harness();
+    await h.run('on');
+    await writeFile(join(h.repo, 'empty.md'), ' \n\n');
+
+    const missing = await h.run('objective @missing.md');
+    const empty = await h.run('objective --headless @empty.md');
+
+    expect(missing.errors).toEqual([
+      expect.stringMatching(/^\/tower objective failed: cannot read the objective file .*\/missing\.md: ENOENT/) as unknown as string,
+    ]);
+    expect(empty.errors).toEqual([`/tower objective failed: the objective file ${join(h.repo, 'empty.md')} is empty`]);
+    expect(h.pi.userMessages).toEqual([]);
+  });
+
+  it('revises a planning objective and refuses an open one with guidance', async () => {
+    const h = await harness();
+    const store = await plannedObjective(h.repo);
+    await h.run('on');
+
+    const planning = await h.run('objective --headless Ship it, headless');
+    expect(planning.errors).toEqual([]);
+    expect(h.pi.userMessages).toEqual([
+      {
+        text: buildObjectivePlanningPrompt({
+          mode: 'headless',
+          text: 'Ship it, headless',
+          current: { id: 'O1', title: 'Ship', status: 'planning' },
+        }),
+      },
+    ]);
+
+    const refusal = (status: string, next: string) =>
+      `Objective O1 "Ship" is ${status} — /tower objective plans a new objective only when none is open or the open one is still planning. See it with /tower objective status; ${next}.`;
+    await store.requestObjectiveApproval();
+    expect((await h.run('objective again')).errors).toEqual([
+      refusal('awaiting-approval', 'approve its plan with /tower approve, or ask the tower to change it'),
+    ]);
+    await store.approveObjective('human');
+    expect((await h.run('objective again')).errors).toEqual([
+      refusal('executing', 'pause it with /tower pause, or ask the tower to block it first'),
+    ]);
+    await store.pauseObjective('lunch');
+    expect((await h.run('objective again')).errors).toEqual([
+      refusal('paused', 'continue it with /tower resume, or ask the tower to block it first'),
+    ]);
+    expect(h.pi.userMessages).toHaveLength(1);
+    expect((await readTowerState(h.repo)).objectiveMode).toBe('headless');
+
+    await store.blockObjective('the human changed their mind');
+    const blocked = await h.run('objective Something else');
+    expect(blocked.errors).toEqual([]);
+    expect(h.pi.userMessages[1]).toEqual({
+      text: buildObjectivePlanningPrompt({
+        mode: 'interactive',
+        text: 'Something else',
+        current: { id: 'O1', title: 'Ship', status: 'blocked' },
+      }),
+    });
+  });
+
+  it('refuses to initialize a lost state or a directory outside git', async () => {
+    const h = await harness();
+    await new TowerStore(h.repo).init(SESSION_ID, 'main');
+    await h.run('on');
+    await rm(join(h.repo, STATE_FILE));
+
+    const lost = await h.run('objective Ship it');
+
+    expect(lost.errors).toEqual([
+      '/tower objective failed: tower state was lost — .tower/comms/state.json is missing while .tower/ still exists; check /tower status and let the tower recover it before handing over an objective',
+    ]);
+    expect(await new TowerStore(h.repo).isInitialized()).toBe(false);
+
+    const plain = await mkdtemp(join(tmpdir(), 'tower-command-plain-'));
+    cleanups.push(plain);
+    const session = new FakeSessionManager(SESSION_ID);
+    const ctx = new FakeContext(plain, session);
+    const pi = new FakePi();
+    pi.session = session;
+    pi.context = ctx;
+    const controller = new TowerController({ pi, createRuntime: () => new FakeRuntime() });
+    controller.observe(ctx.asContext);
+    const { ui, recorded } = recordingUi();
+    const deps: TowerCommandDeps = { sendUserMessage: (text, options) => pi.sendUserMessage(text, options) };
+    await handleTowerCommand(controller, 'on', ctx.asCommandContext, deps, ui);
+    await handleTowerCommand(controller, 'objective Ship it', ctx.asCommandContext, deps, ui);
+
+    expect(recorded.errors).toEqual([
+      `/tower objective failed: ${plain} is not a git repository — the tower needs one: run git init and commit what should become the base (check for secrets and large files first), then retry`,
+    ]);
+    expect(pi.userMessages).toEqual([]);
+    await expect(git(plain, 'status')).rejects.toThrow();
+  });
+});
+
+describe('/tower objective status', () => {
+  it('explains a missing workspace or objective without a model turn', async () => {
+    const h = await harness();
+
+    expect((await h.run('objective status')).statuses).toEqual([
+      'There is no objective — the tower workspace is not initialized yet.',
+    ]);
+    await new TowerStore(h.repo).init(SESSION_ID, 'main');
+    expect((await h.run('objective STATUS')).statuses).toEqual([
+      'There is no objective — hand one to the tower with /tower objective <text | @file>.',
+    ]);
+    expect(h.pi.userMessages).toEqual([]);
+  });
+
+  it('renders the objective dashboard with the configured skipped kinds, even with tower mode off', async () => {
+    const h = await harness();
+    await approvedObjective(h.repo);
+    const hooks = fakeObjectiveHooks();
+    hooks.settings = { ...hooks.settings, skipUserTesting: true };
+    const now = Date.parse('2026-11-09T12:00:00.000Z');
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(now);
+    try {
+      const shown = await h.run('objective status', objectiveDeps(h, hooks));
+      const state = await readTowerState(h.repo);
+      const [title = '', ...body] = renderObjectiveStatus({
+        objective: state.objective!,
+        features: objectiveMissions(state),
+        agents: [],
+        nowMs: now,
+        skipKinds: ['user-testing'],
+      }).split('\n');
+
+      expect(shown.errors).toEqual([]);
+      expect(shown.notices).toEqual([{ title: title.replace(/^# /, ''), body: body.join('\n') }]);
+      expect(shown.notices[0]?.title).toBe('Objective O1 — Ship');
+      expect(shown.notices[0]?.body).toContain('validation: scrutiny');
+      expect(shown.notices[0]?.body).not.toContain('user-testing');
+    } finally {
+      clock.mockRestore();
+    }
+    expect(h.controller.isActive).toBe(false);
+    expect(hooks.ticks).toEqual([]);
+  });
+
+  it('lists only live agents and reports a broken state as an error', async () => {
+    const h = await harness();
+    await approvedObjective(h.repo);
+    await h.run('on');
+    await spawnReviewer(h, 'rev-live');
+
+    const shown = await h.run('objective status');
+    expect(shown.notices[0]?.body).toContain('## Live agents (1)\n- rev-live — reviewer · main');
+
+    await writeFile(join(h.repo, STATE_FILE), '{ corrupt');
+    const broken = await h.run('objective status');
+    expect(broken.notices).toEqual([]);
+    expect(broken.errors).toEqual([expect.stringMatching(/^Failed to read the objective status: /) as unknown as string]);
+  });
+});
+
+describe('/tower approve, pause and resume', () => {
+  it('approves as the human, then ticks the autopilot without waiting for it', async () => {
+    const h = await harness();
+    const store = await plannedObjective(h.repo);
+    await store.requestObjectiveApproval();
+    await h.run('on');
+    const hooks = fakeObjectiveHooks();
+
+    const approved = await h.run('approve', objectiveDeps(h, hooks));
+
+    expect(approved.errors).toEqual([]);
+    expect(approved.notices).toEqual([
+      {
+        title: 'Objective O1 approved — executing',
+        body: '"Ship" was approved by human. Milestone MS1 "Core" is active. Follow it with /tower objective status; /tower pause stops new work.',
+      },
+    ]);
+    expect((await readTowerState(h.repo)).objective).toMatchObject({ status: 'executing', approvedBy: 'human' });
+    await settle();
+    expect(hooks.ticks).toEqual(['approve']);
+
+    const again = await h.run('approve', objectiveDeps(h, hooks));
+    expect(again.errors).toEqual([
+      'Approval failed — objective O1 is executing — only an objective awaiting approval can be approved; the orchestrator requests approval first',
+    ]);
+    await settle();
+    expect(hooks.ticks).toEqual(['approve']);
+  });
+
+  it('records an automatic approval with --auto, and refuses it after a contract change while paused', async () => {
+    const h = await harness();
+    const store = await plannedObjective(h.repo);
+    await store.requestObjectiveApproval();
+    await h.run('on');
+
+    const auto = await h.run('approve --AUTO');
+    expect(auto.notices[0]?.body).toMatch(/^"Ship" was approved by auto\. /);
+    expect((await readTowerState(h.repo)).objective?.approvedBy).toBe('auto');
+
+    await store.pauseObjective('rethink');
+    await store.updateObjective({ definitionOfDone: ['works', 'documented'] });
+    const refused = await h.run('approve --auto');
+    expect(refused.errors).toEqual([
+      'Approval failed — objective O1 changed its contract while it was blocked or paused, so only a human can approve it — auto-approval stays refused until a human approves',
+    ]);
+    expect((await h.run('approve')).notices[0]?.title).toBe('Objective O1 approved — executing');
+    expect((await h.run('approve now')).errors).toEqual([
+      "Usage: /tower approve [--auto] — approve the objective's plan; --auto records an automatic approval",
+    ]);
+  });
+
+  it('reports a failing autopilot tick, skips the tick while tower mode is off, and works without hooks', async () => {
+    const h = await harness();
+    const store = await plannedObjective(h.repo);
+    await store.requestObjectiveApproval();
+    const hooks = fakeObjectiveHooks();
+
+    const offline = await h.run('approve', objectiveDeps(h, hooks));
+    expect(offline.notices).toHaveLength(1);
+    expect(offline.statuses).toEqual(['Tower mode is off — the objective continues once you turn it on with /tower on.']);
+    await settle();
+    expect(hooks.ticks).toEqual([]);
+
+    await h.run('on');
+    await store.pauseObjective('p');
+    hooks.tickError = new Error('runner exploded');
+    const resumed = await h.run('resume', objectiveDeps(h, hooks));
+    expect(resumed.notices[0]?.title).toBe('Objective O1 resumed — executing');
+    await settle();
+    expect(hooks.ticks).toEqual(['resume']);
+    expect(resumed.errors).toEqual(['The autopilot tick after /tower resume failed: runner exploded']);
+
+    await store.pauseObjective('p');
+    const bare = await h.run('resume', objectiveDeps(h));
+    expect(bare.errors).toEqual([]);
+    expect(bare.notices[0]?.body).toBe(
+      'Limits from the current objective settings: 3 failed validation rounds per kind · 3 attempts per feature · wall time unlimited · cost unlimited.',
+    );
+  });
+
+  it('pauses an executing objective with an optional reason', async () => {
+    const h = await harness();
+    await approvedObjective(h.repo);
+
+    const paused = await h.run('pause waiting for the  budget review');
+    expect(paused.notices).toEqual([
+      {
+        title: 'Objective O1 paused',
+        body: 'Reason: waiting for the  budget review. Running agents keep their current turn; nothing new starts until /tower resume.',
+      },
+    ]);
+    expect((await h.run('pause')).errors).toEqual([
+      'Pause failed — objective O1 is paused — only an executing objective can be paused',
+    ]);
+    await new TowerStore(h.repo).resumeObjective();
+    expect((await h.run('pause')).notices[0]?.body).toBe(
+      'Reason: paused on request. Running agents keep their current turn; nothing new starts until /tower resume.',
+    );
+  });
+
+  it('refreshes the limits from the current settings before resuming, and warns about an exhausted budget', async () => {
+    const h = await harness();
+    const store = await approvedObjective(h.repo);
+    await store.updateObjective({ limits: { maxWallTimeMs: 3_600_000, maxCostUsd: 5 } });
+    await store.recordObjectiveUsage(20);
+    await store.pauseObjective('budget: maxCostUsd reached');
+    await h.run('on');
+    const hooks = fakeObjectiveHooks();
+    hooks.settings = { ...hooks.settings, maxValidationRounds: 5, maxFeatureAttempts: 4, maxCostUsd: 12.5 };
+
+    const resumed = await h.run('resume', objectiveDeps(h, hooks));
+
+    expect(resumed.errors).toEqual([]);
+    expect(resumed.notices).toEqual([
+      {
+        title: 'Objective O1 resumed — executing',
+        body: 'Limits from the current objective settings: 5 failed validation rounds per kind · 4 attempts per feature · wall time unlimited · cost $12.50.',
+      },
+    ]);
+    expect(resumed.warnings).toEqual([
+      'Objective O1 is over its cost limit ($20.00 of $12.50) — the autopilot pauses it again unless you raise the limit in the objective settings.',
+    ]);
+    expect((await readTowerState(h.repo)).objective?.limits).toEqual({
+      maxValidationRounds: 5,
+      maxFeatureAttempts: 4,
+      maxCostUsd: 12.5,
+    });
+    await settle();
+    expect(hooks.ticks).toEqual(['resume']);
+  });
+
+  it('refuses to resume an objective that is neither paused nor blocked, without touching its limits', async () => {
+    const h = await harness();
+    await new TowerStore(h.repo).init(SESSION_ID, 'main');
+    expect((await h.run('resume')).errors).toEqual([
+      'There is no objective to resume — hand one to the tower with /tower objective <text | @file>.',
+    ]);
+    await rm(join(h.repo, '.tower'), { recursive: true, force: true });
+    await approvedObjective(h.repo);
+    const before = await readFile(join(h.repo, STATE_FILE), 'utf8');
+    const hooks = fakeObjectiveHooks();
+    hooks.settings = { ...hooks.settings, maxValidationRounds: 9 };
+
+    const refused = await h.run('resume', objectiveDeps(h, hooks));
+
+    expect(refused.errors).toEqual([
+      'Resume failed — objective O1 is executing; only a paused or blocked objective can be resumed.',
+    ]);
+    expect(await readFile(join(h.repo, STATE_FILE), 'utf8')).toBe(before);
+    expect((await h.run('resume now')).errors).toEqual([
+      '/tower resume takes no arguments — did you mean /tower resume? Run /tower help for usage.',
+    ]);
+    await settle();
+    expect(hooks.ticks).toEqual([]);
+  });
+
+  it('reports every objective failure through ui.error instead of throwing', async () => {
+    const h = await harness();
+    await new TowerStore(h.repo).init(SESSION_ID, 'main');
+    await h.run('on');
+    await writeFile(join(h.repo, STATE_FILE), '{ corrupt');
+    const hooks = fakeObjectiveHooks();
+    hooks.objectiveSettings = () => {
+      throw new Error('settings unavailable');
+    };
+
+    for (const [args, prefix] of [
+      ['objective Ship it', '/tower objective failed: '],
+      ['objective status', 'Failed to read the objective status: '],
+      ['approve', 'Approval failed — '],
+      ['approve --auto', 'Approval failed — '],
+      ['pause now', 'Pause failed — '],
+      ['resume', 'Resume failed — '],
+    ] as const) {
+      const shown = await h.run(args, objectiveDeps(h, hooks));
+      expect(shown.errors, args).toEqual([expect.stringMatching(new RegExp(`^${prefix.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')}`)) as unknown as string]);
+    }
+    expect(h.pi.userMessages).toEqual([]);
+  });
+
+  it('reports a failing settings hook through ui.error', async () => {
+    const h = await harness();
+    const store = await approvedObjective(h.repo);
+    await store.pauseObjective('p');
+    await h.run('on');
+    const hooks = fakeObjectiveHooks();
+    hooks.objectiveSettings = () => {
+      throw new Error('settings unavailable');
+    };
+
+    expect((await h.run('objective status', objectiveDeps(h, hooks))).errors).toEqual([
+      'Failed to read the objective status: settings unavailable',
+    ]);
+    expect((await h.run('resume', objectiveDeps(h, hooks))).errors).toEqual(['Resume failed — settings unavailable']);
+    expect((await readTowerState(h.repo)).objective?.status).toBe('paused');
+    await settle();
+    expect(hooks.ticks).toEqual([]);
+  });
+
+  it('suggests the objective commands for near-miss words', async () => {
+    const h = await harness();
+
+    expect((await h.run('goal')).errors).toEqual([
+      'Unknown /tower subcommand "goal" — did you mean /tower objective? Run /tower help for usage; /tower <base-branch> starts the tower on a branch.',
+    ]);
+    expect((await h.run('unpause')).errors[0]).toContain('did you mean /tower resume?');
+    expect((await h.run('approval')).errors[0]).toContain('did you mean /tower approve?');
+    expect(await git(h.repo, 'branch', '--list')).toBe('* main');
+  });
+});
+
+describe('the headless runner command sequence', () => {
+  it('accepts exactly what pi-tower run sends, without error notices', async () => {
+    const h = await harness();
+    const dir = join(h.repo, 'objective specs');
+    await mkdir(dir);
+    const file = join(dir, 'ship csv.md');
+    await writeFile(file, 'Ship the CSV export.\n');
+    const hooks = fakeObjectiveHooks();
+    const deps = objectiveDeps(h, hooks);
+
+    const on = await h.run('on', deps);
+    const handed = await h.run(`objective --headless @${file}`, deps);
+    const store = new TowerStore(h.repo);
+    await store.draftObjective({ title: 'CSV', goal: 'Ship the CSV export.', definitionOfDone: ['csv works'], milestones: [{ title: 'Core' }] });
+    await store.plan([{ title: 'CSV writer', scope: ['src/csv/**'], milestone: 'MS1' }]);
+    await store.requestObjectiveApproval();
+    const approved = await h.run('approve --auto', deps);
+
+    for (const recorded of [on, handed, approved]) expect(recorded.errors).toEqual([]);
+    expect(h.pi.userMessages.map((message) => message.text)).toEqual([
+      buildObjectivePlanningPrompt({ mode: 'headless', text: 'Ship the CSV export.\n', file }),
+    ]);
+    expect(await readTowerState(h.repo)).toMatchObject({
+      objectiveMode: 'headless',
+      objective: { status: 'executing', approvedBy: 'auto' },
+    });
+    await settle();
+    expect(hooks.ticks).toEqual(['approve']);
+  });
+});
+
+describe('objective command completions and help', () => {
+  it('completes the objective and approve arguments', () => {
+    expect(towerCommandCompletions('objective ')).toEqual([
+      { value: 'objective status', label: 'status' },
+      { value: 'objective --headless', label: '--headless' },
+    ]);
+    expect(towerCommandCompletions('objective --h')).toEqual([{ value: 'objective --headless', label: '--headless' }]);
+    expect(towerCommandCompletions('objective --headless ')).toBeNull();
+    expect(towerCommandCompletions('approve ')).toEqual([{ value: 'approve --auto', label: '--auto' }]);
+    expect(towerCommandCompletions('pause ')).toBeNull();
+  });
+
+  it('documents the objective commands in the usage', () => {
+    for (const line of [
+      '/tower objective [--headless] <text | @file> — ',
+      '/tower objective status — show the objective dashboard',
+      '/tower approve [--auto] — ',
+      '/tower pause [reason] — ',
+      '/tower resume — ',
+    ]) {
+      expect(TOWER_COMMAND_USAGE).toContain(line);
+    }
+    expect(TOWER_COMMAND_USAGE.split('\n').at(-1)).toBe('/tower help — show this help');
   });
 });

@@ -9,6 +9,7 @@ import type {
   TowerObjective,
   TowerObjectiveAutopilotState,
   TowerObjectiveLimits,
+  TowerObjectiveMode,
   TowerObjectiveStatus,
   TowerState,
   TowerValidationKind,
@@ -22,6 +23,7 @@ export const TOWER_VALIDATION_KINDS: readonly TowerValidationKind[] = [
   'user-testing',
   'commands',
 ];
+export const TOWER_OBJECTIVE_MODES: readonly TowerObjectiveMode[] = ['interactive', 'headless'];
 
 export interface TowerValidationSettings {
   readonly skipScrutiny?: boolean;
@@ -101,6 +103,10 @@ export function isTerminalObjectiveStatus(status: TowerObjectiveStatus): boolean
 
 export function isObjectiveOpen(objective: TowerObjective | undefined): boolean {
   return objective !== undefined && !isTerminalObjectiveStatus(objective.status);
+}
+
+export function canPlanObjective(objective: TowerObjective | undefined): boolean {
+  return !isObjectiveOpen(objective) || objective?.status === 'planning';
 }
 
 function isOpenFeature(mission: Pick<TowerMission, 'status'>): boolean {
@@ -454,8 +460,8 @@ export interface TowerMilestoneInput {
 export interface TowerObjectiveLimitsInput {
   readonly maxValidationRounds?: number;
   readonly maxFeatureAttempts?: number;
-  readonly maxWallTimeMs?: number;
-  readonly maxCostUsd?: number;
+  readonly maxWallTimeMs?: number | null;
+  readonly maxCostUsd?: number | null;
 }
 
 export interface TowerObjectiveDraftInput {
@@ -534,9 +540,14 @@ function buildLimits(
       base?.maxFeatureAttempts ??
       DEFAULT_MAX_FEATURE_ATTEMPTS,
   };
-  const wallTime = positiveInteger(input?.maxWallTimeMs, 'maxWallTimeMs') ?? base?.maxWallTimeMs;
+  const wallTimeInput = input?.maxWallTimeMs;
+  const wallTime =
+    wallTimeInput === null
+      ? undefined
+      : (positiveInteger(wallTimeInput, 'maxWallTimeMs') ?? base?.maxWallTimeMs);
   if (wallTime !== undefined) limits.maxWallTimeMs = wallTime;
-  const cost = positiveNumber(input?.maxCostUsd, 'maxCostUsd') ?? base?.maxCostUsd;
+  const costInput = input?.maxCostUsd;
+  const cost = costInput === null ? undefined : (positiveNumber(costInput, 'maxCostUsd') ?? base?.maxCostUsd);
   if (cost !== undefined) limits.maxCostUsd = cost;
   return limits;
 }
@@ -865,6 +876,7 @@ export function applyObjectiveUpdate(
   const reopened = reopenChangedMilestones(before, next);
   if (contractChanged) next.contractRevision = contractRevisionOf(next) + 1;
   if (contractChanged && next.approvedAt !== undefined) {
+    if (before.status === 'blocked' || before.status === 'paused') next.approvalRequiresHuman = true;
     next.status = 'awaiting-approval';
     next.approvalReason = 'contract-changed';
     delete next.approvedBy;
@@ -1028,7 +1040,8 @@ export function applyValidationRound(
     status,
     counted:
       (previousStatus === 'validating' || previousStatus === 'failed') &&
-      round.validatedCommit === milestone.validationCommit,
+      round.validatedCommit === milestone.validationCommit &&
+      roundContractRevision(round) === contractRevisionOf(objective),
     objectiveBlocked,
   };
 }
