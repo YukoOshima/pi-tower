@@ -267,12 +267,12 @@ export function checkAutopilotPromptness(ctx: ScenarioContext, repo: string): vo
     starts.length > 0 && starts.every((start) => start.latencyMs === undefined || start.latencyMs <= VALIDATION_START_LATENCY_LIMIT_MS),
     starts.length === 0 ? '(no autopilot start-validation line)' : starts.map((start) => start.line),
   );
-  const refused = autopilotEntries(repo).filter((entry) => entry.fields.result === 'refused');
-  const duplicates = refused.filter((entry) => /already registered/.test(entry.line));
+  const unusual = autopilotEntries(repo).filter((entry) => ['refused', 'duplicate', 'skipped'].includes(entry.fields.result ?? ''));
+  const duplicates = unusual.filter((entry) => entry.fields.result === 'duplicate' || (entry.fields.result === 'refused' && /already registered/.test(entry.line)));
   ctx.report.check(
-    'the autopilot never launches the same agent twice (no "already registered" refusal)',
+    'the autopilot never launches the same agent twice (no result=duplicate, no "already registered" refusal)',
     duplicates.length === 0,
-    refused.length === 0 ? 'no refused autopilot action' : refused.map((entry) => clip(entry.line, 300)),
+    unusual.length === 0 ? 'no refused, duplicate or skipped autopilot action' : unusual.map((entry) => clip(entry.line, 300)),
   );
 }
 
