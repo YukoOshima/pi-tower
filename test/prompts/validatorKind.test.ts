@@ -108,6 +108,12 @@ describe('spawn texts for validators', () => {
     expect(VALIDATOR_SPAWN_GUIDANCE).toContain('A user-stopped validator is never replaced.');
   });
 
+  it('prints no empty review target for a validator without a validation target', () => {
+    expect(renderSpawnResult({ name: 'v', kind: 'validator', agentId: 'agent-12' })).toBe(
+      ['name: v', 'kind: validator', 'agent_id: agent-12', 'status: running', '', VALIDATOR_SPAWN_GUIDANCE].join('\n'),
+    );
+  });
+
   it('keeps the reviewer spawn result for reviewers', () => {
     const text = renderSpawnResult({ name: 'reviewer-a', kind: 'reviewer', agentId: 'agent-9', reviewTarget: 'feat/x' });
     expect(text.endsWith(`review_target: feat/x\n\n${REVIEWER_SPAWN_GUIDANCE}`)).toBe(true);

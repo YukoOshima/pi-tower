@@ -115,7 +115,7 @@ describe('upstream tower tool descriptions', () => {
       'TowerSpawn',
       TOWER_SPAWN_DESCRIPTION,
       [
-        'Spawn a tower worker or reviewer as a background subagent and register it in the tower roster.',
+        'Spawn a tower worker, reviewer, or validator as a background subagent and register it in the tower roster.',
         'the agent must submit its verdict via TowerReview',
         'pass model only when the user explicitly requests a model for this spawn; do not infer a selection from mission text or instructions',
         'A choice applies only to this new spawn: it does not change running or resumed agents and is not persisted on the mission.',

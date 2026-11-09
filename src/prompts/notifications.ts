@@ -263,7 +263,9 @@ export function renderSpawnResult(input: SpawnResultInput): string {
         ]
       : input.validation !== undefined
         ? spawnValidationLines(input.validation)
-        : [`review_target: ${input.reviewTarget ?? ''}`]),
+        : input.kind === 'validator'
+          ? []
+          : [`review_target: ${input.reviewTarget ?? ''}`]),
     ...(input.notes ?? []),
     '',
     input.kind === 'worker'

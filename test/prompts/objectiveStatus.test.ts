@@ -9,6 +9,11 @@ import {
   type ObjectiveStatusInput,
 } from '../../src/prompts/objectiveStatus.ts';
 import type {
+  PromptLiveAgent,
+  PromptObjective as BarrelObjective,
+  PromptObjectiveLimits,
+} from '../../src/prompts/index.ts';
+import type {
   PromptMilestone,
   PromptObjective,
   PromptValidationRound,
@@ -255,6 +260,17 @@ describe('renderObjectiveStatus — next expected step', () => {
 
   it('accepts a caller-supplied next step', () => {
     expect(next({ nextStep: 'Rebasing M5 onto main.' })).toBe('Rebasing M5 onto main.');
+  });
+});
+
+describe('barrel types', () => {
+  it('expose the status input types', () => {
+    const limits: PromptObjectiveLimits = { maxValidationRounds: 3 };
+    const agent: PromptLiveAgent = { name: 'val-a', kind: 'validator' };
+    const fromBarrel: BarrelObjective = objective({ limits });
+    expect(renderObjectiveStatus(input({ objective: fromBarrel, agents: [agent] }))).toContain(
+      '## Live agents (1)\n- val-a — validator · ? validation',
+    );
   });
 });
 
