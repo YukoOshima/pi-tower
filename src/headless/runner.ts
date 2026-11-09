@@ -315,6 +315,7 @@ class HeadlessRun {
   }
 
   private async towerCommand(pi: HeadlessPi, text: string, code: number): Promise<PiCommandResult> {
+    if (this.interrupt !== undefined) throw this.interruptExit();
     this.line(`> ${text}`);
     this.commandsInFlight += 1;
     let result: PiCommandResult;
@@ -399,7 +400,10 @@ class HeadlessRun {
         const what = this.current === undefined ? 'before the objective was drafted' : `before objective ${this.current.id} finished (it was ${this.current.status})`;
         throw this.failure(HEADLESS_EXIT.stopped, `pi exited (${pi.exit.reason}) ${what}`);
       }
-      if (rereadNow) continue;
+      if (rereadNow) {
+        if (this.interrupt !== undefined) throw this.interruptExit();
+        continue;
+      }
       await this.deps.clock.sleep(this.deps.pollMs ?? 1000, this.stop.signal);
       if (this.interrupt !== undefined) throw this.interruptExit();
     }

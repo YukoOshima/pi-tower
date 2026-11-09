@@ -335,6 +335,30 @@ describe('runHeadless', () => {
     expect(run.signalHandlers()).toBe(0);
   });
 
+  it('sends no further approve once a SIGINT landed during the immediate re-read', async () => {
+    const run = stubRun((pi, state) => {
+      towerOn(pi, state);
+      drafts(pi, state);
+      let approved = false;
+      pi.reactions['/tower approve --auto'] = {
+        effect: () => {
+          approved = true;
+          state.set(snapshot(stage('awaiting-approval', 'active', 'pending', { approvalReason: 'contract-changed' })));
+        },
+      };
+      pi.terminate = async () => {
+        pi.terminated = true;
+        return undefined;
+      };
+      state.onRead = () => {
+        if (approved && !pi.terminated) run.signal('SIGINT');
+      };
+    });
+    expect(await runHeadless(runOptions({ autoApprove: true, timeoutMs: 60_000 }), run.deps)).toBe(HEADLESS_EXIT.sigint);
+    expect(run.pi().commands.filter((command) => command === '/tower approve --auto')).toHaveLength(1);
+    expect(run.pi().terminated).toBe(true);
+  });
+
   it('kills pi outright on a second signal', async () => {
     const run = stubRun((pi, state) => {
       towerOn(pi, state, snapshot(stage('executing', 'active', 'pending')));
