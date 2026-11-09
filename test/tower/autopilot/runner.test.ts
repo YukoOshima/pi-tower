@@ -41,16 +41,35 @@ afterEach(async () => {
 });
 
 async function draft(
-  options: { readonly commands?: string[]; readonly limits?: TowerObjectiveLimitsInput; readonly request?: boolean } = {},
+  options: {
+    readonly commands?: string[];
+    readonly scrutiny?: boolean;
+    readonly limits?: TowerObjectiveLimitsInput;
+    readonly request?: boolean;
+    readonly features?: readonly string[];
+  } = {},
 ): Promise<void> {
   await store.draftObjective({
     title: 'Ship',
     goal: 'ship it',
     definitionOfDone: ['works'],
-    milestones: [{ title: 'Core', validation: { scrutiny: false, userTesting: false, commands: options.commands ?? [] } }],
+    milestones: [
+      {
+        title: 'Core',
+        validation: { scrutiny: options.scrutiny ?? false, userTesting: false, commands: options.commands ?? [] },
+      },
+    ],
     ...(options.limits === undefined ? {} : { limits: options.limits }),
   });
-  await store.plan([{ title: 'Core A', scope: ['core/a/**'], milestone: 'MS1', tasks: ['write it'] }], validationSettings(SIM_SETTINGS));
+  await store.plan(
+    (options.features ?? ['a']).map((name) => ({
+      title: `Core ${name.toUpperCase()}`,
+      scope: [`core/${name}/**`],
+      milestone: 'MS1',
+      tasks: ['write it'],
+    })),
+    validationSettings(SIM_SETTINGS),
+  );
   if (options.request !== false) await store.requestObjectiveApproval();
 }
 
@@ -361,6 +380,48 @@ describe('executing', () => {
     expect(milestone).toMatchObject({ status: 'validating', rounds: [] });
     expect(existsSync(join(repo, '.tower', 'worktrees', 'val-ms1-commands-r1'))).toBe(false);
     expect(runner.pendingWork().validators).toEqual([]);
+  });
+});
+
+describe('stop during a tick', () => {
+  it('stop() inside startMilestoneValidation starts no commands process and no validator', async () => {
+    const pidFile = join(repo, 'commands.pid');
+    await draft({ scrutiny: true, commands: [`echo $$ > ${pidFile}; sleep 30`] });
+    await store.approveObjective('human');
+    await store.updateMission('tower', 'M1', { status: 'abandoned' });
+    const { runner, tower } = setup();
+    const start = store.startMilestoneValidation.bind(store);
+    store.startMilestoneValidation = async (milestoneId, commit, settings) => {
+      runner.stop();
+      return start(milestoneId, commit, settings);
+    };
+    const began = Date.now();
+    await runner.tick('validate');
+    await runner.whenIdle();
+    expect(Date.now() - began).toBeLessThan(5_000);
+    expect(runner.pendingWork()).toEqual({ agents: [], validators: [] });
+    expect(tower.calls.filter((call) => call.startsWith('spawnValidator'))).toEqual([]);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(existsSync(pidFile)).toBe(false);
+    expect(existsSync(join(repo, '.tower', 'worktrees', 'val-ms1-commands-r1'))).toBe(false);
+    expect(existsSync(join(repo, '.tower', 'worktrees', 'val-ms1-scrutiny-r1'))).toBe(false);
+  });
+
+  it('stop() during a tick launches no further agent and records no progress', async () => {
+    await draft({ features: ['a', 'b'] });
+    await store.approveObjective('human');
+    const { runner, tower } = setup();
+    const spawn = tower.spawnWorker.bind(tower);
+    tower.spawnWorker = async (missionId, name) => {
+      runner.stop();
+      return spawn(missionId, name);
+    };
+    await runner.tick('first');
+    await runner.whenIdle();
+    expect(tower.calls).toEqual(['spawnWorker M1 ap-w-M1-1']);
+    expect((await objectiveOf()).autopilot).toBeUndefined();
+    await settle(runner);
+    expect(tower.calls).toEqual(['spawnWorker M1 ap-w-M1-1']);
   });
 });
 

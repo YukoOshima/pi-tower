@@ -289,7 +289,7 @@ export class AutopilotRunner {
       } catch (error) {
         const refusal = errorMessage(error);
         const key = `approval-refused:${objective.id}:${digest(`${refusal}\n${request}`)}`;
-        if (sent.has(key)) return;
+        if (sent.has(key) || !this.active) return;
         this.effects.notifyHuman(
           `Automatic approval of objective ${objective.id} "${objective.title}" was refused: ${refusal}\nA human approval is needed.\n\n${request}`,
           'warning',
@@ -308,7 +308,7 @@ export class AutopilotRunner {
       return;
     }
     const key = `approval:${objective.id}:${digest(request)}`;
-    if (sent.has(key)) return;
+    if (sent.has(key) || !this.active) return;
     this.effects.notifyHuman(request, 'info');
     await store.updateObjectiveAutopilot({ addWakeKeys: [key] });
     await this.activity(store, 'notify-human', { objective: objective.id, reason: 'approval' });
@@ -334,7 +334,7 @@ export class AutopilotRunner {
     const quietMs = now - planning.since;
     if (quietMs < this.observations.settings().stallTimeoutMs) return;
     const wakeKey = `planning-stalled:${objective.id}:${key}`;
-    if ((objective.autopilot?.wakeKeys ?? []).includes(wakeKey)) return;
+    if ((objective.autopilot?.wakeKeys ?? []).includes(wakeKey) || !this.active) return;
     this.effects.wakeOrchestrator(planningStallWake(objective, quietMs));
     await store.updateObjectiveAutopilot({ addWakeKeys: [wakeKey] });
     await this.activity(store, 'wake-orchestrator', { reason: 'planning-stalled', subject: objective.id });
@@ -388,7 +388,12 @@ export class AutopilotRunner {
         this.startCommands(store, world, milestoneId, commit, launchedByCurrent);
       },
     };
+    let stopped = false;
     for (const action of decision.actions) {
+      if (!this.active) {
+        stopped = true;
+        break;
+      }
       const mission = autopilotActionMission(action);
       if (mission !== undefined && this.missionPending(mission)) continue;
       current = action;
@@ -411,6 +416,10 @@ export class AutopilotRunner {
             ? {}
             : { detail: outcome.detail }),
       });
+    }
+    if (stopped || !this.active) {
+      if (wakeKeys.length > 0) await store.updateObjectiveAutopilot({ addWakeKeys: wakeKeys });
+      return;
     }
     wakeKeys.push(...(await this.refusedWakes(store, snapshot, wakeKeys)));
     await this.persistMemory(store, snapshot, decision, wakeKeys);
@@ -483,6 +492,7 @@ export class AutopilotRunner {
     action: AutopilotAction,
     tick: number,
   ): Promise<void> {
+    if (!this.active) return Promise.resolve();
     const pending: PendingLaunch = { launch, type: action.type, subject: autopilotActionSubject(action), tick };
     this.launches.set(launch.agent, pending);
     const run = async (): Promise<void> => {
@@ -528,7 +538,7 @@ export class AutopilotRunner {
     commit: string,
     after: readonly Promise<void>[],
   ): void {
-    if (this.commandRuns.has(milestoneId)) return;
+    if (!this.active || this.commandRuns.has(milestoneId)) return;
     const controller = new AbortController();
     this.commandRuns.set(milestoneId, { milestone: milestoneId, commit, controller });
     const runCommands = this.deps.runCommands ?? runCommandsValidation;
@@ -536,7 +546,7 @@ export class AutopilotRunner {
     const run = async (): Promise<void> => {
       try {
         await validatorsStarted;
-        if (controller.signal.aborted) return;
+        if (controller.signal.aborted || !this.active) return;
         const outcome = await runCommands(store, {
           milestoneId,
           settings: validationSettings(world.settings),
