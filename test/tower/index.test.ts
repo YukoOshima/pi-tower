@@ -22,6 +22,7 @@ const EVENTS = [
   'session_shutdown',
   'before_agent_start',
   'tool_call',
+  'tool_result',
   'after_provider_response',
   'message_end',
   'agent_settled',

@@ -37,6 +37,24 @@ export const TOWER_AGENT_TOOLS: readonly TowerToolName[] = [
   'TowerStatus',
 ];
 
+export const TOWER_STORE_CHANGING_TOOLS: readonly TowerToolName[] = [
+  'TowerInit',
+  'TowerPlan',
+  'TowerSpawn',
+  'TowerMerge',
+  'TowerRebase',
+  'TowerTeardown',
+  'TowerComplete',
+  'TowerSend',
+  'TowerFinding',
+  'TowerReview',
+  'TowerMission',
+  'TowerResume',
+  'TowerTaskStop',
+  'TowerObjective',
+  'TowerValidate',
+];
+
 export const TOWER_VALIDATOR_AGENT_TOOLS: readonly TowerToolName[] = [
   'TowerFinding',
   'TowerInbox',
@@ -61,6 +79,10 @@ export const HUMAN_STOP_REASON = 'user';
 export const TOWER_STOP_REASON_PREFIX = 'stopped by the tower';
 export const SHUTDOWN_STOP_REASON = 'shutdown';
 export const DEFAULT_AGENT_TIMEOUT_MS = 7_200_000;
+
+export function changesTowerStore(toolName: string): boolean {
+  return TOWER_STORE_CHANGING_TOOLS.some((name) => name === toolName);
+}
 
 export function isHumanStopReason(reason: string | undefined): boolean {
   return reason?.trim() === HUMAN_STOP_REASON;

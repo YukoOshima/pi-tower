@@ -54,7 +54,9 @@ export function createTowerAgentRuntime(
         ...definition,
         execute: async (toolCallId, params, signal, onUpdate, ctx) => {
           await controller.agentRegistration(request.agentId);
-          return definition.execute(toolCallId, params, signal, onUpdate, ctx);
+          const result = await definition.execute(toolCallId, params, signal, onUpdate, ctx);
+          controller.noteTowerToolResult(definition.name, result.isError === true);
+          return result;
         },
       });
     });

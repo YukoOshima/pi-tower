@@ -72,6 +72,9 @@ export default function towerExtension(pi: ExtensionAPI): void {
   pi.on('session_shutdown', () => controller.onSessionShutdown());
   pi.on('before_agent_start', (event, ctx) => controller.onBeforeAgentStart(event, ctx));
   pi.on('tool_call', (event, ctx) => controller.onToolCall(event, ctx));
+  pi.on('tool_result', (event) => {
+    controller.onToolResult(event);
+  });
   pi.on('after_provider_response', (event) => {
     controller.onAfterProviderResponse(event);
   });

@@ -9,6 +9,7 @@ import type {
   SessionStartEvent,
   ToolCallEvent,
   ToolCallEventResult,
+  ToolResultEvent,
 } from '@earendil-works/pi-coding-agent';
 
 import {
@@ -59,6 +60,7 @@ import {
   TOWER_MODE_TOOLS,
   TOWER_REMINDER_MESSAGE,
   TOWER_STATUS_KEY,
+  changesTowerStore,
 } from './constants.ts';
 import { towerBashGuard } from './guards.ts';
 import { BranchLeases } from './leases.ts';
@@ -140,9 +142,16 @@ const DEFAULT_RATE_LIMIT_SNAPSHOT: TowerRateLimitSnapshot = {
   blockedUntil: null,
 };
 
+export interface TowerAutopilot {
+  start(): void;
+  stop(): void;
+  tick(reason: string): Promise<void>;
+}
+
 export interface TowerControllerOptions {
   readonly pi: TowerExtensionApi;
   readonly createRuntime?: (controller: TowerController) => TowerRuntime;
+  readonly createAutopilot?: (controller: TowerController) => TowerAutopilot;
   readonly models?: TowerModels;
   readonly isProcessAlive?: (pid: number) => boolean;
   readonly log?: TowerLog;
@@ -152,6 +161,7 @@ export class TowerController implements TowerToolHost {
   readonly models: TowerModels | undefined;
   private readonly pi: TowerExtensionApi;
   private readonly createRuntime: ((controller: TowerController) => TowerRuntime) | undefined;
+  private readonly createAutopilot: ((controller: TowerController) => TowerAutopilot) | undefined;
   private readonly alive: (pid: number) => boolean;
   private readonly log: TowerLog;
   private spawnDescription: string | undefined;
@@ -167,6 +177,7 @@ export class TowerController implements TowerToolHost {
   private boundSessionId: string | undefined;
   private boundRepoRoot: string | undefined;
   private runtimeInstance: TowerRuntime | undefined;
+  private autopilot: TowerAutopilot | undefined;
   private active = false;
   private shuttingDown = false;
   private releasing: Promise<void> = Promise.resolve();
@@ -181,6 +192,7 @@ export class TowerController implements TowerToolHost {
     this.pi = options.pi;
     this.models = options.models;
     this.createRuntime = options.createRuntime;
+    this.createAutopilot = options.createAutopilot;
     this.alive = options.isProcessAlive ?? isProcessAlive;
     this.log = options.log ?? SILENT_LOG;
   }
@@ -268,6 +280,7 @@ export class TowerController implements TowerToolHost {
     if (event.to !== TOWER_NAME && event.to !== BROADCAST_NAME) return;
     this.wakes.enqueue(this.wakes.entryFor(event));
     this.scheduleInboxWake();
+    this.requestAutopilotTick('inbox');
   }
 
   async steerAgent(agentId: string, text: string): Promise<TowerSteerResult> {
@@ -422,6 +435,58 @@ export class TowerController implements TowerToolHost {
     return this.stopAgent(id, HUMAN_STOP_REASON);
   }
 
+  async autopilotTick(reason: string): Promise<void> {
+    const autopilot = this.autopilot;
+    if (autopilot === undefined || !this.active || this.shuttingDown) return;
+    try {
+      await autopilot.tick(reason);
+    } catch (error) {
+      this.log.warn('tower: autopilot tick failed', { reason, error: errorText(error) });
+    }
+  }
+
+  noteTowerToolResult(toolName: string, isError: boolean): void {
+    if (isError || !changesTowerStore(toolName)) return;
+    this.requestAutopilotTick(`tool ${toolName}`);
+  }
+
+  private startAutopilot(): void {
+    if (this.autopilot !== undefined || this.createAutopilot === undefined || this.shuttingDown) return;
+    try {
+      const autopilot = this.createAutopilot(this);
+      autopilot.start();
+      this.autopilot = autopilot;
+    } catch (error) {
+      this.log.warn('tower: failed to start the autopilot', { error: errorText(error) });
+      return;
+    }
+    void this.continueObjective();
+  }
+
+  private stopAutopilot(): void {
+    const autopilot = this.autopilot;
+    this.autopilot = undefined;
+    try {
+      autopilot?.stop();
+    } catch (error) {
+      this.log.warn('tower: failed to stop the autopilot', { error: errorText(error) });
+    }
+  }
+
+  private requestAutopilotTick(reason: string): void {
+    if (this.autopilot !== undefined) void this.autopilotTick(reason);
+  }
+
+  private async continueObjective(): Promise<void> {
+    let executing: boolean;
+    try {
+      executing = (await this.store().load()).objective?.status === 'executing';
+    } catch {
+      return;
+    }
+    if (executing) await this.autopilotTick('restart');
+  }
+
   async enter(base?: string): Promise<TowerEnterResult> {
     if (this.ctx === undefined || this.boundSessionId === undefined) {
       return { entered: false, reason: 'no-session' };
@@ -453,6 +518,7 @@ export class TowerController implements TowerToolHost {
       ...(switched ?? {}),
     });
     this.renderStatus();
+    this.startAutopilot();
     return { entered: true };
   }
 
@@ -461,6 +527,7 @@ export class TowerController implements TowerToolHost {
     const record = this.persistedRecord();
     this.persistMode({ active: false });
     this.active = false;
+    this.stopAutopilot();
     this.dropInboxWake();
     this.renderStatus();
     this.log.info('tower: exit', { reason, sessionId: this.boundSessionId });
@@ -564,6 +631,7 @@ export class TowerController implements TowerToolHost {
 
   async onSessionShutdown(): Promise<void> {
     this.shuttingDown = true;
+    this.stopAutopilot();
     this.dropInboxWake();
     for (const agentId of [...this.registrations.keys()]) this.agentRegistered(agentId);
     const runtime = this.runtimeInstance;
@@ -608,6 +676,10 @@ export class TowerController implements TowerToolHost {
 
   onAfterProviderResponse(event: AfterProviderResponseEvent): void {
     if (event.status === 429) this.runtime?.limiter.reportRateLimited();
+  }
+
+  onToolResult(event: ToolResultEvent): void {
+    this.noteTowerToolResult(event.toolName, event.isError);
   }
 
   onMessageEnd(event: MessageEndEvent): void {
@@ -670,10 +742,12 @@ export class TowerController implements TowerToolHost {
     }
     this.activateTowerTools();
     this.renderStatus();
+    this.startAutopilot();
   }
 
   private async reconcileForeign(record: TowerModeRecord, reason: string): Promise<void> {
     this.active = false;
+    this.stopAutopilot();
     this.persistMode({ active: false });
     this.renderStatus();
     this.notify(`Tower mode: OFF — ${reason}`, 'warning');
@@ -868,7 +942,10 @@ export class TowerController implements TowerToolHost {
       return;
     }
     if (event.type !== 'finished') return;
-    this.enqueueDeathWork(event.agentId, () => this.recordTowerAgentDeath(event));
+    this.enqueueDeathWork(event.agentId, async () => {
+      await this.recordTowerAgentDeath(event);
+      this.requestAutopilotTick('agent-end');
+    });
     this.deliverAgentNotification(event);
     this.retireFinishedAgent(event);
   }
