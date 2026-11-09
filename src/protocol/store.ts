@@ -1482,6 +1482,10 @@ export class TowerStore {
     });
   }
 
+  /**
+   * Wave 2 must pass the configured objective settings (skipScrutiny, skipUserTesting): they decide
+   * which validation kinds the completion gate requires. The default `{}` requires every kind.
+   */
   async completeObjective(settings: TowerValidationSettings = {}): Promise<TowerObjective> {
     return this.withStateLock(async () => {
       const state = await this.load();
@@ -1501,6 +1505,10 @@ export class TowerStore {
     });
   }
 
+  /**
+   * Wave 2 must pass the configured objective settings (skipScrutiny, skipUserTesting): they decide
+   * the required kinds, readiness and the completion gate. The default `{}` requires every kind.
+   */
   async objectiveEvaluation(settings: TowerValidationSettings = {}): Promise<TowerObjectiveEvaluation> {
     const state = await this.load();
     return evaluateObjective(state, await branchTip(this.repoRoot, state.base), settings);
@@ -1520,6 +1528,11 @@ export class TowerStore {
     });
   }
 
+  /**
+   * Wave 2 must pass the configured objective settings (skipScrutiny, skipUserTesting): they decide
+   * the required kinds (none passes the milestone immediately), whether a passed final milestone is
+   * stale, and which failed rounds block a same-tip restart. The default `{}` requires every kind.
+   */
   async startMilestoneValidation(
     milestoneId: string,
     commit: string,
@@ -1687,6 +1700,11 @@ export class TowerStore {
     await this.appendLog(TOWER_NAME, action, details, MISSIONS_INDEX);
   }
 
+  /**
+   * Wave 2 must pass the configured objective settings (skipScrutiny, skipUserTesting) whenever an
+   * objective exists: they decide whether a passed final milestone still holds or may take a fix.
+   * The default `{}` requires every kind.
+   */
   async plan(
     input: readonly TowerPlanInput[],
     settings: TowerValidationSettings = {},
@@ -3547,6 +3565,10 @@ export class TowerStore {
     return { rel, spawnBase };
   }
 
+  /**
+   * Wave 2 must pass the configured objective settings (skipScrutiny, skipUserTesting): they decide
+   * which kinds the milestone status is derived from. The default `{}` requires every kind.
+   */
   async submitValidation(
     callerName: string,
     input: TowerValidationInput,
