@@ -600,6 +600,7 @@ table('start-validation', [
 
 const FAIL_ROUNDS = [round('scrutiny', 1, BASE, 'fail'), round('user-testing', 1, BASE, 'pass')];
 const THREE_FAILS = [round('scrutiny', 1, 'a', 'fail'), round('scrutiny', 2, 'b', 'fail'), round('scrutiny', 3, BASE, 'fail')];
+const UT_FAILED_ON_TIP = [round('scrutiny', 1, BASE, 'pass'), round('user-testing', 1, BASE, 'fail')];
 
 table('validation failure, fix and block', [
   {
@@ -687,6 +688,56 @@ table('validation failure, fix and block', [
       missions: DONE_MS1,
     }),
     actions: [validate('MS1', BASE, ['user-testing'])],
+  },
+  {
+    name: 'a failed milestone whose failed kind is now skipped re-derives with []',
+    snap: snapshot({
+      settings: { skipUserTesting: true },
+      objective: { milestones: [milestone('MS1', 1, { status: 'failed', validationCommit: BASE, rounds: UT_FAILED_ON_TIP }), milestone('MS2', 2)] },
+      missions: DONE_MS1,
+    }),
+    actions: [validate('MS1', BASE, [])],
+  },
+  {
+    name: 'blocked, then /tower resume with the failing kind skipped (the store gives failed): re-derive with []',
+    snap: snapshot({
+      settings: { skipUserTesting: true },
+      objective: {
+        milestones: [
+          milestone('MS1', 1, {
+            status: 'failed',
+            validationCommit: BASE,
+            rounds: [round('scrutiny', 1, BASE, 'pass'), round('user-testing', 1, 'a', 'fail'), round('user-testing', 2, 'b', 'fail'), round('user-testing', 3, BASE, 'fail')],
+          }),
+          milestone('MS2', 2),
+        ],
+      },
+      missions: DONE_MS1,
+      memory: { wakeKeys: ['validation-failed:MS1:user-testing-r1', 'validation-failed:MS1:user-testing-r2', 'validation-failed:MS1:user-testing-r3'] },
+    }),
+    actions: [validate('MS1', BASE, [])],
+  },
+  {
+    name: 'a failed milestone whose failing kind is still required only wakes for a fix',
+    snap: snapshot({
+      objective: { milestones: [milestone('MS1', 1, { status: 'failed', validationCommit: BASE, rounds: UT_FAILED_ON_TIP }), milestone('MS2', 2)] },
+      missions: DONE_MS1,
+    }),
+    actions: [wakeOf('validation-failed', 'MS1', 'user-testing-r1')],
+  },
+  {
+    name: 'a failed milestone whose remaining kind has no round on the tip starts nothing',
+    snap: snapshot({
+      settings: { skipUserTesting: true },
+      objective: {
+        milestones: [
+          milestone('MS1', 1, { status: 'failed', validationCommit: BASE, rounds: [round('scrutiny', 1, 'base-old', 'pass'), round('user-testing', 1, BASE, 'fail')] }),
+          milestone('MS2', 2),
+        ],
+      },
+      missions: DONE_MS1,
+    }),
+    actions: [],
   },
   {
     name: 'a milestone the store blocked (e.g. maxValidationRounds) blocks the objective',

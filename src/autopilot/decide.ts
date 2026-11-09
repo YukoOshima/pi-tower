@@ -386,7 +386,9 @@ function planMilestone(draft: Draft): void {
     );
     return;
   }
-  if (current.status !== 'active' && current.status !== 'validating') return;
+  if (current.status === 'failed') {
+    if (!kinds.every((kind) => latestRound(current, kind, snapshot.baseTip)?.verdict === 'pass')) return;
+  } else if (current.status !== 'active' && current.status !== 'validating') return;
   if (features.some((feature) => !isClosed(feature))) return;
   planValidation(draft, current, kinds, false);
 }
