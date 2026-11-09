@@ -169,6 +169,7 @@ export interface TowerState {
   objective?: TowerObjective;
   objectiveHistory?: TowerObjective[];
   objectiveMode?: TowerObjectiveMode;
+  objectiveModeFor?: string;
 }
 
 export type TowerFindingType = 'bug' | 'improve' | 'vuln' | 'idea';

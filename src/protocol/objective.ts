@@ -109,6 +109,34 @@ export function canPlanObjective(objective: TowerObjective | undefined): boolean
   return !isObjectiveOpen(objective) || objective?.status === 'planning';
 }
 
+export function claimObjectiveMode(state: TowerState, objectiveId: string): TowerObjectiveMode | undefined {
+  const mode = state.objectiveMode;
+  if (mode === undefined || state.objectiveModeFor === objectiveId) return undefined;
+  if (state.objectiveModeFor === undefined) {
+    state.objectiveModeFor = objectiveId;
+    return undefined;
+  }
+  delete state.objectiveMode;
+  delete state.objectiveModeFor;
+  return mode;
+}
+
+export function releaseObjectiveMode(state: TowerState, objectiveId: string): TowerObjectiveMode | undefined {
+  const mode = state.objectiveMode;
+  if (mode === undefined || state.objectiveModeFor !== objectiveId) return undefined;
+  delete state.objectiveMode;
+  delete state.objectiveModeFor;
+  return mode;
+}
+
+export function takeOverObjectiveMode(state: TowerState, objectiveId: string): TowerObjectiveMode | undefined {
+  const mode = state.objectiveMode;
+  if (mode === undefined) return undefined;
+  state.objectiveMode = 'interactive';
+  state.objectiveModeFor = objectiveId;
+  return mode === 'interactive' ? undefined : mode;
+}
+
 function isOpenFeature(mission: Pick<TowerMission, 'status'>): boolean {
   return mission.status !== 'merged' && mission.status !== 'abandoned';
 }

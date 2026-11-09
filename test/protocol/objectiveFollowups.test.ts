@@ -111,23 +111,25 @@ describe('objective mode', () => {
     expect(await rawState()).toBe(before);
   });
 
-  it('changes only while no objective is open or the open one is still planning', async () => {
+  it('switches to headless only while no objective is open or the open one is still planning, to interactive at any time', async () => {
     await store.setObjectiveMode('interactive');
     await draftWithFeature();
     await store.setObjectiveMode('headless');
     await store.requestObjectiveApproval();
     const before = await rawState();
-    await expect(store.setObjectiveMode('interactive')).rejects.toThrow(
-      /objective O1 is awaiting-approval — the objective mode is chosen while an objective is planned/,
+    await expect(store.setObjectiveMode('headless')).rejects.toThrow(
+      /objective O1 is awaiting-approval — headless mode is chosen while an objective is planned, so it is set only when no objective is open or the open one is still planning; switching to interactive is allowed at any time/,
     );
-    await store.approveObjective('human');
-    await expect(store.setObjectiveMode('interactive')).rejects.toThrow(/objective O1 is executing/);
+    expect(await rawState()).toBe(before);
+    await store.approveObjective('auto');
+    await expect(store.setObjectiveMode('headless')).rejects.toThrow(/objective O1 is executing/);
     await store.pauseObjective('lunch');
-    await expect(store.setObjectiveMode('interactive')).rejects.toThrow(/objective O1 is paused/);
-    expect((await readState()).objectiveMode).toBe('headless');
-    await store.blockObjective('the human changed their mind');
+    await expect(store.setObjectiveMode('headless')).rejects.toThrow(/objective O1 is paused/);
+    expect(await readState()).toMatchObject({ objectiveMode: 'headless', objectiveModeFor: 'O1' });
+
     await store.setObjectiveMode('interactive');
-    expect((await readState()).objectiveMode).toBe('interactive');
+    expect(await readState()).toMatchObject({ objectiveMode: 'interactive', objectiveModeFor: 'O1' });
+    expect(await activityLog()).toMatch(/ tower objective\.mode mode=interactive from=headless objective=O1\n$/);
     expect(before).toContain('"objectiveMode": "headless"');
   });
 
@@ -444,5 +446,158 @@ describe('refreshing objective limits', () => {
     await expect(store.updateObjective({ limits: { maxCostUsd: 0 } })).rejects.toThrow(
       /maxCostUsd must be a positive number, got 0/,
     );
+  });
+});
+
+describe('objective mode lifecycle', () => {
+  const NEXT = { title: 'Next', goal: 'ship the next thing', definitionOfDone: ['done'], milestones: [{ title: 'Again' }] };
+
+  async function headlessExecuting(): Promise<void> {
+    await store.setObjectiveMode('headless');
+    await draftWithFeature();
+    await store.requestObjectiveApproval();
+    await store.approveObjective('auto');
+  }
+
+  async function modeOf(): Promise<Pick<TowerState, 'objectiveMode' | 'objectiveModeFor'>> {
+    const state = await readState();
+    return {
+      ...('objectiveMode' in state ? { objectiveMode: state.objectiveMode } : {}),
+      ...('objectiveModeFor' in state ? { objectiveModeFor: state.objectiveModeFor } : {}),
+    };
+  }
+
+  it('binds the mode chosen before a draft to that objective and keeps it while it runs without a human', async () => {
+    await store.setObjectiveMode('headless');
+    expect(await modeOf()).toEqual({ objectiveMode: 'headless' });
+
+    await draftWithFeature();
+    expect(await modeOf()).toEqual({ objectiveMode: 'headless', objectiveModeFor: 'O1' });
+    expect(await activityLog()).toContain('objective.draft id=O1 milestones=MS1,MS2 mode=headless');
+
+    await store.requestObjectiveApproval();
+    await store.approveObjective('auto');
+    await store.pauseObjective('budget');
+    await store.updateObjective({ notes: ['still headless'], limits: { maxCostUsd: 9 } });
+    expect(await modeOf()).toEqual({ objectiveMode: 'headless', objectiveModeFor: 'O1' });
+  });
+
+  it('switches headless to interactive when a human approves', async () => {
+    await store.setObjectiveMode('headless');
+    await draftWithFeature();
+    await store.requestObjectiveApproval();
+
+    await store.approveObjective('human');
+
+    expect(await modeOf()).toEqual({ objectiveMode: 'interactive', objectiveModeFor: 'O1' });
+    expect(await activityLog()).toMatch(
+      / tower objective\.approve id=O1 by=human activated=MS1 ref=\S+\n\S+ tower objective\.mode mode=interactive from=headless objective=O1\n$/,
+    );
+  });
+
+  it('switches headless to interactive when a human resumes a paused or blocked objective', async () => {
+    await headlessExecuting();
+    await store.pauseObjective('budget');
+
+    await store.resumeObjective();
+
+    expect(await modeOf()).toEqual({ objectiveMode: 'interactive', objectiveModeFor: 'O1' });
+    expect(await activityLog()).toMatch(/ tower objective\.mode mode=interactive from=headless objective=O1\n$/);
+
+    await store.blockObjective('stuck');
+    await store.setObjectiveMode('headless');
+    await store.resumeObjective();
+    expect(await modeOf()).toEqual({ objectiveMode: 'interactive', objectiveModeFor: 'O1' });
+  });
+
+  it('ends with the objective it was bound to, so a later draft without a fresh choice has no mode', async () => {
+    await headlessExecuting();
+
+    await store.blockObjective('cannot converge');
+
+    expect(await modeOf()).toEqual({});
+    expect(await activityLog()).toMatch(
+      / tower objective\.block id=O1 reason=cannot converge ref=\S+\n\S+ tower objective\.mode mode=none from=headless objective=O1\n$/,
+    );
+    await store.draftObjective(NEXT);
+    expect(await rawState()).not.toContain('objectiveMode');
+  });
+
+  it('does not hand the mode of a blocked planning objective to the next draft', async () => {
+    await store.setObjectiveMode('headless');
+    await draftWithFeature();
+
+    await store.blockObjective('unrelated');
+    await store.draftObjective(NEXT);
+
+    expect(await rawState()).not.toContain('objectiveMode');
+  });
+
+  it('carries a fresh choice made while an objective is planning over to the draft that replaces it', async () => {
+    await store.setObjectiveMode('headless');
+    await draftWithFeature();
+    await store.setObjectiveMode('headless');
+    expect(await modeOf()).toEqual({ objectiveMode: 'headless' });
+
+    await store.blockObjective('unrelated to the new objective');
+    expect(await modeOf()).toEqual({ objectiveMode: 'headless' });
+    await store.draftObjective(NEXT);
+
+    expect(await modeOf()).toEqual({ objectiveMode: 'headless', objectiveModeFor: 'O2' });
+  });
+
+  it('binds a fresh choice for a planning objective at its approval request and ends it on completion', async () => {
+    await draftWithFeature();
+    await store.setObjectiveMode('headless');
+    await store.requestObjectiveApproval();
+    expect(await modeOf()).toEqual({ objectiveMode: 'headless', objectiveModeFor: 'O1' });
+    await store.approveObjective('auto');
+    const tip = await git(repo, 'rev-parse', 'main');
+    await mutateState((state) => {
+      state.missions[0]!.status = 'merged';
+      for (const milestone of state.objective!.milestones) {
+        milestone.status = 'passed';
+        milestone.validationCommit = tip;
+        milestone.validation = { scrutiny: false, userTesting: false, commands: [] };
+      }
+    });
+
+    await store.completeObjective();
+
+    expect(await modeOf()).toEqual({});
+    expect(await activityLog()).toMatch(/ tower objective\.mode mode=none from=headless objective=O1\n$/);
+    await store.draftObjective(NEXT);
+    expect(await rawState()).not.toContain('objectiveMode');
+  });
+
+  it('ends with an objective blocked by exhausted validation rounds', async () => {
+    await headlessExecuting();
+    await store.updateObjective({ limits: { maxValidationRounds: 1 } });
+    await mutateState((state) => {
+      state.missions[0]!.status = 'merged';
+    });
+    const tip = await git(repo, 'rev-parse', 'main');
+    await store.startMilestoneValidation('MS1', tip);
+    await registerValidator('v-scrutiny', 'scrutiny', tip);
+
+    const failed = await report('v-scrutiny', 'scrutiny', 'fail');
+
+    expect(failed.objective.status).toBe('blocked');
+    expect(await modeOf()).toEqual({});
+    expect(await activityLog()).toContain(' tower objective.mode mode=none from=headless objective=O1\n');
+  });
+
+  it('leaves a workspace without an objective or a mode byte-identical', async () => {
+    await store.plan([{ title: 'Plain mission', scope: ['src/plain/**'] }]);
+    await store.updateMission('tower', 'M1', { note: 'v0.1 style bookkeeping' });
+    const before = await rawState();
+
+    await expect(store.approveObjective('human')).rejects.toThrow(/there is no objective/);
+    await expect(store.resumeObjective()).rejects.toThrow(/there is no objective/);
+    await expect(store.blockObjective('nothing to block')).rejects.toThrow(/there is no objective/);
+    await expect(store.completeObjective()).rejects.toThrow(/there is no objective/);
+
+    expect(await rawState()).toBe(before);
+    expect(before).not.toContain('objective');
   });
 });
