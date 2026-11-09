@@ -206,8 +206,8 @@ function planFeature(draft: Draft, feature: AutopilotMission): void {
       `${feature.id} reported ${String(feature.blockers.length)} blocker(s): ${feature.blockers.join(' | ')}`,
     );
   }
-  if (draft.current?.status === 'pending' && feature.milestone === draft.current.id) return;
   const autopilot = draft.snapshot.settings.autopilot;
+  if (autopilot && draft.current?.status === 'pending' && feature.milestone === draft.current.id) return;
   if (feature.gate.ready) {
     if (autopilot) draft.merges.push({ type: 'merge', mission: feature.id });
     return;

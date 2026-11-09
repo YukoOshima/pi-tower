@@ -4,7 +4,9 @@ import {
   computeProgressKey,
   decideAutopilot,
   digest,
+  runningAgents,
   type AutopilotAction,
+  type AutopilotObjective,
   type AutopilotObjectiveStatus,
   type AutopilotSnapshot,
   type AutopilotWakeReason,
@@ -23,6 +25,7 @@ import {
   worker,
   working,
 } from './fixtures.ts';
+import { World, plannedFeature, type WorldScript } from './world.ts';
 
 interface Row {
   readonly name: string;
@@ -871,6 +874,16 @@ table('manual mode (autopilot=false)', [
   { name: 'exhausted attempts still wake', snap: snapshot({ settings: MANUAL, missions: [working('M1', { attempts: 3, worker: DEAD })] }), actions: [wakeOf('feature-attempts-exhausted', 'M1', '3')] },
   { name: 'merge blocks still wake', snap: snapshot({ settings: MANUAL, missions: [SCOPE_BLOCKED] }), actions: [wakeOf('merge-blocked', 'M1', 'tip-M1:out-of-scope')] },
   {
+    name: 'features of a milestone nobody activated still wake',
+    snap: snapshot({ settings: MANUAL, objective: { milestones: [PASSED_MS1, milestone('MS2', 2)] }, missions: [merged('M1'), { ...SCOPE_BLOCKED, id: 'M3', milestone: 'MS2', tip: 'tip-M3' }] }),
+    actions: [wakeOf('merge-blocked', 'M3', 'tip-M3:out-of-scope')],
+  },
+  {
+    name: 'contrast: with autopilot on, the milestone is activated before its features are touched',
+    snap: snapshot({ objective: { milestones: [PASSED_MS1, milestone('MS2', 2)] }, missions: [merged('M1'), { ...SCOPE_BLOCKED, id: 'M3', milestone: 'MS2', tip: 'tip-M3' }] }),
+    actions: [{ type: 'advance-milestone', milestone: 'MS2', from: 'MS1' }],
+  },
+  {
     name: 'exhausted validation rounds still block',
     snap: snapshot({
       settings: MANUAL,
@@ -911,5 +924,90 @@ describe('idempotency and purity', () => {
   it.each(ALL_ROWS)('$name: manual mode yields only wake, block and pause actions', ({ snap }) => {
     const manual = { ...snap, settings: { ...snap.settings, autopilot: false } };
     for (const action of decideAutopilot(manual).actions) expect(MANUAL_TYPES.has(action.type)).toBe(true);
+  });
+});
+
+describe('happy-path simulation: two milestones, parallel features, a failed validation and its fix', () => {
+  const objective: AutopilotObjective = {
+    id: 'O1',
+    status: 'executing',
+    startedAt: 1_000_000,
+    costUsd: 0,
+    acceptanceCommands: 1,
+    limits: { maxValidationRounds: 3, maxFeatureAttempts: 3 },
+    milestones: [
+      milestone('MS1', 1, { status: 'active' }),
+      milestone('MS2', 2, { validation: { scrutiny: true, userTesting: false, commands: 0 } }),
+    ],
+  };
+  const script: WorldScript = {
+    reviewVerdict: (planned, reviewNumber) => (planned.id === 'M2' && reviewNumber === 1 ? 'p1-1items' : 'clean'),
+    validationVerdict: (ms, kind, n) => (ms === 'MS1' && kind === 'user-testing' && n === 1 ? 'fail' : 'pass'),
+    plan: (ms, reason) =>
+      reason === 'validation-failed' ? [plannedFeature('M4', ms)] : [plannedFeature('M5', ms), plannedFeature('M6', ms)],
+  };
+  const world = new World(
+    objective,
+    [plannedFeature('M1', 'MS1'), plannedFeature('M2', 'MS1'), plannedFeature('M3', 'MS1', ['M1'])],
+    script,
+    3,
+  );
+  const ticks: string[][] = [];
+  const overCap: number[] = [];
+  for (let tick = 0; tick < 100 && world.objective.status === 'executing'; tick += 1) {
+    const decision = decideAutopilot(world.snapshot());
+    ticks.push(decision.actions.map(actionIdentity));
+    world.apply(decision);
+    if (runningAgents(world.snapshot()) > world.settings.maxRunningAgents) overCap.push(tick);
+    world.agentsAct();
+  }
+  const flat = ticks.flat();
+  const first = (prefix: string, after = -1): number =>
+    flat.findIndex((id, index) => index > after && id.startsWith(prefix));
+
+  it('completes the objective with every feature merged and nothing unexpected', () => {
+    expect(world.objective.status).toBe('completed');
+    expect(world.unexpected).toEqual([]);
+    expect(world.features.map((planned) => `${planned.id}:${planned.status}`)).toEqual(
+      ['M1', 'M2', 'M3', 'M4', 'M5', 'M6'].map((id) => `${id}:merged`),
+    );
+    expect(flat.filter((id) => id.startsWith('merge:'))).toHaveLength(6);
+  });
+
+  it('starts independent features in parallel and holds a dependent one back', () => {
+    expect(ticks[0]).toEqual(['spawn-worker:M1', 'spawn-worker:M2']);
+    expect(first('spawn-worker:M3')).toBeGreaterThan(first('merge:M1'));
+    expect(ticks.some((actions) => actions.includes('spawn-worker:M5') && actions.includes('spawn-worker:M6'))).toBe(true);
+  });
+
+  it('routes review findings back to the worker and rebases stale branches before merging', () => {
+    expect(first('resume-worker:resume-review-findings:M2:')).toBeGreaterThan(-1);
+    expect(first('rebase:M2')).toBeLessThan(first('merge:M2'));
+    expect(first('rebase:M6')).toBeLessThan(first('merge:M6'));
+  });
+
+  it('fails the first milestone validation, plans a fix, re-validates and advances', () => {
+    const validation = first('start-validation:MS1:');
+    const failure = first('wake-orchestrator:validation-failed:MS1:user-testing-r1', validation);
+    const fix = first('spawn-worker:M4', failure);
+    const revalidation = first('start-validation:MS1:', fix);
+    const advance = first('advance-milestone:MS2', revalidation);
+    const plan = first('wake-orchestrator:plan-milestone:MS2:', revalidation);
+    const finalValidation = first('start-validation:MS2:', plan);
+    const complete = first('complete-objective:O1', finalValidation);
+    expect([validation, failure, fix, revalidation, advance, plan, finalValidation, complete].every((index) => index >= 0)).toBe(true);
+    expect(advance).toBeLessThan(plan);
+    expect(flat[validation]).toMatch(/:scrutiny\+user-testing$/);
+    expect(flat[revalidation]).not.toBe(flat[validation]);
+    expect(flat[finalValidation]).toMatch(/:scrutiny\+commands$/);
+    expect(complete).toBe(flat.length - 1);
+  });
+
+  it('never exceeds maxRunningAgents, never stalls and never repeats an action on the next tick', () => {
+    expect(overCap).toEqual([]);
+    expect(flat.filter((id) => id.includes('stalled') || id.startsWith('block-objective'))).toEqual([]);
+    for (let tick = 1; tick < ticks.length; tick += 1) {
+      expect(ticks[tick]!.filter((id) => ticks[tick - 1]!.includes(id))).toEqual([]);
+    }
   });
 });
