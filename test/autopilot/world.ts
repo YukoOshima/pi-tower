@@ -128,6 +128,7 @@ export class World {
         ...(feature.workerName === undefined ? {} : { name: feature.workerName }),
         humanStopped: false,
         unreadFindings: feature.unreadFindings,
+        awaitingReply: false,
       },
       reviewRequestOnTip: feature.reviewRequested,
       reviewerRunning: feature.reviewerRunning,

@@ -363,6 +363,26 @@ table('continue nudge and worker-idle wake', [
     actions: [],
   },
   {
+    name: 'a worker awaiting the reply to its own message is neither nudged nor reported',
+    snap: snapshot({ missions: [{ ...STOPPED_SILENTLY, worker: { ...IDLE, awaitingReply: true } }] }),
+    actions: [],
+  },
+  {
+    name: 'a worker that asked after its nudge on this tip is not reported',
+    snap: snapshot({ missions: [{ ...STOPPED_SILENTLY, worker: { ...IDLE, awaitingReply: true } }], memory: { wakeKeys: [CONTINUE_KEY] } }),
+    actions: [],
+  },
+  {
+    name: 'manual mode does not report a worker awaiting a reply',
+    snap: snapshot({ settings: { autopilot: false }, missions: [{ ...STOPPED_SILENTLY, worker: { ...IDLE, awaitingReply: true } }] }),
+    actions: [],
+  },
+  {
+    name: 'a rebase conflict still resumes a worker awaiting a reply',
+    snap: snapshot({ missions: [{ ...CONFLICT, worker: { ...IDLE, awaitingReply: true } }] }),
+    actions: [{ type: 'resume-worker', mission: 'M1', worker: 'w-M1', reason: 'rebase-conflict', key: CONFLICT_RESUME_KEY }],
+  },
+  {
     name: 'a dead worker is respawned, not nudged',
     snap: snapshot({ missions: [{ ...STOPPED_SILENTLY, worker: DEAD }] }),
     actions: [{ type: 'respawn-worker', mission: 'M1', attempt: 2, previousWorker: 'w-M1' }],

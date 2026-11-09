@@ -114,6 +114,7 @@ function randomSnapshot(random: () => number): AutopilotSnapshot {
         ...(state === 'none' || chance(0.05) ? {} : { name: `w-${id}` }),
         humanStopped: chance(0.15),
         unreadFindings: chance(0.2),
+        awaitingReply: chance(0.2),
       }),
       reviewRequestOnTip: chance(0.3),
       reviewerRunning: chance(0.1),
@@ -145,6 +146,7 @@ function stoppedSilently(snap: AutopilotSnapshot, mission: AutopilotMission): bo
     mission.worker.state === 'idle' &&
     !mission.worker.humanStopped &&
     !mission.worker.unreadFindings &&
+    !mission.worker.awaitingReply &&
     !mission.rebaseConflict &&
     mission.blockers.length === 0
   );
@@ -211,6 +213,16 @@ describe('continue nudge invariants over random snapshots', () => {
         } else {
           expect(found).toEqual([]);
         }
+      }
+    }
+  });
+
+  it('never nudges or reports a worker awaiting the reply to its own message', () => {
+    for (const snap of SNAPSHOTS) {
+      for (const action of decideAutopilot(snap).actions) {
+        const id = nudgedMission(action);
+        if (id === undefined) continue;
+        expect(snap.missions.find((candidate) => candidate.id === id)!.worker.awaitingReply).toBe(false);
       }
     }
   });

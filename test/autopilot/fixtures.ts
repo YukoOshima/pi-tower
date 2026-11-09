@@ -17,7 +17,7 @@ export const NOW = 10_000_000;
 export const BASE = 'base-0';
 
 export function worker(overrides: Partial<AutopilotWorker> = {}): AutopilotWorker {
-  return { state: 'none', humanStopped: false, unreadFindings: false, ...overrides };
+  return { state: 'none', humanStopped: false, unreadFindings: false, awaitingReply: false, ...overrides };
 }
 
 export function feature(id: string, overrides: Partial<AutopilotMission> = {}): AutopilotMission {

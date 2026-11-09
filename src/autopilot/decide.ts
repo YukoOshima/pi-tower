@@ -314,7 +314,7 @@ function planResume(draft: Draft, feature: AutopilotMission): void {
 }
 
 function planContinue(draft: Draft, feature: AutopilotMission): void {
-  if (feature.blockers.length > 0) return;
+  if (feature.blockers.length > 0 || feature.worker.awaitingReply) return;
   const tip = feature.tip ?? '-';
   const key = dedupeKey('resume-continue', feature.id, tip);
   const worker = feature.worker.name;
@@ -328,7 +328,7 @@ function planContinue(draft: Draft, feature: AutopilotMission): void {
     'worker-idle',
     feature.id,
     tip,
-    `${feature.id}: worker ${worker ?? '-'} went idle on the active feature without TowerComplete, a blocker or a message${nudged ? ', again after the autopilot resumed it on this tip' : ''}`,
+    `${feature.id}: worker ${worker ?? '-'} is idle on the active feature without TowerComplete, a blocker or an unanswered message${nudged ? ', again after the autopilot resumed it on this tip' : ''}`,
   );
 }
 
