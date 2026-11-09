@@ -1,4 +1,5 @@
 import {
+  dedupeKey,
   digest,
   type AutopilotDecision,
   type AutopilotSnapshot,
@@ -50,6 +51,7 @@ import {
 import type { AutopilotRuntimeSettings } from './types.ts';
 
 const RECENT_ATTEMPTS = 3;
+const WORKER_TEXT_MAX_CHARS = 1_500;
 
 export function blockedNoticeKey(objective: Pick<TowerObjective, 'id' | 'blockedReason'>): string {
   return `blocked-notice:${objective.id}:${digest(objective.blockedReason ?? '')}`;
@@ -139,6 +141,57 @@ export function rebaseConflictResumePrompt(
     `rebase-conflict: the tower could not rebase your mission ${mission.id} onto ${base}${files.length > 0 ? ` — conflicts in ${files.join(', ')}` : ''}; the rebase was aborted and your worktree is back at its pre-rebase state.`,
     `Resolve it yourself as the blocker on your mission describes (TowerMission(id="${mission.id}")): run \`git rebase ${base}\`, fix the conflicts, \`git add\` the resolved files, continue with \`GIT_EDITOR=true git rebase --continue\`, re-run the tests, clear the blocker (TowerMission clear_blockers=true), then finish with TowerComplete so the moved tip gets a fresh review.`,
   ].join('\n');
+}
+
+export function continueResumePrompt(mission: Pick<TowerMission, 'id' | 'title' | 'branch' | 'kind'>): string {
+  return [
+    `continue: Read TowerInbox first — an answer may be waiting. Your mission ${mission.id} "${mission.title}" (branch ${mission.branch}) is still active, but you are idle without TowerComplete, a blocker or an unanswered message — a result or a question that is only in your final text reaches no one.`,
+    `Check where you stopped with TowerMission(id="${mission.id}"), keep working until one of these applies, and end your turn with it:`,
+    mission.kind === 'survey'
+      ? '1. The investigation is done → finish with TowerComplete(report=the full result).'
+      : '1. The work is done → run the tests, commit, and finish with TowerComplete(report) — the autopilot spawns a reviewer for the new tip.',
+    `2. Something only others can give stops you (access, a decision outside your scope, a broken environment) → report it with TowerMission(id="${mission.id}", blocker="...").`,
+    `3. The mission leaves substantive doubt about what to ${mission.kind === 'survey' ? 'investigate' : 'build'} → TowerSend(to="tower", subject="clarify-request", body=what needs pinning down), then end your turn; the answer comes back through your inbox.`,
+    'Never stop silently.',
+  ].join('\n');
+}
+
+function quotedTail(text: string, limit: number): string {
+  const trimmed = text.trim();
+  const tail = trimmed.length > limit ? `…${trimmed.slice(-limit)}` : trimmed;
+  return tail
+    .split('\n')
+    .map((line) => `> ${line}`)
+    .join('\n');
+}
+
+export function workerIdleWake(input: {
+  readonly mission: Pick<TowerMission, 'id' | 'title' | 'branch' | 'milestone'>;
+  readonly worker: string;
+  readonly lastText?: string;
+  readonly autopilot: boolean;
+  readonly nudged: boolean;
+}): string {
+  const { mission, worker } = input;
+  const details = [...(mission.milestone === undefined ? [] : [`milestone ${mission.milestone}`]), `branch ${mission.branch}`];
+  const lastText = input.lastText?.trim() ?? '';
+  const situation = input.nudged
+    ? ' A worker of this feature was already resumed once on this tip with a reminder to finish, report a blocker or ask — the autopilot does not resume the feature again until its tip moves.'
+    : input.autopilot
+      ? ''
+      : ' With the autopilot off, nobody resumes it unless you do.';
+  return [
+    `worker-idle: worker ${worker} on feature ${mission.id} "${mission.title}" (${details.join(', ')}) is idle without TowerComplete, a blocker or an unanswered message, and the feature is still active.${situation}`,
+    lastText.length > 0
+      ? `Its last message:\n${quotedTail(lastText, WORKER_TEXT_MAX_CHARS)}`
+      : `Its last message is not available here — read it with TowerTaskOutput(agent="${worker}").`,
+    [
+      'Decide what it needs:',
+      `- It asked a question or waits for a decision → answer it with TowerSend(to="${worker}", ...) and resume it with TowerResume(agent="${worker}", prompt="...") — an idle worker reads its inbox only when resumed. If only the human can decide, ask the human; in a headless run decide yourself and record the decision with TowerObjective(action="update", note).`,
+      `- It is stuck, confused or going in circles → reassign the feature: spawn a fresh worker with TowerSpawn(kind="worker", mission_id="${mission.id}") and instructions that name the problem — or, when the feature itself is ill-posed, abandon it with TowerMission(id="${mission.id}", status="abandoned") and re-plan it with TowerPlan.`,
+      `- Only the human can unblock it → record a blocker with TowerMission(id="${mission.id}", blocker="...") or block the objective with TowerObjective(action="block", reason).`,
+    ].join('\n'),
+  ].join('\n\n');
 }
 
 export function workerOutcome(world: AutopilotWorld, entry: TowerRosterEntry | undefined): string {
@@ -370,6 +423,18 @@ export function orchestratorWakeText(
         maxStallWakes: world.settings.maxStallWakes,
         ...(milestone === undefined ? {} : { milestone }),
         openFeatures: objectiveMissions(state).filter(isOpenMission),
+      });
+    }
+    case 'worker-idle': {
+      if (mission === undefined) return fallbackWake(wake);
+      const worker = missionWorkerEntries(state, mission).at(-1);
+      const lastText = worker === undefined ? undefined : world.agent(worker.agentId)?.lastAssistantText;
+      return workerIdleWake({
+        mission,
+        worker: worker?.name ?? mission.owner ?? 'the worker',
+        ...(lastText === undefined ? {} : { lastText }),
+        autopilot: snapshot.settings.autopilot,
+        nudged: snapshot.memory.wakeKeys.includes(dedupeKey('resume-continue', mission.id, wake.revision)),
       });
     }
   }

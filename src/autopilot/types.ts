@@ -103,6 +103,12 @@ export interface AutopilotWorker {
   readonly humanStopped: boolean;
   /** The worker has unread review findings (a non-clean review-result) in its inbox. */
   readonly unreadFindings: boolean;
+  /**
+   * The worker sent the tower a message that is not an autopilot-handled mechanical action (e.g. a
+   * clarify-request) after its spawn and after the latest message addressed to it: that message
+   * already woke the orchestrator, and the worker waits for its reply.
+   */
+  readonly awaitingReply: boolean;
 }
 
 export interface AutopilotReviewVerdict {
@@ -209,9 +215,16 @@ export type AutopilotWakeReason =
   | 'merge-blocked'
   | 'review-stuck'
   | 'validation-stuck'
-  | 'stalled';
+  | 'stalled'
+  | 'worker-idle';
 
-export type AutopilotResumeReason = 'review-findings' | 'rebase-conflict';
+/**
+ * `continue`: the worker of an active feature is idle without TowerComplete, a blocker or an
+ * unanswered message (not awaitingReply), with no unread findings and no rebase conflict. It is
+ * resumed once per (mission, tip); idle again on that tip — or at once in manual mode — it becomes a
+ * 'worker-idle' wake instead.
+ */
+export type AutopilotResumeReason = 'review-findings' | 'rebase-conflict' | 'continue';
 
 export type AutopilotBlockReason = 'stalled' | 'milestone-blocked';
 
@@ -227,7 +240,11 @@ export interface AutopilotResumeWorker {
   readonly mission: string;
   readonly worker: string;
   readonly reason: AutopilotResumeReason;
-  /** Dedupe key `resume-${reason}:${mission}:${revision}`; record it with the sent wake keys. */
+  /**
+   * Dedupe key `resume-${reason}:${mission}:${revision}`; record it with the sent wake keys. The
+   * revision is `${tip}#${reviewCount}` for review-findings, `${tip}@${baseTip}` for rebase-conflict
+   * and `${tip}` for continue.
+   */
   readonly key: string;
 }
 

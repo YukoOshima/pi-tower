@@ -36,6 +36,7 @@ import {
   type TowerStore,
   type TowerValidationSettings,
 } from '../../protocol/index.ts';
+import { AUTOPILOT_INBOX_ACTIONS } from '../autopilotEvents.ts';
 import { isHumanStopReason } from '../constants.ts';
 import type {
   AutopilotAgentObservation,
@@ -306,14 +307,29 @@ export function stoppedByHuman(
 
 function autopilotWorker(world: AutopilotWorld, mission: TowerMission): AutopilotWorker {
   const entry = missionWorkerEntries(world.state, mission).at(-1);
-  if (entry === undefined) return { state: 'none', humanStopped: false, unreadFindings: false };
+  if (entry === undefined) return { state: 'none', humanStopped: false, unreadFindings: false, awaitingReply: false };
   const observation = world.agent(entry.agentId);
   return {
     state: workerStateOf(entry, observation),
     name: entry.name,
     humanStopped: stoppedByHuman(entry, observation),
     unreadFindings: hasUnreadFindings(world.inbox, entry, mission),
+    awaitingReply: isAwaitingReply(world.inbox, entry),
   };
+}
+
+function isAwaitingReply(inbox: readonly TowerInboxItem[], entry: TowerRosterEntry): boolean {
+  let since = entry.spawnedAt;
+  for (const item of inbox) {
+    if (item.to === entry.name && item.sentAt > since) since = item.sentAt;
+  }
+  return inbox.some(
+    (item) =>
+      item.from === entry.name &&
+      item.to === TOWER_NAME &&
+      (item.action === undefined || !AUTOPILOT_INBOX_ACTIONS.includes(item.action)) &&
+      item.sentAt > since,
+  );
 }
 
 function hasUnreadFindings(

@@ -297,7 +297,11 @@ function planResume(draft: Draft, feature: AutopilotMission): void {
   const { snapshot } = draft;
   const tip = feature.tip ?? '-';
   const conflict = feature.rebaseConflict;
-  if (!conflict && (feature.status !== 'active' || !feature.worker.unreadFindings)) return;
+  if (!conflict && feature.status !== 'active') return;
+  if (!conflict && !feature.worker.unreadFindings) {
+    planContinue(draft, feature);
+    return;
+  }
   const reason: AutopilotResumeReason = conflict ? 'rebase-conflict' : 'review-findings';
   const revision = conflict ? `${tip}@${snapshot.baseTip}` : `${tip}#${String(snapshot.reviewCount)}`;
   const key = dedupeKey(`resume-${reason}`, feature.id, revision);
@@ -307,6 +311,26 @@ function planResume(draft: Draft, feature: AutopilotMission): void {
     return;
   }
   draft.resumes.push({ type: 'resume-worker', mission: feature.id, worker, reason, key });
+}
+
+function planContinue(draft: Draft, feature: AutopilotMission): void {
+  if (feature.blockers.length > 0 || feature.worker.awaitingReply) return;
+  if (draft.rebases.some((rebase) => rebase.mission === feature.id)) return;
+  const tip = feature.tip ?? '-';
+  const key = dedupeKey('resume-continue', feature.id, tip);
+  const worker = feature.worker.name;
+  const nudged = draft.sent.has(key);
+  if (draft.snapshot.settings.autopilot && worker !== undefined && !nudged) {
+    draft.resumes.push({ type: 'resume-worker', mission: feature.id, worker, reason: 'continue', key });
+    return;
+  }
+  wake(
+    draft,
+    'worker-idle',
+    feature.id,
+    tip,
+    `${feature.id}: worker ${worker ?? '-'} is idle on the active feature without TowerComplete, a blocker or an unanswered message${nudged ? ', and a worker of this feature was already resumed once on this tip' : ''}`,
+  );
 }
 
 function wakeRebaseConflict(draft: Draft, feature: AutopilotMission): void {

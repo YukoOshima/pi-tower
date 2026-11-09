@@ -1,3 +1,5 @@
+import { readdir } from 'node:fs/promises';
+
 import {
   decideAutopilot,
   digest,
@@ -7,8 +9,11 @@ import {
   type AutopilotValidatorRun,
 } from '../../autopilot/index.ts';
 import {
+  VALIDATION_WORKTREE_PREFIX,
+  WORKTREES_DIR,
   branchTip,
   sortedMilestones,
+  validationWorktreeName,
   type TowerObjective,
   type TowerState,
   type TowerStore,
@@ -53,6 +58,8 @@ import type {
 
 export const AUTOPILOT_ACTOR = 'autopilot';
 export const REFUSED_ACTION_WAKE_THRESHOLD = 3;
+
+const COMMANDS_WORKTREE_ROUND = /-commands-r(\d+)$/;
 
 export interface AutopilotRunnerDeps {
   readonly observations: AutopilotObservations;
@@ -159,6 +166,7 @@ export class AutopilotRunner {
   private readonly refusals = new Map<string, Refusal>();
   private readonly refusedWakeKeys = new Set<string>();
   private readonly noticeKeys = new Set<string>();
+  private sweep: Promise<void> = Promise.resolve();
   private cost: { readonly objectiveId: string; readonly total: number } | undefined;
   private planning: { readonly objectiveId: string; readonly key: string; readonly since: number } | undefined;
 
@@ -180,6 +188,7 @@ export class AutopilotRunner {
     this.timer = this.timers.setInterval(() => {
       void this.tick('watchdog');
     }, this.observations.settings().watchdogIntervalMs);
+    this.sweepOrphanCommandWorktrees();
   }
 
   stop(): void {
@@ -634,6 +643,7 @@ export class AutopilotRunner {
     const run = async (): Promise<void> => {
       try {
         await validatorsStarted;
+        await this.sweep;
         if (controller.signal.aborted || !this.active) return;
         const outcome = await runCommands(store, {
           milestoneId,
@@ -677,5 +687,45 @@ export class AutopilotRunner {
       }
     };
     this.track(run());
+  }
+
+  private sweepOrphanCommandWorktrees(): void {
+    let store: TowerStore;
+    try {
+      store = this.observations.store();
+    } catch (error) {
+      this.log?.warn('tower autopilot could not look for orphan commands-validation worktrees', { error: errorMessage(error) });
+      return;
+    }
+    const live = [...this.commandRuns.keys()];
+    this.sweep = this.sweep.then(() => this.removeOrphanCommandWorktrees(store, live));
+    this.track(this.sweep);
+  }
+
+  private async removeOrphanCommandWorktrees(store: TowerStore, liveMilestones: readonly string[]): Promise<void> {
+    let names: string[];
+    try {
+      names = await readdir(store.abs(WORKTREES_DIR));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        this.log?.warn('tower autopilot could not list the validation worktrees', { error: errorMessage(error) });
+      }
+      return;
+    }
+    for (const name of names.toSorted()) {
+      const round = name.startsWith(VALIDATION_WORKTREE_PREFIX) ? COMMANDS_WORKTREE_ROUND.exec(name)?.[1] : undefined;
+      if (round === undefined) continue;
+      if (liveMilestones.some((milestone) => validationWorktreeName(milestone, 'commands', Number(round)) === name)) continue;
+      try {
+        if (await store.removeValidationWorktree(name)) {
+          this.log?.info('tower autopilot removed an orphan commands-validation worktree', { worktree: name });
+        }
+      } catch (error) {
+        this.log?.warn('tower autopilot could not remove an orphan commands-validation worktree', {
+          worktree: name,
+          error: errorMessage(error),
+        });
+      }
+    }
   }
 }

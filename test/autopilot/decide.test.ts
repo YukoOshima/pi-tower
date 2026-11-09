@@ -278,6 +278,13 @@ const CONFLICT = feature('M1', {
 });
 const CONFLICT_RESUME_KEY = `resume-rebase-conflict:M1:tip-M1@${BASE}`;
 const FINDINGS = working('M1', { worker: worker({ state: 'idle', name: 'w-M1', unreadFindings: true }) });
+const STOPPED_SILENTLY = working('M1', { worker: IDLE });
+const CONTINUE_KEY = 'resume-continue:M1:tip-M1';
+const NUDGED = [CONTINUE_KEY, 'worker-idle:M1:tip-M1'];
+
+function nudge(mission: string, tip: string, name = 'w-M1'): AutopilotAction {
+  return { type: 'resume-worker', mission, worker: name, reason: 'continue', key: `resume-continue:${mission}:${tip}` };
+}
 
 table('resume-worker', [
   {
@@ -295,7 +302,11 @@ table('resume-worker', [
     snap: snapshot({ reviewCount: 1, missions: [FINDINGS], memory: { wakeKeys: ['resume-review-findings:M1:tip-M1#0'] } }),
     actions: [{ type: 'resume-worker', mission: 'M1', worker: 'w-M1', reason: 'review-findings', key: 'resume-review-findings:M1:tip-M1#1' }],
   },
-  { name: 'an idle worker without findings is left waiting', snap: snapshot({ missions: [working('M1', { worker: IDLE })] }), actions: [] },
+  {
+    name: 'a findings resume left unanswered with the findings still unread is no continue nudge',
+    snap: snapshot({ missions: [FINDINGS], memory: { wakeKeys: ['resume-review-findings:M1:tip-M1#0', CONTINUE_KEY] } }),
+    actions: [],
+  },
   {
     name: 'a human-stopped worker is never resumed',
     snap: snapshot({ missions: [{ ...FINDINGS, worker: { ...FINDINGS.worker, humanStopped: true } }] }),
@@ -320,6 +331,126 @@ table('resume-worker', [
     name: 'a conflict on a dead worker respawns it',
     snap: snapshot({ missions: [{ ...CONFLICT, worker: DEAD }] }),
     actions: [{ type: 'respawn-worker', mission: 'M1', attempt: 2, previousWorker: 'w-M1' }],
+  },
+]);
+
+table('continue nudge and worker-idle wake', [
+  {
+    name: 'an idle worker that stopped silently on an active feature is resumed to continue',
+    snap: snapshot({ missions: [STOPPED_SILENTLY] }),
+    actions: [nudge('M1', 'tip-M1')],
+  },
+  {
+    name: 'idle again on the same tip after the nudge wakes the orchestrator instead',
+    snap: snapshot({ missions: [STOPPED_SILENTLY], memory: { wakeKeys: [CONTINUE_KEY] } }),
+    actions: [wakeOf('worker-idle', 'M1', 'tip-M1')],
+  },
+  { name: 'the worker-idle wake is sent once per tip', snap: snapshot({ missions: [STOPPED_SILENTLY], memory: { wakeKeys: NUDGED } }), actions: [] },
+  {
+    name: 'a respawned worker idle on an already-nudged tip is reported as a worker of the feature, not as the one resumed',
+    snap: snapshot({ missions: [{ ...STOPPED_SILENTLY, attempts: 2, worker: worker({ state: 'idle', name: 'w-M1-2' }) }], memory: { wakeKeys: [CONTINUE_KEY] } }),
+    actions: [
+      expect.objectContaining({
+        type: 'wake-orchestrator',
+        key: 'worker-idle:M1:tip-M1',
+        detail: 'M1: worker w-M1-2 is idle on the active feature without TowerComplete, a blocker or an unanswered message, and a worker of this feature was already resumed once on this tip',
+      }),
+    ],
+  },
+  {
+    name: 'a new tip re-arms the nudge',
+    snap: snapshot({ missions: [{ ...STOPPED_SILENTLY, tip: 'tip-M1b' }], memory: { wakeKeys: NUDGED } }),
+    actions: [nudge('M1', 'tip-M1b')],
+  },
+  {
+    name: 'a feature without a branch tip is nudged on "-"',
+    snap: snapshot({ missions: [{ ...STOPPED_SILENTLY, tip: undefined }] }),
+    actions: [nudge('M1', '-')],
+  },
+  { name: 'a running worker is never nudged', snap: snapshot({ missions: [working('M1')] }), actions: [] },
+  {
+    name: 'a human-stopped worker is neither nudged nor reported',
+    snap: snapshot({ missions: [{ ...STOPPED_SILENTLY, worker: { ...IDLE, humanStopped: true } }] }),
+    actions: [],
+  },
+  {
+    name: 'a worker awaiting the reply to its own message is neither nudged nor reported',
+    snap: snapshot({ missions: [{ ...STOPPED_SILENTLY, worker: { ...IDLE, awaitingReply: true } }] }),
+    actions: [],
+  },
+  {
+    name: 'a worker that asked after its nudge on this tip is not reported',
+    snap: snapshot({ missions: [{ ...STOPPED_SILENTLY, worker: { ...IDLE, awaitingReply: true } }], memory: { wakeKeys: [CONTINUE_KEY] } }),
+    actions: [],
+  },
+  {
+    name: 'manual mode does not report a worker awaiting a reply',
+    snap: snapshot({ settings: { autopilot: false }, missions: [{ ...STOPPED_SILENTLY, worker: { ...IDLE, awaitingReply: true } }] }),
+    actions: [],
+  },
+  {
+    name: 'a rebase conflict still resumes a worker awaiting a reply',
+    snap: snapshot({ missions: [{ ...CONFLICT, worker: { ...IDLE, awaitingReply: true } }] }),
+    actions: [{ type: 'resume-worker', mission: 'M1', worker: 'w-M1', reason: 'rebase-conflict', key: CONFLICT_RESUME_KEY }],
+  },
+  {
+    name: 'a feature rebased in this tick waits for the next tick and its new tip',
+    snap: snapshot({ missions: [{ ...STOPPED_SILENTLY, gate: { ready: false, blocks: ['not-completed', 'stale-base'] } }] }),
+    actions: [rebase('M1')],
+  },
+  {
+    name: 'a dead worker is respawned, not nudged',
+    snap: snapshot({ missions: [{ ...STOPPED_SILENTLY, worker: DEAD }] }),
+    actions: [{ type: 'respawn-worker', mission: 'M1', attempt: 2, previousWorker: 'w-M1' }],
+  },
+  {
+    name: 'an active feature that still lists a blocker gets the blocker wake only',
+    snap: snapshot({ missions: [{ ...STOPPED_SILENTLY, blockers: ['need API key'] }] }),
+    actions: [wakeOf('blocker', 'M1', digest('need API key'))],
+  },
+  {
+    name: 'a blocked feature is not nudged',
+    snap: snapshot({ missions: [{ ...STOPPED_SILENTLY, status: 'blocked', blockers: ['need API key'] }], memory: { wakeKeys: [`blocker:M1:${digest('need API key')}`] } }),
+    actions: [],
+  },
+  { name: 'a completed feature is not nudged', snap: snapshot({ missions: [awaitingReview('M1', { reviewerRunning: true })] }), actions: [] },
+  { name: 'a planned feature is not nudged', snap: snapshot({ missions: [{ ...STOPPED_SILENTLY, status: 'planned' }] }), actions: [] },
+  {
+    name: 'missions outside the objective and features of a later milestone are never nudged',
+    snap: snapshot({
+      missions: [
+        working('M1'),
+        { ...STOPPED_SILENTLY, id: 'M5', tip: 'tip-M5', milestone: 'MS2' },
+        { ...STOPPED_SILENTLY, id: 'M7', tip: 'tip-M7', milestone: undefined },
+        { ...STOPPED_SILENTLY, id: 'M8', tip: 'tip-M8', milestone: 'MS9' },
+      ],
+    }),
+    actions: [],
+  },
+  {
+    name: 'a feature of the pending milestone waits for its activation',
+    snap: snapshot({ objective: { milestones: [milestone('MS1', 1, { status: 'passed' }), milestone('MS2', 2)] }, missions: [{ ...STOPPED_SILENTLY, milestone: 'MS2' }] }),
+    actions: [{ type: 'advance-milestone', milestone: 'MS2', from: 'MS1' }],
+  },
+  {
+    name: 'without a free agent slot the nudge waits and nothing wakes',
+    snap: snapshot({ settings: { maxRunningAgents: 1 }, missions: [STOPPED_SILENTLY, working('M2')] }),
+    actions: [],
+  },
+  {
+    name: 'a worker the snapshot cannot name is reported instead of resumed',
+    snap: snapshot({ missions: [{ ...STOPPED_SILENTLY, worker: worker({ state: 'idle' }) }] }),
+    actions: [wakeOf('worker-idle', 'M1', 'tip-M1')],
+  },
+  {
+    name: 'manual mode wakes the orchestrator at once instead of resuming',
+    snap: snapshot({ settings: { autopilot: false }, missions: [STOPPED_SILENTLY] }),
+    actions: [wakeOf('worker-idle', 'M1', 'tip-M1')],
+  },
+  {
+    name: 'manual mode wakes once per tip',
+    snap: snapshot({ settings: { autopilot: false }, missions: [STOPPED_SILENTLY], memory: { wakeKeys: ['worker-idle:M1:tip-M1'] } }),
+    actions: [],
   },
 ]);
 
@@ -369,6 +500,7 @@ const EVERY_MECHANIC = [
   working('M5', { worker: worker({ state: 'dead', name: 'w-M5' }) }),
   feature('M6'),
   { ...CONFLICT, id: 'M7', tip: 'tip-M7' },
+  { ...STOPPED_SILENTLY, id: 'M8', tip: 'tip-M8' },
 ];
 
 table('slot priority and output order', [
@@ -391,6 +523,7 @@ table('slot priority and output order', [
       { type: 'respawn-worker', mission: 'M5', attempt: 2, previousWorker: 'w-M5' },
       spawn('M6'),
       { type: 'resume-worker', mission: 'M7', worker: 'w-M1', reason: 'rebase-conflict', key: `resume-rebase-conflict:M7:tip-M7@${BASE}` },
+      nudge('M8', 'tip-M8'),
     ],
   },
 ]);
@@ -911,11 +1044,11 @@ function settled(
   };
 }
 
-const QUIET = snapshot({ missions: [working('M1', { worker: IDLE })] });
+const QUIET = snapshot({ missions: [STOPPED_SILENTLY], memory: { wakeKeys: NUDGED } });
 const QUIET_KEY = computeProgressKey(QUIET);
-const MANUAL_PENDING = snapshot({ settings: { autopilot: false }, missions: [working('M1', { worker: IDLE }), feature('M2')] });
+const MANUAL_PENDING = snapshot({ settings: { autopilot: false }, missions: [STOPPED_SILENTLY, feature('M2')], memory: { wakeKeys: NUDGED } });
 
-const DUE = snapshot({ missions: [working('M1', { worker: IDLE }), feature('M2')] });
+const DUE = snapshot({ missions: [STOPPED_SILENTLY, feature('M2')], memory: { wakeKeys: NUDGED } });
 const DUE_KEY = computeProgressKey(DUE);
 
 function stallRevision(key: string, n: number, since: number): string {
@@ -951,14 +1084,14 @@ table('stall watchdog', [
   { name: 'the stalled block replaces the due actions', snap: settled(DUE, 180_000, { stallWakes: 3 }), actions: [blockOf('stalled')] },
   {
     name: 'a stall wake already sent is not resent',
-    snap: settled(QUIET, 180_000, { wakeKeys: [`stalled:O1:${stallRevision(QUIET_KEY, 1, NOW - 180_000)}`] }),
+    snap: settled(QUIET, 180_000, { wakeKeys: [...NUDGED, `stalled:O1:${stallRevision(QUIET_KEY, 1, NOW - 180_000)}`] }),
     actions: [],
   },
   {
     name: 'resuming from a stalled block re-arms the stall wakes',
     snap: settled(QUIET, 180_000, {
       stallWakes: 0,
-      wakeKeys: [1, 2, 3].map((n) => `stalled:O1:${stallRevision(QUIET_KEY, n, NOW - 1_000_000 + n * 180_000)}`),
+      wakeKeys: [...NUDGED, ...[1, 2, 3].map((n) => `stalled:O1:${stallRevision(QUIET_KEY, n, NOW - 1_000_000 + n * 180_000)}`)],
     }),
     actions: [wakeOf('stalled', 'O1', stallRevision(QUIET_KEY, 1, NOW - 180_000))],
   },
@@ -982,7 +1115,7 @@ describe('stall bookkeeping', () => {
     { name: 'a stall wake restarts the clock and counts', snap: settled(QUIET, 200_000), stall: { progressAt: NOW, idleMs: 200_000, stalled: true, stallWakes: 1 } },
     {
       name: 'a suppressed stall wake still counts as sent',
-      snap: settled(QUIET, 200_000, { wakeKeys: [`stalled:O1:${stallRevision(QUIET_KEY, 1, NOW - 200_000)}`] }),
+      snap: settled(QUIET, 200_000, { wakeKeys: [...NUDGED, `stalled:O1:${stallRevision(QUIET_KEY, 1, NOW - 200_000)}`] }),
       stall: { progressAt: NOW, idleMs: 200_000, stalled: true, stallWakes: 1 },
     },
     { name: 'a due action does not restart the clock', snap: settled(DUE, 100_000), stall: { progressAt: NOW - 100_000, idleMs: 100_000, stalled: false, stallWakes: 0 } },
@@ -1171,7 +1304,7 @@ table('manual mode (autopilot=false)', [
   {
     name: 'every due feature-execution action is left to the orchestrator',
     snap: snapshot({ settings: { ...MANUAL, maxRunningAgents: 8 }, missions: EVERY_MECHANIC }),
-    actions: [wakeOf('rebase-conflict', 'M7', `tip-M7@${BASE}`)],
+    actions: [wakeOf('rebase-conflict', 'M7', `tip-M7@${BASE}`), wakeOf('worker-idle', 'M8', 'tip-M8')],
   },
   {
     name: 'a pending milestone is still activated, and an empty one asks for its plan',

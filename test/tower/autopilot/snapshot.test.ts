@@ -287,7 +287,7 @@ describe('buildAutopilotSnapshot — workers', () => {
         agents: observation === undefined ? {} : { 'id-w1': observation },
       }),
     );
-    expect(snap.missions[0]!.worker).toEqual({ state, name: 'w1', humanStopped: human ?? false, unreadFindings: false });
+    expect(snap.missions[0]!.worker).toEqual({ state, name: 'w1', humanStopped: human ?? false, unreadFindings: false, awaitingReply: false });
   });
 
   it('reads a human stop from the roster death record after the runtime forgot the agent', () => {
@@ -307,7 +307,7 @@ describe('buildAutopilotSnapshot — workers', () => {
       }),
     );
     expect(snap.missions[0]!.worker).toMatchObject({ state: 'running', name: 'w-new' });
-    expect(snap.missions[1]!.worker).toEqual({ state: 'none', humanStopped: false, unreadFindings: false });
+    expect(snap.missions[1]!.worker).toEqual({ state: 'none', humanStopped: false, unreadFindings: false, awaitingReply: false });
     expect(snap.missions[1]!.attempts).toBe(0);
   });
 
@@ -321,6 +321,24 @@ describe('buildAutopilotSnapshot — workers', () => {
     expect(build(agent('w1', { missionId: 'M1', lastInboxReadAt: iso(20_000) }))).toBe(false);
     expect(build(agent('w1', { missionId: 'M1', inboxAckIds: ['f1'] }))).toBe(false);
     expect(build(agent('w2', { missionId: 'M1' }))).toBe(false);
+  });
+
+  it('flags a worker awaiting the reply to its own message until a message reaches it', () => {
+    const ask = message({ from: 'w1', to: 'tower', subject: 'clarify-request', sentAt: iso(10_000) });
+    const build = (inbox: TowerInboxItem[], entry = agent('w1', { missionId: 'M1' })) =>
+      buildAutopilotSnapshot(
+        world({ state: towerState({ missions: [mission('M1')], roster: { agents: [entry] } }), inbox }),
+      ).missions[0]!.worker.awaitingReply;
+    expect(build([ask])).toBe(true);
+    expect(build([ask, message({ from: 'w1', to: 'tower', subject: 'progress', sentAt: iso(12_000) })])).toBe(true);
+    expect(build([message({ from: 'tower', to: 'w1', subject: 'note', sentAt: iso(5_000) }), ask])).toBe(true);
+    expect(build([ask, message({ from: 'tower', to: 'w1', subject: 'answer', sentAt: iso(20_000) })])).toBe(false);
+    expect(build([ask, message({ from: 'r1', to: 'w1', action: 'review-result', scope: 'M1', sentAt: iso(20_000) })])).toBe(false);
+    expect(build([message({ from: 'w1', to: 'tower', action: 'complete', subject: 'review-request', sentAt: iso(10_000) })])).toBe(false);
+    expect(build([message({ from: 'w1', to: 'all', subject: 'heads-up', sentAt: iso(10_000) })])).toBe(false);
+    expect(build([message({ from: 'w1', to: 'r1', subject: 'question', sentAt: iso(10_000) })])).toBe(false);
+    expect(build([ask], agent('w1', { missionId: 'M1', spawnedAt: iso(30_000) }))).toBe(false);
+    expect(build([ask], agent('w2', { missionId: 'M1' }))).toBe(false);
   });
 });
 

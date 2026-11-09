@@ -3,6 +3,7 @@ import type {
   AutopilotBlockObjective,
   AutopilotDecision,
   AutopilotPauseObjective,
+  AutopilotResumeReason,
   AutopilotSnapshot,
   AutopilotValidatorRun,
 } from '../../autopilot/index.ts';
@@ -22,6 +23,7 @@ import {
   blockedNoticeText,
   completedNoticeKey,
   completedNoticeText,
+  continueResumePrompt,
   orchestratorWakeText,
   rebaseConflictResumePrompt,
   respawnReason,
@@ -171,6 +173,17 @@ function requireMission(state: TowerState, id: string): TowerMission {
   return mission;
 }
 
+function resumePrompt(reason: AutopilotResumeReason, mission: TowerMission, base: string): string {
+  switch (reason) {
+    case 'review-findings':
+      return reviewFindingsResumePrompt(mission);
+    case 'rebase-conflict':
+      return rebaseConflictResumePrompt(mission, base);
+    case 'continue':
+      return continueResumePrompt(mission);
+  }
+}
+
 function launched(execution: AutopilotExecution, launch: AutopilotLaunch): AutopilotActionOutcome {
   execution.launch(launch);
   return { status: 'launched', detail: `name=${launch.agent}` };
@@ -222,10 +235,7 @@ async function execute(execution: AutopilotExecution, action: AutopilotAction): 
     }
     case 'resume-worker': {
       const mission = requireMission(state, action.mission);
-      const prompt =
-        action.reason === 'rebase-conflict'
-          ? rebaseConflictResumePrompt(mission, state.base)
-          : reviewFindingsResumePrompt(mission);
+      const prompt = resumePrompt(action.reason, mission, state.base);
       return launched(execution, {
         identity,
         agent: action.worker,

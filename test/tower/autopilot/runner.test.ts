@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs';
-import { readFile, rm } from 'node:fs/promises';
+import { mkdir, readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -11,6 +11,10 @@ import {
   type TowerState,
   type TowerStore,
 } from '../../../src/protocol/index.ts';
+import type {
+  CommandsValidationOutcome,
+  CommandsValidationRequest,
+} from '../../../src/tower/autopilot/commandsRunner.ts';
 import {
   reviewerAgentName,
   validatorAgentName,
@@ -74,8 +78,8 @@ async function draft(
   if (options.request !== false) await store.requestObjectiveApproval();
 }
 
-function setup(settings: Partial<AutopilotRuntimeSettings> = {}, start = true) {
-  const tower = new FakeTower(store, QUIET, settings);
+function setup(settings: Partial<AutopilotRuntimeSettings> = {}, start = true, script: SimScript = QUIET) {
+  const tower = new FakeTower(store, script, settings);
   const timers = new FakeTimers();
   const log = new RecordingLog();
   const runner = new AutopilotRunner({ observations: tower, effects: tower, timers, log });
@@ -105,15 +109,16 @@ describe('AutopilotRunner lifecycle', () => {
     await settle(runner);
     expect(loads()).toBe(0);
     runner.start();
+    expect(loads()).toBe(1);
     expect(timers.intervalMs).toBe(12_345);
     timers.fire();
     await runner.whenIdle();
-    expect(loads()).toBe(1);
+    expect(loads()).toBe(2);
     runner.stop();
     expect(timers.cleared).toBe(1);
     timers.fire();
     await settle(runner);
-    expect(loads()).toBe(1);
+    expect(loads()).toBe(2);
   });
 
   it('serializes ticks and coalesces the ones that arrive while a tick runs', async () => {
@@ -326,6 +331,98 @@ describe('executing', () => {
     await settle(runner);
     expect(tower.wakes).toHaveLength(1);
     expect((await objectiveOf()).autopilot?.wakeKeys).toContain('feature-attempts-exhausted:M1:1');
+  });
+
+  it('resumes a worker that stopped silently to continue, then wakes the orchestrator once with its last message', async () => {
+    await draft();
+    await store.approveObjective('human');
+    const question = 'Should core A store the value as JSON?\nI stop here until someone decides.';
+    const { runner, tower } = setup({}, true, { ...QUIET, stopsSilently: () => question });
+    const prompts: string[] = [];
+    const resume = tower.resumeWorker.bind(tower);
+    tower.resumeWorker = async (name, prompt) => {
+      prompts.push(prompt);
+      return resume(name, prompt);
+    };
+    await settle(runner);
+    await tower.actAll();
+    await settle(runner);
+    expect(tower.calls).toEqual(['spawnWorker M1 ap-w-M1-1', 'resumeWorker ap-w-M1-1 continue']);
+    expect(prompts[0]).toMatch(
+      /^continue: Read TowerInbox first — an answer may be waiting\. Your mission M1 "Core A" \(branch feat\/core-a\) is still active, but you are idle without TowerComplete, a blocker or an unanswered message/,
+    );
+    expect(prompts[0]).toContain('finish with TowerComplete(report)');
+    expect(prompts[0]).toContain('TowerMission(id="M1", blocker="...")');
+    expect(prompts[0]).toContain('TowerSend(to="tower", subject="clarify-request"');
+    expect(tower.wakes).toEqual([]);
+
+    await tower.actAll();
+    await settle(runner);
+    expect(tower.wakes).toHaveLength(1);
+    expect(tower.wakes[0]).toMatch(
+      /^worker-idle: worker ap-w-M1-1 on feature M1 "Core A" \(milestone MS1, branch feat\/core-a\) is idle without TowerComplete, a blocker or an unanswered message, and the feature is still active\. A worker of this feature was already resumed once on this tip/,
+    );
+    expect(tower.wakes[0]).toContain('Its last message:\n> Should core A store the value as JSON?\n> I stop here until someone decides.');
+    expect(tower.wakes[0]).toContain('TowerSend(to="ap-w-M1-1", ...) and resume it with TowerResume(agent="ap-w-M1-1", prompt="...")');
+    expect(tower.wakes[0]).toContain('TowerSpawn(kind="worker", mission_id="M1")');
+    expect(tower.wakes[0]).toContain('TowerObjective(action="block", reason)');
+
+    await tower.actAll();
+    await settle(runner);
+    await settle(runner);
+    expect(tower.calls.filter((call) => call.startsWith('resumeWorker'))).toHaveLength(1);
+    expect(tower.wakes).toHaveLength(1);
+    const tip = await git(repo, 'rev-parse', 'feat/core-a');
+    expect((await objectiveOf()).autopilot?.wakeKeys).toEqual(
+      expect.arrayContaining([`resume-continue:M1:${tip}`, `worker-idle:M1:${tip}`]),
+    );
+    const activity = await readFile(store.abs(ACTIVITY_LOG), 'utf8');
+    expect(activity).toMatch(/ autopilot resume-worker mission=M1 worker=ap-w-M1-1 reason=continue name=ap-w-M1-1 result=started\n/);
+    expect(activity).toMatch(/ autopilot wake-orchestrator reason=worker-idle subject=M1 result=done detail=key=worker-idle:M1:\w+\n/);
+  });
+
+  it('leaves a worker waiting for the answer to its clarify-request alone, then nudges it to read the answer', async () => {
+    await draft();
+    await store.approveObjective('human');
+    const asks = (_title: string, turn: number): string | undefined =>
+      turn === 1 ? 'Should core A store the value as JSON?' : undefined;
+    const { runner, tower } = setup({}, true, { ...QUIET, asks });
+    const prompts: string[] = [];
+    const resume = tower.resumeWorker.bind(tower);
+    tower.resumeWorker = async (name, prompt) => {
+      prompts.push(prompt);
+      return resume(name, prompt);
+    };
+    await settle(runner);
+    await tower.actAll();
+    await settle(runner);
+    await settle(runner);
+    expect(tower.calls).toEqual(['spawnWorker M1 ap-w-M1-1']);
+    expect(tower.wakes).toEqual([]);
+
+    await store.send('tower', { to: 'ap-w-M1-1', subject: 'answer', body: 'Yes, store it as JSON.' });
+    await settle(runner);
+    expect(tower.calls).toEqual(['spawnWorker M1 ap-w-M1-1', 'resumeWorker ap-w-M1-1 continue']);
+    expect(prompts[0]).toMatch(/^continue: Read TowerInbox first — an answer may be waiting\./);
+
+    await tower.actAll();
+    await settle(runner);
+    expect((await store.load()).missions[0]!.status).toBe('completed');
+    expect(tower.calls.filter((call) => call.startsWith('resumeWorker'))).toHaveLength(1);
+    expect(tower.wakes).toEqual([]);
+  });
+
+  it('with the autopilot off wakes the orchestrator once and never resumes the worker itself', async () => {
+    await draft();
+    await store.approveObjective('human');
+    const { runner, tower } = setup({ autopilot: false }, true, { ...QUIET, stopsSilently: () => '' });
+    await tower.spawnWorker('M1', 'core-a-worker');
+    await tower.actAll();
+    await settle(runner);
+    await settle(runner);
+    expect(tower.calls).toEqual(['spawnWorker M1 core-a-worker', 'wake worker-idle']);
+    expect(tower.wakes[0]).toContain('is idle without TowerComplete, a blocker or an unanswered message, and the feature is still active. With the autopilot off, nobody resumes it unless you do.');
+    expect(tower.wakes[0]).toContain('Its last message is not available here — read it with TowerTaskOutput(agent="core-a-worker").');
   });
 
   it('repeats no action while its launch is pending and reports the launch as live', async () => {
@@ -541,6 +638,109 @@ describe('terminal objectives the runner did not end itself', () => {
     const { runner, tower } = setup({}, false);
     await settle(runner);
     expect(tower.notices).toEqual([]);
+  });
+});
+
+describe('orphan commands-validation worktrees', () => {
+  const worktree = (name: string): string => join(repo, '.tower', 'worktrees', name);
+  const registered = (): Promise<string> => git(repo, 'worktree', 'list', '--porcelain');
+
+  async function validating(options: { readonly scrutiny?: boolean } = {}): Promise<void> {
+    await draft({ commands: ['true'], ...options });
+    await store.approveObjective('human');
+    await store.updateMission('tower', 'M1', { status: 'abandoned' });
+    await store.startMilestoneValidation('MS1', await git(repo, 'rev-parse', 'main'), validationSettings(SIM_SETTINGS));
+  }
+
+  it('start() removes the registered commands worktrees a dead process left and keeps every other worktree', async () => {
+    await validating({ scrutiny: true });
+    await store.prepareValidationWorktree('MS1', 'commands');
+    await store.prepareValidationWorktree('MS1', 'scrutiny');
+    await mkdir(worktree('val-ms1-commands-r7'), { recursive: true });
+    const { runner, log } = setup();
+    await runner.whenIdle();
+    expect(await registered()).not.toContain('/val-ms1-commands-r1');
+    expect(existsSync(worktree('val-ms1-commands-r1'))).toBe(false);
+    expect(await registered()).toContain('/val-ms1-scrutiny-r1');
+    expect(existsSync(worktree('val-ms1-commands-r7'))).toBe(true);
+    expect(log.warnings).toEqual([]);
+    const activity = await readFile(store.abs(ACTIVITY_LOG), 'utf8');
+    expect(activity).toMatch(/ tower worktree\.remove worktree=val-ms1-commands-r1\n/);
+  });
+
+  it('a commands run decided right after start() waits for the sweep, so a run that died leaves nothing behind', async () => {
+    await validating();
+    await store.prepareValidationWorktree('MS1', 'commands');
+    const events: string[] = [];
+    let preparing: () => void = () => undefined;
+    const prepared = new Promise<void>((resolve) => {
+      preparing = resolve;
+    });
+    const remove = store.removeValidationWorktree.bind(store);
+    store.removeValidationWorktree = async (name) => {
+      await Promise.race([prepared, new Promise((resolve) => setTimeout(resolve, 300))]);
+      const removed = await remove(name);
+      events.push(`removed ${name}`);
+      return removed;
+    };
+    const prepare = store.prepareValidationWorktree.bind(store);
+    store.prepareValidationWorktree = async (milestoneId, kind) => {
+      events.push(`prepare ${kind}`);
+      preparing();
+      return prepare(milestoneId, kind);
+    };
+    const { runner, log } = setup();
+    await settle(runner, 'restart');
+    expect(events).toEqual(['removed val-ms1-commands-r1', 'prepare commands', 'removed val-ms1-commands-r1']);
+    const milestone = (await objectiveOf()).milestones[0]!;
+    expect(milestone.rounds.map((round) => `${round.kind}-r${String(round.round)}:${round.verdict}`)).toEqual(['commands-r1:pass']);
+    expect(await registered()).not.toContain('/val-');
+    expect(log.warnings).toEqual([]);
+  });
+
+  it('start() keeps the worktree of a commands run still live in this process', async () => {
+    await draft({ commands: ['true'] });
+    await store.approveObjective('human');
+    await store.updateMission('tower', 'M1', { status: 'abandoned' });
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const runCommands = async (target: TowerStore, request: CommandsValidationRequest): Promise<CommandsValidationOutcome> => {
+      const prepared = await target.prepareValidationWorktree(request.milestoneId, 'commands');
+      await held;
+      await target.removeValidationWorktree(prepared.worktree);
+      return { status: 'aborted', worktree: prepared.worktree, commit: prepared.commit };
+    };
+    const tower = new FakeTower(store, QUIET);
+    const runner = new AutopilotRunner({ observations: tower, effects: tower, timers: new FakeTimers(), log: new RecordingLog(), runCommands });
+    runner.start();
+    await runner.tick('validate');
+    expect(await waitUntil(() => existsSync(worktree('val-ms1-commands-r1')), 10_000)).toBe(true);
+    await git(repo, 'worktree', 'add', '--detach', worktree('val-ms9-commands-r1'), 'main');
+    runner.stop();
+    runner.start();
+    expect(await waitUntil(() => !existsSync(worktree('val-ms9-commands-r1')), 10_000)).toBe(true);
+    expect(existsSync(worktree('val-ms1-commands-r1'))).toBe(true);
+    release();
+    await runner.whenIdle();
+    expect(await registered()).not.toContain('/val-');
+    runner.stop();
+  });
+
+  it('start() survives a store it cannot open', () => {
+    const { runner, tower, log } = setup({}, false);
+    tower.store = () => {
+      throw new Error('no tower workspace');
+    };
+    expect(() => {
+      runner.start();
+    }).not.toThrow();
+    expect(runner.started).toBe(true);
+    expect(log.warnings).toEqual([
+      'tower autopilot could not look for orphan commands-validation worktrees {"error":"no tower workspace"}',
+    ]);
+    runner.stop();
   });
 });
 
