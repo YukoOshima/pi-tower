@@ -434,8 +434,12 @@ export function estimateObjectiveRuns(featureCount: number, milestoneCount: numb
 }
 
 export function approvalRequest(input: ApprovalRequestInput): string {
-  const { objective, features } = input;
+  const { objective } = input;
   const milestones = [...input.milestones].sort((a, b) => a.order - b.order);
+  const planIds = new Set(milestones.map((milestone) => milestone.id));
+  const features = input.features.filter(
+    (feature) => feature.milestone !== undefined && planIds.has(feature.milestone),
+  );
   const finalId = milestones.at(-1)?.id;
   const notes = input.notes ?? [];
   const reason =
@@ -503,17 +507,20 @@ function passedRounds(rounds: readonly PromptValidationRound[]): string {
   return parts.length > 0 ? parts.join(', ') : 'no validation required';
 }
 
+const HEADLESS_BLOCK =
+  ' In a headless run nobody can answer: block the objective with the reason instead (TowerObjective(action="block", reason)).';
+
 const MERGE_BLOCK_GUIDANCE: Readonly<Record<string, (missionId: string) => string>> = {
   'out-of-scope': (id) =>
     `- out-of-scope → if the extra files legitimately belong to this feature, widen its scope with TowerMission(id="${id}", scope=[...]); otherwise have the worker revert them, which needs a fresh review.`,
   'deps-unmerged': () =>
     '- deps-unmerged → a dependency has not merged yet: unblock or finish it first, or re-plan if the dependency is not real.',
   'base-mismatch': () =>
-    '- base-mismatch → the main checkout is not on the base branch: ask the human to switch it back; never switch the checkout yourself.',
+    `- base-mismatch → the main checkout is not on the base branch: ask the human to switch it back; never switch the checkout yourself.${HEADLESS_BLOCK}`,
   'base-dirty': () =>
-    '- base-dirty → the main checkout has uncommitted changes in files the merge touches: ask the human to commit or stash them; never discard them yourself.',
+    `- base-dirty → the main checkout has uncommitted changes in files the merge touches: ask the human to commit or stash them; never discard them yourself.${HEADLESS_BLOCK}`,
   'branch-missing': (id) =>
-    `- branch-missing → the branch is gone: ask the human whether it was deleted on purpose, then abandon ${id} with TowerMission(status="abandoned") and plan a replacement feature.`,
+    `- branch-missing → the branch is gone: ask the human whether it was deleted on purpose, then abandon ${id} with TowerMission(id="${id}", status="abandoned") and plan a replacement feature.${HEADLESS_BLOCK}`,
   'read-only-survey': () =>
     '- read-only-survey → a survey changed files: have the worker revert them, or re-plan the work as a build feature.',
   'review-mission-mismatch': () =>

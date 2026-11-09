@@ -243,6 +243,15 @@ describe('planMilestoneRequest', () => {
 });
 
 describe('judgment wakes', () => {
+  it('names the mission and offers a headless way out for checkout and branch blocks', () => {
+    const text = mergeBlockedWake({
+      feature: FEATURE,
+      blocks: [{ reason: 'base-mismatch' }, { reason: 'base-dirty' }, { reason: 'branch-missing' }],
+    });
+    expect(text).toContain('abandon M2 with TowerMission(id="M2", status="abandoned") and plan a replacement feature.');
+    expect(text.match(/In a headless run nobody can answer: block the objective with the reason instead/g)).toHaveLength(3);
+  });
+
   it('asks the orchestrator to re-evaluate a stall', () => {
     const text = stallReevaluation({
       objective: OBJECTIVE,
@@ -309,6 +318,9 @@ describe('judgment wakes', () => {
       'merge-blocked: feature M2 "CLI flag" (milestone MS1, branch feat/cli-flag) cannot merge — the gate is blocked for a reason the autopilot cannot fix: out-of-scope, base-dirty, worker-unknown.',
     );
     expect(text).toContain('- out-of-scope: src/other.ts is outside the mission scope\n- base-dirty\n');
+    expect(text).toContain(
+      'never discard them yourself. In a headless run nobody can answer: block the objective with the reason instead (TowerObjective(action="block", reason)).',
+    );
     expect(text).toContain('widen its scope with TowerMission(id="M2", scope=[...])');
     expect(text).toContain('ask the human to commit or stash them; never discard them yourself');
     expect(text.match(/- out-of-scope →/g)).toHaveLength(1);
@@ -444,6 +456,12 @@ describe('approvalRequest', () => {
       ].join('\n'),
     );
     expect(text).toContain('Estimated runs: ≈ 7 (3 features + 2 × 2 milestones). This is a floor, not a ceiling');
+    const stray = approvalRequest({
+      ...APPROVAL,
+      features: [...APPROVAL.features, { id: 'M9', title: 'Elsewhere', milestone: 'MS9' }, { id: 'M10', title: 'Unplanned' }],
+    });
+    expect(stray).toContain('Estimated runs: ≈ 7 (3 features + 2 × 2 milestones).');
+    expect(stray).not.toContain('M9');
     expect(text).toContain('To approve, run: /tower approve\nOnly you can approve — the orchestrator cannot.');
     expect(text).not.toContain('Assumptions and notes');
   });
