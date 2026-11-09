@@ -26,7 +26,7 @@ export const HEADLESS_USAGE = [
   '',
   'Options:',
   '  -f, --file <path>   objective file (markdown); required',
-  '  --auto-approve      approve the plan without a human (sends /tower approve)',
+  '  --auto-approve      approve the plan without a human (sends /tower approve --auto, recorded as an automatic approval)',
   '  --timeout <ms>      give up after this many milliseconds, at most 2147483647 (exit 2)',
   '  --cwd <dir>         repository to run in (default: the current directory)',
   '  --pi <path>         pi executable: a path, or a command looked up on PATH (default: pi)',

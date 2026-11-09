@@ -37,7 +37,7 @@ function drafts(pi: StubPi, state: StateScript, ...after: HeadlessSnapshot[]): v
 }
 
 function executes(pi: StubPi, state: StateScript): void {
-  pi.reactions['/tower approve'] = {
+  pi.reactions['/tower approve --auto'] = {
     effect: () =>
       state.push(
         snapshot(stage('executing', 'active', 'pending'), FEATURES),
@@ -60,7 +60,7 @@ describe('runHeadless', () => {
     expect(code).toBe(HEADLESS_EXIT.completed);
     const pi = run.pi();
     expect(pi.options).toEqual({ piBin: 'pi', cwd: '/work/repo', args: ['--model', 'a/b'] });
-    expect(pi.commands).toEqual(['/tower on', OBJECTIVE_COMMAND, '/tower approve']);
+    expect(pi.commands).toEqual(['/tower on', OBJECTIVE_COMMAND, '/tower approve --auto']);
     const plan = renderPlan(snapshot(stage('awaiting-approval', 'pending', 'pending')).objective!, snapshot(undefined, FEATURES).features);
     expect(plain(run.info)).toEqual([
       'started pi (pi --mode rpc) in /work/repo',
@@ -72,7 +72,7 @@ describe('runHeadless', () => {
       'O1 planning — MS1 pending · MS2 pending',
       'O1 awaiting-approval — MS1 pending · MS2 pending — features 0/3 done',
       plan,
-      '> /tower approve',
+      '> /tower approve --auto',
       'auto-approved the plan of O1 (--auto-approve)',
       'O1 executing — MS1 active · MS2 pending — features 0/3 done',
       'O1 executing — MS1 validating · MS2 pending — features 2/3 done',
@@ -128,7 +128,7 @@ describe('runHeadless', () => {
       towerOn(pi, state);
       drafts(pi, state);
       let approvals = 0;
-      pi.reactions['/tower approve'] = {
+      pi.reactions['/tower approve --auto'] = {
         effect: () => {
           approvals += 1;
           if (approvals === 1) {
@@ -140,7 +140,7 @@ describe('runHeadless', () => {
       };
     });
     expect(await runHeadless(runOptions({ autoApprove: true }), run.deps)).toBe(HEADLESS_EXIT.completed);
-    expect(run.pi().commands).toEqual(['/tower on', OBJECTIVE_COMMAND, '/tower approve', '/tower approve']);
+    expect(run.pi().commands).toEqual(['/tower on', OBJECTIVE_COMMAND, '/tower approve --auto', '/tower approve --auto']);
     expect(run.info.some((line) => line.includes('approval reason: contract-changed'))).toBe(true);
   });
 
@@ -150,7 +150,7 @@ describe('runHeadless', () => {
       towerOn(pi, state);
       drafts(pi, state);
       let approvals = 0;
-      pi.reactions['/tower approve'] = {
+      pi.reactions['/tower approve --auto'] = {
         effect: () => {
           approvals += 1;
           if (approvals > 1) {
@@ -168,7 +168,7 @@ describe('runHeadless', () => {
       };
     });
     expect(await runHeadless(runOptions({ autoApprove: true, timeoutMs: 60_000 }), run.deps)).toBe(HEADLESS_EXIT.completed);
-    expect(run.pi().commands.filter((command) => command.startsWith('/tower approve'))).toHaveLength(2);
+    expect(run.pi().commands.filter((command) => command.startsWith('/tower approve --auto'))).toHaveLength(2);
     expect(plain(run.info)).toContain('O1 executing — MS1 active · MS2 pending');
   });
 
@@ -177,7 +177,7 @@ describe('runHeadless', () => {
       towerOn(pi, state);
       drafts(pi, state);
       let approvals = 0;
-      pi.reactions['/tower approve'] = {
+      pi.reactions['/tower approve --auto'] = {
         effect: () => {
           approvals += 1;
           state.set(
@@ -189,14 +189,14 @@ describe('runHeadless', () => {
       };
     });
     expect(await runHeadless(runOptions({ autoApprove: true, timeoutMs: 60_000 }), run.deps)).toBe(HEADLESS_EXIT.completed);
-    expect(run.pi().commands.filter((command) => command.startsWith('/tower approve'))).toHaveLength(2);
+    expect(run.pi().commands.filter((command) => command.startsWith('/tower approve --auto'))).toHaveLength(2);
   });
 
   it('does not approve twice while its approval has not taken effect yet', async () => {
     const run = stubRun((pi, state) => {
       towerOn(pi, state);
       drafts(pi, state);
-      pi.reactions['/tower approve'] = {
+      pi.reactions['/tower approve --auto'] = {
         effect: () => {
           const waiting = snapshot(stage('awaiting-approval', 'pending', 'pending'), FEATURES);
           state.push(waiting, waiting, waiting, snapshot(stage('executing', 'active', 'pending')), snapshot(stage('completed', 'passed', 'passed')));
@@ -204,7 +204,7 @@ describe('runHeadless', () => {
       };
     });
     expect(await runHeadless(runOptions({ autoApprove: true, timeoutMs: 60_000 }), run.deps)).toBe(HEADLESS_EXIT.completed);
-    expect(run.pi().commands.filter((command) => command.startsWith('/tower approve'))).toHaveLength(1);
+    expect(run.pi().commands.filter((command) => command.startsWith('/tower approve --auto'))).toHaveLength(1);
     expect(run.info.filter((line) => line.startsWith('Plan for O1'))).toHaveLength(1);
   });
 
@@ -212,7 +212,7 @@ describe('runHeadless', () => {
     const run = stubRun((pi, state) => {
       towerOn(pi, state);
       drafts(pi, state);
-      pi.reactions['/tower approve'] = {
+      pi.reactions['/tower approve --auto'] = {
         effect: () => state.push(snapshot(stage('executing', 'active', 'pending')), snapshot(stage('blocked', 'blocked', 'pending', { blockedReason: 'MS1 failed scrutiny 3 times' }))),
       };
     });
@@ -225,7 +225,7 @@ describe('runHeadless', () => {
     const run = stubRun((pi, state) => {
       towerOn(pi, state);
       drafts(pi, state);
-      pi.reactions['/tower approve'] = { effect: () => state.push(snapshot(stage('paused', 'active', 'pending', { pausedReason: 'maxCostUsd 20 reached' }))) };
+      pi.reactions['/tower approve --auto'] = { effect: () => state.push(snapshot(stage('paused', 'active', 'pending', { pausedReason: 'maxCostUsd 20 reached' }))) };
     });
     expect(await runHeadless(runOptions({ autoApprove: true }), run.deps)).toBe(HEADLESS_EXIT.stopped);
     expect(plain(run.errors)).toEqual([
@@ -237,7 +237,7 @@ describe('runHeadless', () => {
     const run = stubRun((pi, state) => {
       towerOn(pi, state);
       drafts(pi, state, snapshot(stage('executing', 'active', 'pending')));
-      pi.reactions['/tower approve'] = { effect: () => state.push(snapshot(stage('executing', 'active', 'pending'))) };
+      pi.reactions['/tower approve --auto'] = { effect: () => state.push(snapshot(stage('executing', 'active', 'pending'))) };
     });
     expect(await runHeadless(runOptions({ autoApprove: true, timeoutMs: 5000 }), run.deps)).toBe(HEADLESS_EXIT.timeout);
     expect(run.clock.now()).toBe(5000);
@@ -249,7 +249,7 @@ describe('runHeadless', () => {
     const run = stubRun((pi, state) => {
       towerOn(pi, state);
       drafts(pi, state);
-      pi.reactions['/tower approve'] = { effect: () => state.push(snapshot(stage('executing', 'active', 'pending'))) };
+      pi.reactions['/tower approve --auto'] = { effect: () => state.push(snapshot(stage('executing', 'active', 'pending'))) };
       state.onRead = (reads) => {
         if (reads === 7) pi.die(1, 'fatal: heap out of memory\n');
       };
@@ -276,7 +276,7 @@ describe('runHeadless', () => {
     const run = stubRun((pi, state) => {
       towerOn(pi, state);
       drafts(pi, state);
-      pi.reactions['/tower approve'] = { effect: () => state.push(snapshot(stage('executing', 'active', 'pending'))) };
+      pi.reactions['/tower approve --auto'] = { effect: () => state.push(snapshot(stage('executing', 'active', 'pending'))) };
       state.onRead = (reads) => {
         if (reads === 8) run.signal(signal);
       };
@@ -378,7 +378,7 @@ describe('runHeadless', () => {
         executes(pi, state);
       });
       expect(await runHeadless(runOptions({ autoApprove: true }), run.deps)).toBe(HEADLESS_EXIT.completed);
-      expect(run.pi().commands).toEqual(['/tower on', '/tower approve']);
+      expect(run.pi().commands).toEqual(['/tower on', '/tower approve --auto']);
       expect(plain(run.info)).toContain('continuing existing objective O1 "Ship the widget" (status awaiting-approval) — the -f file is not re-sent');
     });
 
@@ -474,10 +474,10 @@ describe('runHeadless', () => {
     const run = stubRun((pi, state) => {
       towerOn(pi, state);
       drafts(pi, state);
-      pi.reactions['/tower approve'] = { notices: [{ level: 'error', text: 'Objective O1 is not awaiting approval.' }] };
+      pi.reactions['/tower approve --auto'] = { notices: [{ level: 'error', text: 'Objective O1 is not awaiting approval.' }] };
     });
     expect(await runHeadless(runOptions({ autoApprove: true }), run.deps)).toBe(HEADLESS_EXIT.stopped);
-    expect(plain(run.errors)).toEqual(['/tower approve failed: Objective O1 is not awaiting approval.']);
+    expect(plain(run.errors)).toEqual(['/tower approve --auto failed: Objective O1 is not awaiting approval.']);
   });
 });
 

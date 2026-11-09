@@ -104,7 +104,7 @@ const DRAFT: FakeCommand = {
 
 function approve(...after: Json[]): FakeCommand {
   return {
-    match: '/tower approve',
+    match: '/tower approve --auto',
     before: [{ objective: stage('executing', 'active', 'pending') }],
     after: after.map((next) => ({ delayMs: 100, objective: next })),
   };
@@ -158,7 +158,7 @@ describe('pi-tower CLI (bin/pi-tower.js)', () => {
     expect(result.stdout).toMatch(/\] auto-approved the plan of O1 \(--auto-approve\)\n/);
     expect(result.stdout).toMatch(/\] O1 completed — MS1 passed · MS2 passed — features 0\/2 done\n/);
     expect(result.stdout).toMatch(/\] objective O1 "Ship the widget" completed\n$/);
-    expect(fake.commands()).toEqual(['/tower on', `/tower objective --headless @${fake.objectiveFile}`, '/tower approve']);
+    expect(fake.commands()).toEqual(['/tower on', `/tower objective --headless @${fake.objectiveFile}`, '/tower approve --auto']);
     const start = fake.log().find((entry) => entry.kind === 'start');
     expect(start?.argv).toEqual(['--mode', 'rpc', ...fake.scenario({ commands: [] })]);
     expect(start?.cwd).toBe(fake.repo);
@@ -182,7 +182,7 @@ describe('pi-tower CLI (bin/pi-tower.js)', () => {
     const result = await cli(runArgs(fake, { commands: [TOWER_ON, DRAFT, approve(stage('completed', 'passed', 'passed'))] }, ['--auto-approve']));
     expect(result.code).toBe(0);
     expect(result.stdout).toContain('continuing existing objective O1 "Ship the widget" (status awaiting-approval) — the -f file is not re-sent');
-    expect(fake.commands()).toEqual(['/tower on', '/tower approve']);
+    expect(fake.commands()).toEqual(['/tower on', '/tower approve --auto']);
   });
 
   it.each([
@@ -197,7 +197,7 @@ describe('pi-tower CLI (bin/pi-tower.js)', () => {
 
   it('exits 1 with the pi stderr tail when pi crashes after the run started', { timeout: 20_000 }, async () => {
     const fake = world();
-    const crash: FakeCommand = { match: '/tower approve', before: [{ objective: stage('executing', 'active', 'pending') }], after: [{ delayMs: 100, stderr: 'FATAL: worker pool exploded\n', exit: 9 }] };
+    const crash: FakeCommand = { match: '/tower approve --auto', before: [{ objective: stage('executing', 'active', 'pending') }], after: [{ delayMs: 100, stderr: 'FATAL: worker pool exploded\n', exit: 9 }] };
     const result = await cli(runArgs(fake, { commands: [TOWER_ON, DRAFT, crash] }, ['--auto-approve']));
     expect(result.code).toBe(1);
     expect(result.stderr).toContain('pi exited (exited with code 9) before objective O1 finished (it was executing)');

@@ -14,6 +14,8 @@ export const HEADLESS_EXIT = {
   sigterm: 143,
 } as const;
 
+export const AUTO_APPROVE_COMMAND = '/tower approve --auto';
+
 export type HeadlessSignal = 'SIGINT' | 'SIGTERM';
 
 export interface HeadlessPi {
@@ -399,7 +401,7 @@ class HeadlessRun {
   }
 
   private async approve(pi: HeadlessPi, objective: HeadlessObjective): Promise<void> {
-    await this.towerCommand(pi, '/tower approve', HEADLESS_EXIT.stopped);
+    await this.towerCommand(pi, AUTO_APPROVE_COMMAND, HEADLESS_EXIT.stopped);
     this.approval = { approvedAt: objective.approvedAt };
     this.line(`auto-approved the plan of ${objective.id} (--auto-approve)`);
   }
