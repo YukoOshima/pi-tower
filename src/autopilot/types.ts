@@ -255,9 +255,12 @@ export interface AutopilotMerge {
 }
 
 /**
- * Begin or continue validating `milestone` on `commit` for `kinds`: the milestone moves to
- * validating on that commit if it is not there yet, one validator spawns per LLM kind and the
- * commands kind runs mechanically. Empty `kinds` means nothing is required: the milestone passes.
+ * Begin or continue validating `milestone` on `commit` for `kinds`: the milestone is (re-)stamped on
+ * that commit, one validator spawns per LLM kind and the commands kind runs mechanically.
+ * Empty `kinds` passes the milestone only when no kind is required. Otherwise (a stale final
+ * milestone, no free slot, or every required kind already has a round on `commit`) it only
+ * (re-)stamps the milestone on `commit`: missing kinds start on later ticks, and when every required
+ * kind already passed there the store re-derives the milestone. The store decides the resulting status.
  */
 export interface AutopilotStartValidation {
   readonly type: 'start-validation';

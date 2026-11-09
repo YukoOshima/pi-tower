@@ -17,7 +17,7 @@ import {
   type AutopilotWakeOrchestrator,
   type AutopilotWorkerState,
 } from '../../src/autopilot/index.ts';
-import { SETTINGS } from './fixtures.ts';
+import { SETTINGS, statusOnStart } from './fixtures.ts';
 
 export interface WorldFeature {
   readonly id: string;
@@ -206,7 +206,7 @@ export class World {
         return;
       case 'start-validation':
         this.setMilestone(action.milestone, {
-          status: action.kinds.length === 0 ? 'passed' : 'validating',
+          status: statusOnStart(this.objective, action.milestone, this.settings, action.commit),
           validationCommit: action.commit,
         });
         for (const kind of action.kinds) {

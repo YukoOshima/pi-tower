@@ -15,6 +15,7 @@ import {
 import {
   BASE,
   NOW,
+  SETTINGS,
   actionIdentity,
   applyDecision,
   awaitingReview,
@@ -23,6 +24,7 @@ import {
   merged,
   milestone,
   snapshot,
+  statusOnStart,
   worker,
   working,
 } from './fixtures.ts';
@@ -893,6 +895,26 @@ describe('stall watchdog with an executor that refuses every action', () => {
       stallRevision(key, 2, NOW + 180_000),
       stallRevision(key, 3, NOW + 360_000),
     ]);
+  });
+});
+
+describe('store model of the test executors on start-validation', () => {
+  const objectiveWith = (ms: ReturnType<typeof milestone>) => snapshot({ objective: { milestones: [ms] } }).objective!;
+  it.each([
+    { name: 'no required kind passes', ms: milestone('MS1', 1, { status: 'active', validation: NO_KINDS }), status: 'passed' },
+    { name: 'required kinds without rounds stay validating', ms: milestone('MS1', 1, { status: 'active' }), status: 'validating' },
+    {
+      name: 'every required kind already passed on the commit is re-derived as passed',
+      ms: milestone('MS1', 1, { status: 'validating', rounds: [round('scrutiny', 1, BASE, 'pass'), round('user-testing', 1, BASE, 'pass')] }),
+      status: 'passed',
+    },
+    {
+      name: 'passes on another commit only stay validating',
+      ms: milestone('MS1', 1, { status: 'passed', rounds: [round('scrutiny', 1, 'base-old', 'pass'), round('user-testing', 1, 'base-old', 'pass')] }),
+      status: 'validating',
+    },
+  ])('$name', ({ ms, status }) => {
+    expect(statusOnStart(objectiveWith(ms), 'MS1', SETTINGS, BASE)).toBe(status);
   });
 });
 
