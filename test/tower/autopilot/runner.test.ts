@@ -74,8 +74,8 @@ async function draft(
   if (options.request !== false) await store.requestObjectiveApproval();
 }
 
-function setup(settings: Partial<AutopilotRuntimeSettings> = {}, start = true) {
-  const tower = new FakeTower(store, QUIET, settings);
+function setup(settings: Partial<AutopilotRuntimeSettings> = {}, start = true, script: SimScript = QUIET) {
+  const tower = new FakeTower(store, script, settings);
   const timers = new FakeTimers();
   const log = new RecordingLog();
   const runner = new AutopilotRunner({ observations: tower, effects: tower, timers, log });
@@ -326,6 +326,65 @@ describe('executing', () => {
     await settle(runner);
     expect(tower.wakes).toHaveLength(1);
     expect((await objectiveOf()).autopilot?.wakeKeys).toContain('feature-attempts-exhausted:M1:1');
+  });
+
+  it('resumes a worker that stopped silently to continue, then wakes the orchestrator once with its last message', async () => {
+    await draft();
+    await store.approveObjective('human');
+    const question = 'Should core A store the value as JSON?\nI stop here until someone decides.';
+    const { runner, tower } = setup({}, true, { ...QUIET, stopsSilently: () => question });
+    const prompts: string[] = [];
+    const resume = tower.resumeWorker.bind(tower);
+    tower.resumeWorker = async (name, prompt) => {
+      prompts.push(prompt);
+      return resume(name, prompt);
+    };
+    await settle(runner);
+    await tower.actAll();
+    await settle(runner);
+    expect(tower.calls).toEqual(['spawnWorker M1 ap-w-M1-1', 'resumeWorker ap-w-M1-1 continue']);
+    expect(prompts[0]).toMatch(/^continue: your mission M1 "Core A" \(branch feat\/core-a\) is still active, but your last turn ended without TowerComplete, a blocker or a message/);
+    expect(prompts[0]).toContain('finish with TowerComplete(report)');
+    expect(prompts[0]).toContain('TowerMission(id="M1", blocker="...")');
+    expect(prompts[0]).toContain('TowerSend(to="tower", subject="clarify-request"');
+    expect(tower.wakes).toEqual([]);
+
+    await tower.actAll();
+    await settle(runner);
+    expect(tower.wakes).toHaveLength(1);
+    expect(tower.wakes[0]).toMatch(
+      /^worker-idle: worker ap-w-M1-1 on feature M1 "Core A" \(milestone MS1, branch feat\/core-a\) went idle without TowerComplete, a blocker or a message, and the feature is still active\. The autopilot already resumed it once on this tip/,
+    );
+    expect(tower.wakes[0]).toContain('Its last message:\n> Should core A store the value as JSON?\n> I stop here until someone decides.');
+    expect(tower.wakes[0]).toContain('TowerSend(to="ap-w-M1-1", ...) and resume it with TowerResume(agent="ap-w-M1-1", prompt="...")');
+    expect(tower.wakes[0]).toContain('TowerSpawn(kind="worker", mission_id="M1")');
+    expect(tower.wakes[0]).toContain('TowerObjective(action="block", reason)');
+
+    await tower.actAll();
+    await settle(runner);
+    await settle(runner);
+    expect(tower.calls.filter((call) => call.startsWith('resumeWorker'))).toHaveLength(1);
+    expect(tower.wakes).toHaveLength(1);
+    const tip = await git(repo, 'rev-parse', 'feat/core-a');
+    expect((await objectiveOf()).autopilot?.wakeKeys).toEqual(
+      expect.arrayContaining([`resume-continue:M1:${tip}`, `worker-idle:M1:${tip}`]),
+    );
+    const activity = await readFile(store.abs(ACTIVITY_LOG), 'utf8');
+    expect(activity).toMatch(/ autopilot resume-worker mission=M1 worker=ap-w-M1-1 reason=continue name=ap-w-M1-1 result=started\n/);
+    expect(activity).toMatch(/ autopilot wake-orchestrator reason=worker-idle subject=M1 result=done detail=key=worker-idle:M1:\w+\n/);
+  });
+
+  it('with the autopilot off wakes the orchestrator once and never resumes the worker itself', async () => {
+    await draft();
+    await store.approveObjective('human');
+    const { runner, tower } = setup({ autopilot: false }, true, { ...QUIET, stopsSilently: () => '' });
+    await tower.spawnWorker('M1', 'core-a-worker');
+    await tower.actAll();
+    await settle(runner);
+    await settle(runner);
+    expect(tower.calls).toEqual(['spawnWorker M1 core-a-worker', 'wake worker-idle']);
+    expect(tower.wakes[0]).toContain('went idle without TowerComplete, a blocker or a message, and the feature is still active. With the autopilot off, nobody resumes it unless you do.');
+    expect(tower.wakes[0]).toContain('Its last message is not available here — read it with TowerTaskOutput(agent="core-a-worker").');
   });
 
   it('repeats no action while its launch is pending and reports the launch as live', async () => {

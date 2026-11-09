@@ -47,12 +47,15 @@ export interface SimAgent {
   readonly worktree?: string;
   status: AutopilotAgentStatus;
   stopReason?: string;
+  lastText?: string;
   turns: number;
 }
 
 export interface SimScript {
   /** File and content a worker commits on its turn; undefined commits nothing. */
   work(missionTitle: string, turn: number): { readonly file: string; readonly content: string } | undefined;
+  /** Final text of a worker turn that ends idle without committing or TowerComplete; undefined works as usual. */
+  stopsSilently?(missionTitle: string, turn: number): string | undefined;
   review(missionId: string, reviewNumber: number): string;
   validate(milestone: string, kind: AutopilotValidatorKind, round: number): 'pass' | 'fail';
   orchestrate(text: string, state: TowerState): readonly TowerPlanInput[] | undefined;
@@ -129,7 +132,11 @@ export class FakeTower implements AutopilotObservations, AutopilotEffects {
   agent(agentId: string): AutopilotAgentObservation | undefined {
     const agent = this.agents.get(agentId);
     if (agent === undefined) return undefined;
-    return { status: agent.status, ...(agent.stopReason === undefined ? {} : { stopReason: agent.stopReason }) };
+    return {
+      status: agent.status,
+      ...(agent.stopReason === undefined ? {} : { stopReason: agent.stopReason }),
+      ...(agent.lastText === undefined ? {} : { lastAssistantText: agent.lastText }),
+    };
   }
 
   orchestratorBusy(): boolean {
@@ -306,6 +313,12 @@ export class FakeTower implements AutopilotObservations, AutopilotEffects {
     const mission = state.missions.find((candidate) => candidate.id === agent.mission)!;
     const unread = await store.readUnreadInbox(agent.name, 100);
     if (unread.length > 0) await store.ackInbox(agent.name, unread.map((item) => item.messageId));
+    const silent = this.script.stopsSilently?.(mission.title, agent.turns);
+    if (silent !== undefined) {
+      agent.lastText = silent;
+      agent.status = 'idle';
+      return;
+    }
     const work = this.script.work(mission.title, agent.turns);
     if (work !== undefined) {
       const worktree = store.abs(join(WORKTREES_DIR, mission.worktree));

@@ -37,6 +37,8 @@ export type AutopilotAgentStatus =
 export interface AutopilotAgentObservation {
   readonly status: AutopilotAgentStatus;
   readonly stopReason?: string;
+  /** Final assistant text of the agent's last turn, when the runtime still holds it. */
+  readonly lastAssistantText?: string;
 }
 
 export interface AutopilotObservations {
