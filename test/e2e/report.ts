@@ -93,10 +93,11 @@ export class ScenarioReport {
 export function renderReport(reports: readonly ScenarioReport[], header: readonly string[]): string {
   const lines: string[] = ['# pi-tower live e2e report', '', ...header, ''];
   const total = emptyUsage();
-  lines.push('| Scenario | Verdict | Checks | Wall time |', '| -- | -- | -- | -- |');
+  lines.push('| Scenario | Verdict | Checks | Wall time | Cost |', '| -- | -- | -- | -- | -- |');
   for (const report of reports) {
     const passed = report.checks.filter((check) => check.ok).length;
-    lines.push(`| ${report.id} ${report.title} | ${report.verdict} | ${String(passed)}/${String(report.checks.length)} | ${(report.durationMs / 1000).toFixed(0)}s |`);
+    const cost = report.usageByRole.size === 0 ? 'n/a' : `$${report.totalUsage().cost.toFixed(4)}`;
+    lines.push(`| ${report.id} ${report.title} | ${report.verdict} | ${String(passed)}/${String(report.checks.length)} | ${(report.durationMs / 1000).toFixed(0)}s | ${cost} |`);
   }
   for (const report of reports) {
     lines.push('', `## ${report.id} — ${report.title}: ${report.verdict.toUpperCase()}${report.mandatory ? ' (mandatory)' : ' (optional)'}`);

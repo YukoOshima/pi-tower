@@ -1,9 +1,9 @@
-import { execFileSync } from 'node:child_process';
+import { execFileSync, type ChildProcess } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
-import { PiRpc } from './rpc.ts';
+import { PiRpc, sleep } from './rpc.ts';
 import type { E2eSettings } from './settings.ts';
 
 export function git(cwd: string, args: readonly string[]): string {
@@ -18,9 +18,22 @@ export function tryGit(cwd: string, args: readonly string[]): string | undefined
   }
 }
 
+function exited(child: ChildProcess): boolean {
+  return child.exitCode !== null || child.signalCode !== null;
+}
+
+async function stopChild(child: ChildProcess, graceMs: number): Promise<void> {
+  if (exited(child)) return;
+  const gone = new Promise<void>((resolve) => child.once('exit', () => resolve()));
+  child.kill('SIGTERM');
+  await Promise.race([gone, sleep(graceMs)]);
+  if (!exited(child)) child.kill('SIGKILL');
+}
+
 export class RunRoot {
   readonly path: string;
   private readonly processes = new Set<PiRpc>();
+  private readonly children = new Set<ChildProcess>();
 
   constructor() {
     this.path = mkdtempSync(join(tmpdir(), 'pi-tower-e2e-'));
@@ -37,13 +50,20 @@ export class RunRoot {
     return rpc;
   }
 
+  trackChild(child: ChildProcess): ChildProcess {
+    this.children.add(child);
+    return child;
+  }
+
   async closeAll(): Promise<void> {
-    await Promise.all([...this.processes].map((rpc) => rpc.close(10_000)));
+    await Promise.all([...[...this.processes].map((rpc) => rpc.close(10_000)), ...[...this.children].map((child) => stopChild(child, 15_000))]);
     this.processes.clear();
+    this.children.clear();
   }
 
   killAll(): void {
     for (const rpc of this.processes) rpc.kill();
+    for (const child of this.children) if (!exited(child)) child.kill('SIGKILL');
   }
 
   cleanup(): void {
@@ -57,17 +77,24 @@ export const TOY_FILES: Readonly<Record<string, string>> = {
   'numbers.txt': '1\n2\n3\n',
 };
 
-export function createToyRepo(dir: string): string {
+export function createRepo(dir: string, files: Readonly<Record<string, string>>): string {
   const repo = join(dir, 'repo');
   mkdirSync(repo, { recursive: true });
   git(repo, ['init', '-q', '-b', 'main']);
   git(repo, ['config', 'user.name', 'pi-tower e2e']);
   git(repo, ['config', 'user.email', 'e2e@pi-tower.invalid']);
   git(repo, ['config', 'commit.gpgsign', 'false']);
-  for (const [name, content] of Object.entries(TOY_FILES)) writeFileSync(join(repo, name), content);
+  for (const [name, content] of Object.entries(files)) {
+    mkdirSync(dirname(join(repo, name)), { recursive: true });
+    writeFileSync(join(repo, name), content);
+  }
   git(repo, ['add', '-A']);
   git(repo, ['commit', '-q', '-m', 'initial toy repo']);
   return repo;
+}
+
+export function createToyRepo(dir: string): string {
+  return createRepo(dir, TOY_FILES);
 }
 
 export function writeJson(path: string, value: unknown): string {
@@ -85,37 +112,34 @@ export interface LaunchOptions {
   readonly env?: Readonly<Record<string, string>>;
 }
 
-export function launchPi(settings: E2eSettings, root: RunRoot, options: LaunchOptions): PiRpc {
-  const configPath = writeJson(join(options.dir, 'tower.json'), options.towerConfig);
-  const sessions = join(options.dir, 'sessions');
+export interface IsolatedPi {
+  readonly env: NodeJS.ProcessEnv;
+  readonly args: readonly string[];
+  readonly sessions: string;
+}
+
+export function isolatedPi(settings: E2eSettings, dir: string, towerConfig: Record<string, unknown>, sessionModel: string, extraEnv: Readonly<Record<string, string>> = {}): IsolatedPi {
+  const configPath = writeJson(join(dir, 'tower.json'), towerConfig);
+  const sessions = join(dir, 'sessions');
   mkdirSync(sessions, { recursive: true });
   const env: NodeJS.ProcessEnv = { ...process.env, PI_TOWER_CONFIG: configPath, PI_OFFLINE: '1' };
-  for (const key of ['PI_TOWER_ORCHESTRATOR_MODEL', 'PI_TOWER_WORKER_MODEL', 'PI_TOWER_REVIEWER_MODEL']) delete env[key];
-  Object.assign(env, options.env ?? {});
+  for (const key of ['PI_TOWER_ORCHESTRATOR_MODEL', 'PI_TOWER_WORKER_MODEL', 'PI_TOWER_REVIEWER_MODEL', 'PI_TOWER_VALIDATOR_MODEL']) delete env[key];
+  Object.assign(env, extraEnv);
+  const args = ['--session-dir', sessions, '--no-extensions', '--no-skills', '--no-prompt-templates', '--no-context-files', '--offline', '--model', sessionModel, '-e', settings.extension];
+  return { env, args, sessions };
+}
+
+export function launchPi(settings: E2eSettings, root: RunRoot, options: LaunchOptions): PiRpc {
+  const pi = isolatedPi(settings, options.dir, options.towerConfig, options.sessionModel, options.env);
   return root.track(
     new PiRpc({
       label: options.label,
       piBin: settings.piBin,
       cwd: options.repo,
-      env,
+      env: pi.env,
       logFile: join(options.dir, 'pi.log'),
       echo: settings.verbose,
-      args: [
-        '--session-dir',
-        sessions,
-        '--no-extensions',
-        '--no-skills',
-        '--no-prompt-templates',
-        '--no-context-files',
-        '--offline',
-        '--model',
-        options.sessionModel,
-        '-e',
-        settings.extension,
-        '-e',
-        settings.probeExtension,
-        ...(options.extraArgs ?? []),
-      ],
+      args: [...pi.args, '-e', settings.probeExtension, ...(options.extraArgs ?? [])],
     }),
   );
 }
