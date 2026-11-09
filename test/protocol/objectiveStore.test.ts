@@ -594,9 +594,14 @@ describe('validation worktrees', () => {
     await validatingMilestone();
     const prepared = await store.prepareValidationWorktree('MS1', 'scrutiny');
     await expect(store.removeValidationWorktree('wt-1')).rejects.toThrow(/not a validation worktree/);
+    await expect(store.removeValidationWorktree(join(repo, 'elsewhere', prepared.worktree))).rejects.toThrow(
+      /not a validation worktree/,
+    );
     expect(await store.removeValidationWorktree(`.tower/worktrees/${prepared.worktree}/`)).toBe(true);
     expect(await git(repo, 'worktree', 'list')).not.toContain(prepared.worktree);
     expect(await store.removeValidationWorktree(prepared.worktree)).toBe(false);
+    const again = await store.prepareValidationWorktree('MS1', 'scrutiny');
+    expect(await store.removeValidationWorktree(again.path)).toBe(true);
     expect(await activityLog()).toContain('worktree.remove worktree=val-ms1-scrutiny-r1');
   });
 

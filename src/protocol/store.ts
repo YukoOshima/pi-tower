@@ -13,7 +13,7 @@ import {
   stat,
   writeFile,
 } from 'node:fs/promises';
-import { basename, dirname, join, relative, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 
 import { listBaseDirtyEntries, snapshotBaseWip } from './baseWip.ts';
 import {
@@ -3648,7 +3648,12 @@ export class TowerStore {
   }
 
   async removeValidationWorktree(worktree: string): Promise<boolean> {
-    const name = worktree.trim().replace(/\/+$/, '').replace(`${WORKTREES_DIR}/`, '');
+    const trimmed = worktree.trim().replace(/\/+$/, '');
+    const name = isAbsolute(trimmed)
+      ? relative(this.abs(WORKTREES_DIR), trimmed)
+      : trimmed.startsWith(`${WORKTREES_DIR}/`)
+        ? trimmed.slice(WORKTREES_DIR.length + 1)
+        : trimmed;
     if (!name.startsWith(VALIDATION_WORKTREE_PREFIX) || name.includes('/')) {
       throw new TowerProtocolError(
         `"${worktree}" is not a validation worktree — only ${VALIDATION_WORKTREE_PREFIX}* worktrees under ${WORKTREES_DIR} are removed here`,
