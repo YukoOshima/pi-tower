@@ -205,7 +205,10 @@ export class World {
         this.baseTip = `main-${String(this.merges)}`;
         return;
       case 'start-validation':
-        this.setMilestone(action.milestone, { status: action.kinds.length === 0 ? 'passed' : 'validating' });
+        this.setMilestone(action.milestone, {
+          status: action.kinds.length === 0 ? 'passed' : 'validating',
+          validationCommit: action.commit,
+        });
         for (const kind of action.kinds) {
           this.validators.push({ milestone: action.milestone, kind, commit: action.commit });
         }

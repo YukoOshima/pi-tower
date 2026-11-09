@@ -57,6 +57,8 @@ export interface AutopilotMilestone {
   readonly status: AutopilotMilestoneStatus;
   readonly validation: AutopilotValidationSpec;
   readonly rounds: readonly AutopilotRound[];
+  /** Commit the current or last validation started on; the objective completes only when it is the base tip. */
+  readonly validationCommit?: string;
 }
 
 export interface AutopilotLimits {

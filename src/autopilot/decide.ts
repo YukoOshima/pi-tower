@@ -388,7 +388,7 @@ function planMilestone(draft: Draft): void {
   }
   if (current.status !== 'active' && current.status !== 'validating') return;
   if (features.some((feature) => !isClosed(feature))) return;
-  planValidation(draft, current, kinds);
+  planValidation(draft, current, kinds, false);
 }
 
 function failingRounds(
@@ -409,14 +409,9 @@ function planValidation(
   draft: Draft,
   milestone: AutopilotMilestone,
   kinds: readonly AutopilotValidationKind[],
+  restamp: boolean,
 ): void {
   const commit = draft.snapshot.baseTip;
-  if (kinds.length === 0) {
-    if (milestone.status === 'active') {
-      draft.validations.push({ type: 'start-validation', milestone: milestone.id, commit, kinds: [] });
-    }
-    return;
-  }
   const max = draft.objective.limits.maxFeatureAttempts;
   const missing: AutopilotValidationKind[] = [];
   for (const kind of kinds) {
@@ -438,7 +433,7 @@ function planValidation(
   const agents = missing.filter((kind) => kind !== 'commands').slice(0, draft.free);
   draft.free -= agents.length;
   const started = missing.filter((kind) => kind === 'commands' || agents.includes(kind));
-  if (started.length === 0) return;
+  if (started.length === 0 && kinds.length > 0 && !restamp) return;
   draft.validations.push({ type: 'start-validation', milestone: milestone.id, commit, kinds: started });
 }
 
@@ -453,12 +448,13 @@ function planCompletion(draft: Draft): void {
   if (open) return;
   const kinds = milestoneRequiredKinds(objective, final, snapshot.settings);
   const verdicts = kinds.map((kind) => latestRound(final, kind, snapshot.baseTip)?.verdict);
-  if (verdicts.includes('fail')) return;
-  if (verdicts.every((verdict) => verdict === 'pass')) {
+  const stamped = final.validationCommit === snapshot.baseTip;
+  if (stamped && verdicts.includes('fail')) return;
+  if (stamped && verdicts.every((verdict) => verdict === 'pass')) {
     draft.transitions.push({ type: 'complete-objective', objective: objective.id });
     return;
   }
-  planValidation(draft, final, kinds);
+  planValidation(draft, final, kinds, !stamped);
 }
 
 function assemble(draft: Draft): AutopilotAction[] {

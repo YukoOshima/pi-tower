@@ -1,13 +1,15 @@
-import type {
-  AutopilotAction,
-  AutopilotDecision,
-  AutopilotMemory,
-  AutopilotMilestone,
-  AutopilotMission,
-  AutopilotObjective,
-  AutopilotSettings,
-  AutopilotSnapshot,
-  AutopilotWorker,
+import {
+  latestRound,
+  milestoneRequiredKinds,
+  type AutopilotAction,
+  type AutopilotDecision,
+  type AutopilotMemory,
+  type AutopilotMilestone,
+  type AutopilotMission,
+  type AutopilotObjective,
+  type AutopilotSettings,
+  type AutopilotSnapshot,
+  type AutopilotWorker,
 } from '../../src/autopilot/index.ts';
 
 export const NOW = 10_000_000;
@@ -168,6 +170,14 @@ function patchMilestone(
   };
 }
 
+function passesOn(snap: AutopilotSnapshot, milestoneId: string, commit: string): boolean {
+  const objective = snap.objective!;
+  const ms = objective.milestones.find((candidate) => candidate.id === milestoneId)!;
+  return milestoneRequiredKinds(objective, ms, snap.settings).every(
+    (kind) => latestRound(ms, kind, commit)?.verdict === 'pass',
+  );
+}
+
 export function applyAction(snap: AutopilotSnapshot, action: AutopilotAction): AutopilotSnapshot {
   const remember = (key: string): AutopilotSnapshot => ({
     ...snap,
@@ -203,7 +213,8 @@ export function applyAction(snap: AutopilotSnapshot, action: AutopilotAction): A
     case 'start-validation':
       return {
         ...patchMilestone(snap, action.milestone, {
-          status: action.kinds.length === 0 ? 'passed' : 'validating',
+          status: passesOn(snap, action.milestone, action.commit) ? 'passed' : 'validating',
+          validationCommit: action.commit,
         }),
         validators: [
           ...snap.validators,

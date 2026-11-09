@@ -21,7 +21,10 @@ export function computeProgressKey(snapshot: AutopilotSnapshot): string {
     snapshot.objective === undefined
       ? ''
       : sortedMilestones(snapshot.objective)
-          .map((milestone) => `${milestone.id}=${milestone.status}[${roundsKey(milestone.rounds)}]`)
+          .map(
+            (milestone) =>
+              `${milestone.id}=${milestone.status}@${milestone.validationCommit ?? '-'}[${roundsKey(milestone.rounds)}]`,
+          )
           .join(',');
   return digest(
     [

@@ -547,6 +547,15 @@ table('start-validation', [
     actions: [validate('MS1', BASE, ['scrutiny', 'user-testing'])],
   },
   {
+    name: 'a validating milestone whose required kinds became empty is passed with an empty start-validation',
+    snap: snapshot({
+      settings: { skipScrutiny: true, skipUserTesting: true },
+      objective: { milestones: [milestone('MS1', 1, { status: 'validating', validationCommit: BASE }), milestone('MS2', 2)] },
+      missions: DONE_MS1,
+    }),
+    actions: [validate('MS1', BASE, [])],
+  },
+  {
     name: 'every kind passed on the tip: the store records the pass, autopilot waits',
     snap: snapshot({
       objective: { milestones: [milestone('MS1', 1, { status: 'validating', rounds: [round('scrutiny', 1, BASE, 'pass'), round('user-testing', 1, BASE, 'pass')] }), milestone('MS2', 2)] },
@@ -653,7 +662,12 @@ table('validation failure, fix and block', [
   },
 ]);
 
-const FINAL_PASSED = milestone('MS2', 2, { status: 'passed', rounds: [round('scrutiny', 1, BASE, 'pass'), round('user-testing', 1, BASE, 'pass')] });
+const FINAL_PASSED = milestone('MS2', 2, {
+  status: 'passed',
+  validationCommit: BASE,
+  rounds: [round('scrutiny', 1, BASE, 'pass'), round('user-testing', 1, BASE, 'pass')],
+});
+const ZERO_KIND_FINAL = milestone('MS2', 2, { status: 'passed', validation: NO_KINDS, validationCommit: BASE });
 const ALL_MERGED = [merged('M1'), merged('M3', { milestone: 'MS2' })];
 
 table('completion', [
@@ -675,10 +689,31 @@ table('completion', [
         { milestone: 'MS2', kind: 'scrutiny', commit: 'base-1' },
         { milestone: 'MS2', kind: 'user-testing', commit: 'base-1' },
       ],
-      objective: { milestones: [PASSED_MS1, FINAL_PASSED] },
+      objective: { milestones: [PASSED_MS1, { ...FINAL_PASSED, status: 'validating', validationCommit: 'base-1' }] },
       missions: ALL_MERGED,
     }),
     actions: [],
+  },
+  {
+    name: 'a stale final whose kinds have no free slot is still re-stamped on the tip',
+    snap: snapshot({
+      baseTip: 'base-1',
+      settings: { maxRunningAgents: 1 },
+      otherRunningAgents: 1,
+      objective: { milestones: [PASSED_MS1, FINAL_PASSED] },
+      missions: ALL_MERGED,
+    }),
+    actions: [validate('MS2', 'base-1', [])],
+  },
+  {
+    name: 'passing rounds on the tip without a matching validationCommit are re-stamped, not completed',
+    snap: snapshot({ objective: { milestones: [PASSED_MS1, { ...FINAL_PASSED, validationCommit: 'base-old' }] }, missions: ALL_MERGED }),
+    actions: [validate('MS2', BASE, [])],
+  },
+  {
+    name: 'a stamped final that now requires another kind starts it instead of completing',
+    snap: snapshot({ objective: { acceptanceCommands: 1, milestones: [PASSED_MS1, FINAL_PASSED] }, missions: ALL_MERGED }),
+    actions: [validate('MS2', BASE, ['commands'])],
   },
   {
     name: 'a fail on the tip never completes',
@@ -694,9 +729,19 @@ table('completion', [
     actions: [],
   },
   {
-    name: 'a final milestone that requires nothing completes at once',
-    snap: snapshot({ objective: { milestones: [PASSED_MS1, milestone('MS2', 2, { status: 'passed', validation: NO_KINDS })] }, missions: ALL_MERGED }),
+    name: 'a zero-kind final milestone stamped on the tip completes',
+    snap: snapshot({ objective: { milestones: [PASSED_MS1, ZERO_KIND_FINAL] }, missions: ALL_MERGED }),
     actions: [{ type: 'complete-objective', objective: 'O1' }],
+  },
+  {
+    name: 'a zero-kind final milestone passed on an older commit is re-validated, not completed',
+    snap: snapshot({ baseTip: 'base-1', objective: { milestones: [PASSED_MS1, ZERO_KIND_FINAL] }, missions: ALL_MERGED }),
+    actions: [validate('MS2', 'base-1', [])],
+  },
+  {
+    name: 'a zero-kind final milestone without a validationCommit is re-validated, not completed',
+    snap: snapshot({ objective: { milestones: [PASSED_MS1, { ...ZERO_KIND_FINAL, validationCommit: undefined }] }, missions: ALL_MERGED }),
+    actions: [validate('MS2', BASE, [])],
   },
   { name: 'an objective without milestones does nothing', snap: snapshot({ objective: { milestones: [] } }), actions: [] },
 ]);
@@ -885,6 +930,7 @@ describe('computeProgressKey', () => {
     ['the inbox count', { inboxCount: 6 }],
     ['a new validation round', { objective: { ...objective, milestones: [{ ...ms1, rounds: [...ms1.rounds, round('scrutiny', 2, BASE, 'pass')] }] } }],
     ['a milestone status', { objective: { ...objective, milestones: [{ ...ms1, status: 'failed' as const }] } }],
+    ['a validation commit', { objective: { ...objective, milestones: [{ ...ms1, validationCommit: 'base-9' }] } }],
   ] as Array<[string, Partial<AutopilotSnapshot>]>)('changes with %s', (_label, patch) => {
     expect(computeProgressKey({ ...base, ...patch })).not.toBe(key);
   });
@@ -1018,7 +1064,7 @@ table('features attached to the objective', [
   {
     name: 'an open mission of an earlier objective does not hold the completion',
     snap: snapshot({
-      objective: { milestones: [milestone('MS3', 1, { status: 'passed' }), milestone('MS4', 2, { status: 'passed', rounds: FINAL_PASSED.rounds })] },
+      objective: { milestones: [milestone('MS3', 1, { status: 'passed' }), { ...FINAL_PASSED, id: 'MS4' }] },
       missions: [...EARLIER_OBJECTIVE_MISSIONS, merged('M5', { milestone: 'MS3' }), merged('M6', { milestone: 'MS4' })],
     }),
     actions: [{ type: 'complete-objective', objective: 'O1' }],
