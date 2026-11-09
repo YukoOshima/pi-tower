@@ -60,9 +60,16 @@ describe('Mission Control panel', () => {
 
     const call = h.ctx.widgetCalls.find((entry) => entry.key === MISSION_WIDGET_KEY && entry.lines !== undefined);
     const rows = call?.component?.render(40) ?? [];
-    expect(rows).toHaveLength(call?.lines?.length ?? -1);
+    expect(rows.length).toBeGreaterThanOrEqual(call?.lines?.length ?? Number.POSITIVE_INFINITY);
+    expect(rows.length).toBeLessThanOrEqual(MISSION_PANEL_MAX_LINES);
     for (const row of rows) expect(visibleWidth(row)).toBeLessThanOrEqual(39);
     expect(rows[0]?.startsWith(' 🔵 Mission O1')).toBe(true);
+    expect(rows.filter((row) => /^ {1,9}(models: )?(orchestrator|worker|reviewer|validator) /.test(row))).toEqual([
+      ' models: orchestrator session-model',
+      '         worker session-model',
+      '         reviewer session-model',
+      '         validator = orchestrator',
+    ]);
 
     const rpc = await missionHarness(cleanups);
     rpc.ctx.mode = 'rpc';

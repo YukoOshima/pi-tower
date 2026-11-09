@@ -1,8 +1,16 @@
 import { visibleWidth } from '@earendil-works/pi-tui';
 import { describe, expect, it } from 'vitest';
 
-import { resolveTowerModels, type TowerConfig } from '../../src/config/index.ts';
-import { MISSION_PANEL_MAX_LINES } from '../../src/mission/constants.ts';
+import {
+  resolveTowerModels,
+  TOWER_ROLES,
+  type TowerConfig,
+  type TowerConfigValue,
+  type TowerModelSpec,
+  type TowerResolvedModels,
+  type TowerRole,
+} from '../../src/config/index.ts';
+import { MISSION_PANEL_LINE_MAX_CHARS, MISSION_PANEL_MAX_LINES } from '../../src/mission/constants.ts';
 import {
   missionPanelComponent,
   renderMissionPanel,
@@ -90,6 +98,33 @@ const MODELS = resolveTowerModels(
   } satisfies TowerConfig,
   undefined,
 );
+
+function configuredModels(refs: Readonly<Partial<Record<TowerRole, string>>>): TowerResolvedModels {
+  const roles: Partial<Record<TowerRole, TowerConfigValue<TowerModelSpec>>> = {};
+  for (const role of TOWER_ROLES) {
+    const ref = refs[role];
+    if (ref === undefined) continue;
+    const slash = ref.indexOf('/');
+    roles[role] = {
+      value: { provider: ref.slice(0, slash), modelId: ref.slice(slash + 1) },
+      source: { kind: 'file', scope: 'global', path: '/a/tower.json' },
+    };
+  }
+  return resolveTowerModels({ roles, models: {}, files: [] }, undefined);
+}
+
+const GATEWAY_MODELS = configuredModels({
+  orchestrator: 'byteplus-gateway/claude-opus-5-5',
+  worker: 'byteplus-gateway/claude-sonnet-5-5',
+  reviewer: 'byteplus-gateway/claude-sonnet-5-5',
+  validator: 'byteplus-gateway/claude-sonnet-5-5',
+});
+
+function modelsSection(rows: readonly string[]): string[] {
+  const start = rows.findIndex((row) => row.trimStart().startsWith('models: '));
+  const end = rows.findIndex((row) => row.trimStart().startsWith('next: '));
+  return start === -1 || end === -1 ? [] : rows.slice(start, end);
+}
 
 function input(patch: Partial<MissionPanelInput> = {}): MissionPanelInput {
   return {
@@ -216,10 +251,10 @@ describe('renderMissionPanel', () => {
   it('renders the TUI panel one row per line, cut to the terminal width', () => {
     const lines = renderMissionPanel(input());
 
-    const narrow = missionPanelComponent(lines).render(30);
-    const wide = missionPanelComponent(lines).render(400);
+    const narrow = missionPanelComponent(input()).render(30);
+    const wide = missionPanelComponent(input()).render(400);
 
-    expect(narrow).toHaveLength(lines.length);
+    expect(narrow.length).toBeLessThanOrEqual(MISSION_PANEL_MAX_LINES);
     for (const row of narrow) {
       expect(row.startsWith(' ')).toBe(true);
       expect(visibleWidth(row)).toBeLessThanOrEqual(29);
@@ -232,6 +267,85 @@ describe('renderMissionPanel', () => {
     expect(renderMissionStatus(input({ objective: objective({ status: 'completed' }), agents: [] }))).toBe(
       'mission O1 completed',
     );
+  });
+});
+
+describe('the models line of the panel', () => {
+  it('keeps every role of an explicit validator with long model ids by putting two roles per line', () => {
+    const oneLine =
+      'models: orchestrator claude-opus-5-5 · worker claude-sonnet-5-5 · reviewer claude-sonnet-5-5 · validator claude-sonnet-5-5';
+    expect(oneLine.length).toBeGreaterThan(MISSION_PANEL_LINE_MAX_CHARS);
+
+    const lines = renderMissionPanel(input({ models: GATEWAY_MODELS }));
+
+    expect(modelsSection(lines)).toEqual([
+      'models: orchestrator claude-opus-5-5 · worker claude-sonnet-5-5',
+      '        reviewer claude-sonnet-5-5 · validator claude-sonnet-5-5',
+    ]);
+    expect(lines).toHaveLength(MISSION_PANEL_MAX_LINES);
+    expect(lines.slice(2, 6)).toEqual([
+      '🔵 M4 --format option — worker w-m4 running',
+      '🟢 M5 README — in review · rev-m5',
+      '🟡 M7 Shell completion — waits for M4',
+      '✅ M6 tests — merged',
+    ]);
+    for (const line of lines) expect(line.length).toBeLessThanOrEqual(MISSION_PANEL_LINE_MAX_CHARS);
+  });
+
+  it('gives the features one line less, never more than ten lines in total', () => {
+    const missions = Array.from({ length: 12 }, (_, index) => feature(`M${String(index + 10)}`, `Feature ${String(index)}`, 'active'));
+
+    const lines = renderMissionPanel(input({ missions, models: GATEWAY_MODELS }));
+
+    expect(lines).toHaveLength(MISSION_PANEL_MAX_LINES);
+    expect(lines[5]).toBe('… 9 more features — /mission shows all');
+    expect(modelsSection(lines)).toHaveLength(2);
+    expect(lines.at(-1)).toBe('next: 12 features of MS2 in flight — validation starts once all are merged');
+  });
+
+  it('names the provider only where the same model id comes from two providers', () => {
+    const mixed = configuredModels({
+      orchestrator: 'anthropic/claude-opus-5-5',
+      worker: 'anthropic/claude-sonnet-5-5',
+      reviewer: 'byteplus-gateway/claude-sonnet-5-5',
+    });
+
+    expect(modelsSection(renderMissionPanel(input({ models: mixed })))).toEqual([
+      'models: orchestrator claude-opus-5-5 · worker anthropic/claude-sonnet-5-5',
+      '        reviewer byteplus-gateway/claude-sonnet-5-5 · validator = reviewer',
+    ]);
+  });
+
+  it('lays the models out for the terminal width in the TUI and never drops a role', () => {
+    const panel = missionPanelComponent(input({ models: GATEWAY_MODELS }));
+
+    expect(modelsSection(panel.render(80))).toEqual([
+      ' models: orchestrator claude-opus-5-5 · worker claude-sonnet-5-5',
+      '         reviewer claude-sonnet-5-5 · validator claude-sonnet-5-5',
+    ]);
+    const rows = panel.render(60);
+    expect(modelsSection(rows)).toEqual([
+      ' models: orchestrator claude-opus-5-5',
+      '         worker claude-sonnet-5-5',
+      '         reviewer claude-sonnet-5-5',
+      '         validator claude-sonnet-5-5',
+    ]);
+    expect(rows).toHaveLength(MISSION_PANEL_MAX_LINES);
+    expect(rows).toContain(' … 3 more features — /mission shows all');
+    expect(modelsSection(panel.render(30))).toEqual([
+      ' models: orchestrator claude…',
+      '         worker claude-sonne…',
+      '         reviewer claude-son…',
+      '         validator claude-so…',
+    ]);
+
+    for (const width of [24, 30, 40, 60, 66, 80, 100, 122, 200]) {
+      const rendered = panel.render(width);
+      expect(rendered.length, `width ${String(width)}`).toBeLessThanOrEqual(MISSION_PANEL_MAX_LINES);
+      for (const row of rendered) expect(visibleWidth(row), `width ${String(width)}`).toBeLessThanOrEqual(width - 1);
+      const section = modelsSection(rendered).join('\n');
+      for (const role of TOWER_ROLES) expect(section, `width ${String(width)}`).toContain(` ${role} `);
+    }
   });
 });
 

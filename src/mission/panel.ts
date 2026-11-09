@@ -1,6 +1,6 @@
-import { truncateToWidth, type Component } from '@earendil-works/pi-tui';
+import { truncateToWidth, visibleWidth, type Component } from '@earendil-works/pi-tui';
 
-import type { TowerResolvedModel, TowerResolvedModels } from '../config/index.ts';
+import { TOWER_ROLES, type TowerResolvedModels, type TowerRole } from '../config/index.ts';
 import { formatDuration, formatUsd } from '../prompts/objectiveFormat.ts';
 import {
   FEATURE_STATUS_MARKERS,
@@ -30,6 +30,15 @@ export interface MissionPanelInput {
 
 const MILESTONE_STRIP_MAX = 5;
 
+const MODELS_LABEL = 'models: ';
+const MODELS_INDENT = ' '.repeat(MODELS_LABEL.length);
+const MODEL_ROLES_PER_LINE = [TOWER_ROLES.length, 2, 1];
+
+interface ModelEntry {
+  readonly role: TowerRole;
+  readonly model: string;
+}
+
 const FEATURE_ORDER: Readonly<Record<TowerMissionStatus, number>> = {
   active: 0,
   completed: 1,
@@ -40,14 +49,14 @@ const FEATURE_ORDER: Readonly<Record<TowerMissionStatus, number>> = {
   abandoned: 6,
 };
 
-export function renderMissionPanel(input: MissionPanelInput): string[] {
+export function renderMissionPanel(input: MissionPanelInput, width = MISSION_PANEL_LINE_MAX_CHARS): string[] {
   const { objective } = input;
   const current = currentMilestone(objective);
   const fixed = [
     headline(input),
     milestoneStrip(input, current),
     agentsLine(input),
-    ...(input.models === undefined ? [] : [modelsLine(input.models)]),
+    ...(input.models === undefined ? [] : modelsLines(input.models, Math.min(width, MISSION_PANEL_LINE_MAX_CHARS))),
     `next: ${nextStep(input, current)}`,
   ];
   const features = current === undefined ? [] : featureLines(input, current, MISSION_PANEL_MAX_LINES - fixed.length);
@@ -55,9 +64,12 @@ export function renderMissionPanel(input: MissionPanelInput): string[] {
   return [first, strip, ...features, ...rest].map(clip);
 }
 
-export function missionPanelComponent(lines: readonly string[]): Component {
+export function missionPanelComponent(input: MissionPanelInput): Component {
   return {
-    render: (width) => lines.map((line) => ` ${truncateToWidth(line, Math.max(1, width - 2))}`),
+    render: (width) => {
+      const room = Math.max(1, width - 2);
+      return renderMissionPanel(input, room).map((line) => ` ${truncateToWidth(line, room)}`);
+    },
     invalidate: () => undefined,
   };
 }
@@ -171,15 +183,37 @@ function agentsLine(input: MissionPanelInput): string {
   return `agents: ${kinds('worker', 'worker')} · ${kinds('reviewer', 'reviewer')} · ${kinds('validator', 'validator')} running · limit ${String(input.maxRunningAgents)}`;
 }
 
-function modelsLine(models: TowerResolvedModels): string {
-  const { orchestrator, worker, reviewer, validator } = models.roles;
-  const validatorText =
-    validator.origin.kind === 'inherited' ? `= ${validator.origin.from}` : shortModel(validator);
-  return `models: orchestrator ${shortModel(orchestrator)} · worker ${shortModel(worker)} · reviewer ${shortModel(reviewer)} · validator ${validatorText}`;
+function modelsLines(models: TowerResolvedModels, width: number): string[] {
+  const entries = modelEntries(models);
+  for (const perLine of MODEL_ROLES_PER_LINE) {
+    const lines = modelRows(entries, perLine);
+    if (lines.every((line) => visibleWidth(line) <= width)) return lines;
+  }
+  return entries.map((entry, index) => {
+    const head = `${index === 0 ? MODELS_LABEL : MODELS_INDENT}${entry.role} `;
+    return `${head}${preview(entry.model, Math.max(1, width - visibleWidth(head)))}`;
+  });
 }
 
-function shortModel(resolved: TowerResolvedModel): string {
-  return resolved.binding?.modelId ?? '(none)';
+function modelRows(entries: readonly ModelEntry[], perLine: number): string[] {
+  const rows: string[] = [];
+  for (let index = 0; index < entries.length; index += perLine) {
+    const row = entries.slice(index, index + perLine).map((entry) => `${entry.role} ${entry.model}`);
+    rows.push(`${rows.length === 0 ? MODELS_LABEL : MODELS_INDENT}${row.join(' · ')}`);
+  }
+  return rows;
+}
+
+function modelEntries(models: TowerResolvedModels): ModelEntry[] {
+  const bindings = TOWER_ROLES.flatMap((role) => models.roles[role].binding ?? []);
+  return TOWER_ROLES.map((role) => {
+    const resolved = models.roles[role];
+    if (role === 'validator' && resolved.origin.kind === 'inherited') return { role, model: `= ${resolved.origin.from}` };
+    const binding = resolved.binding;
+    if (binding === undefined) return { role, model: '(none)' };
+    const ambiguous = bindings.some((other) => other.modelId === binding.modelId && other.provider !== binding.provider);
+    return { role, model: ambiguous ? binding.model : binding.modelId };
+  });
 }
 
 function nextStep(input: MissionPanelInput, current: TowerMilestone | undefined): string {

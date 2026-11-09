@@ -11,12 +11,13 @@ import {
   MISSION_APPROVE_OPTION,
   MISSION_COMMAND_DESCRIPTION,
   MISSION_COMMAND_USAGE,
+  MISSION_KEEP_PLANNING_OPTION,
   MISSIONS_COMMAND_DESCRIPTION,
 } from '../../src/mission/texts.ts';
 import { buildObjectivePlanningPrompt } from '../../src/prompts/objectivePlanning.ts';
 import { TowerStore } from '../../src/protocol/index.ts';
 import { TOWER_COMMAND } from '../../src/tower/constants.ts';
-import { FakeSessionManager, createRepo, removeDir } from '../tower/fakes.ts';
+import { FakeSessionManager, createRepo, removeDir, settle } from '../tower/fakes.ts';
 import { MissionContext, plannedObjective } from './fakes.ts';
 
 type Handler = (event: unknown, ctx: unknown) => unknown;
@@ -46,8 +47,14 @@ class RecordingPi {
     this.commands.set(name, options);
   }
 
-  on(event: string, handler: Handler): void {
+  on(event: string, handler: Handler): () => void {
     this.handlers.set(event, [...(this.handlers.get(event) ?? []), handler]);
+    return () => {
+      this.handlers.set(
+        event,
+        (this.handlers.get(event) ?? []).filter((entry) => entry !== handler),
+      );
+    };
   }
 
   getFlag(): undefined {
@@ -209,8 +216,62 @@ describe('/mission in the extension', () => {
     await vi.waitFor(async () => {
       expect((await store.load()).objective?.status).toBe('executing');
     });
+    await vi.waitFor(() => {
+      expect(ctx.ui.notices.some((notice) => notice.message.startsWith('Mission O1 approved'))).toBe(true);
+    });
 
     await pi.command(MISSION_COMMAND).handler('exit', ctx);
+    await pi.emit('session_shutdown', { type: 'session_shutdown' }, ctx);
+  });
+
+  it('holds the approval dialog back while another extension prompt is open, listening only while mission mode is on', async () => {
+    const { pi, ctx, repo } = await started();
+    expect(pi.handlers.has('ui_prompt_start')).toBe(false);
+
+    await pi.command(MISSION_COMMAND).handler('', ctx);
+    expect(pi.handlers.get('ui_prompt_start')).toHaveLength(1);
+    expect(pi.handlers.get('ui_prompt_end')).toHaveLength(1);
+    await pi.emit('input', { type: 'input', text: 'Ship a CSV export', source: 'interactive' }, ctx);
+    const store = new TowerStore(repo);
+    await plannedObjective(store);
+    await store.requestObjectiveApproval();
+    const prompt = { reason: 'ui_prompt', kind: 'input', title: 'API key for another extension' } as const;
+    await pi.emit('ui_prompt_start', { type: 'ui_prompt_start', ...prompt }, ctx);
+
+    await pi.emit(
+      'tool_result',
+      {
+        type: 'tool_result',
+        toolName: 'TowerObjective',
+        toolCallId: 'call_request',
+        input: { action: 'request-approval' },
+        content: [],
+        isError: false,
+        details: undefined,
+      },
+      ctx,
+    );
+    await vi.waitFor(
+      () => {
+        expect(ctx.widget()?.[0]).toContain('awaiting approval');
+      },
+      { timeout: 5_000 },
+    );
+    await settle(10);
+    expect(ctx.selects).toEqual([]);
+
+    await pi.emit('ui_prompt_end', { type: 'ui_prompt_end', ...prompt }, ctx);
+    await vi.waitFor(
+      () => {
+        expect(ctx.selects).toHaveLength(1);
+      },
+      { timeout: 5_000 },
+    );
+    ctx.selects[0]?.answer(MISSION_KEEP_PLANNING_OPTION);
+
+    await pi.command(MISSION_COMMAND).handler('exit', ctx);
+    expect(pi.handlers.get('ui_prompt_start')).toEqual([]);
+    expect(pi.handlers.get('ui_prompt_end')).toEqual([]);
     await pi.emit('session_shutdown', { type: 'session_shutdown' }, ctx);
   });
 });

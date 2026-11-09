@@ -3,10 +3,15 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 
 import type {
+  ExtensionAPI,
+  ExtensionContext,
   InputEvent,
   InputEventResult,
   SessionStartEvent,
   TerminalInputHandler,
+  UIPromptEndEvent,
+  UIPromptKind,
+  UIPromptStartEvent,
 } from '@earendil-works/pi-coding-agent';
 
 import { handleMissionCommand } from '../../src/mission/command.ts';
@@ -165,6 +170,38 @@ export type SelectorFactory = (
 
 export const WIDE = 1_000;
 
+export type PromptEvent = UIPromptStartEvent | UIPromptEndEvent;
+
+type PromptHandler = (event: PromptEvent, ctx: ExtensionContext) => unknown;
+
+export class FakeMissionPi extends FakePi {
+  readonly promptEvents: PromptEvent[] = [];
+  private readonly promptHandlers = new Map<string, PromptHandler[]>();
+
+  readonly on = ((event: string, handler: PromptHandler): (() => void) => {
+    this.promptHandlers.set(event, [...this.handlersFor(event), handler]);
+    return () => {
+      this.promptHandlers.set(
+        event,
+        this.handlersFor(event).filter((entry) => entry !== handler),
+      );
+    };
+  }) as unknown as ExtensionAPI['on'];
+
+  handlerCount(event: string): number {
+    return this.handlersFor(event).length;
+  }
+
+  emitPrompt(event: PromptEvent, ctx: ExtensionContext): void {
+    this.promptEvents.push(event);
+    for (const handler of this.handlersFor(event.type)) void handler(event, ctx);
+  }
+
+  private handlersFor(event: string): PromptHandler[] {
+    return this.promptHandlers.get(event) ?? [];
+  }
+}
+
 export class MissionContext extends FakeContext {
   readonly selects: SelectCall[] = [];
   readonly widgetCalls: WidgetCall[] = [];
@@ -173,17 +210,25 @@ export class MissionContext extends FakeContext {
   readonly submitted: string[] = [];
   selectFailure: Error | undefined;
   selectorFactory: SelectorFactory | undefined;
+  promptListener: ((event: PromptEvent) => void) | undefined;
   editorText = '';
   private focusedDialog: DialogComponent | undefined;
+  private promptDepth = 0;
+  private outerPrompt: { readonly kind: UIPromptKind; readonly title: string | undefined } | undefined;
 
   constructor(cwd: string, session: FakeSessionManager) {
     super(cwd, session);
     const record = this.ui.setStatus.bind(this.ui);
     Object.assign(this.ui, {
       select: (title: string, options: string[], opts?: { readonly signal?: AbortSignal }): Promise<string | undefined> => {
-        if (this.selectFailure !== undefined) return Promise.reject(this.selectFailure);
+        const endPrompt = this.beginPrompt('select', title);
+        if (this.selectFailure !== undefined) {
+          endPrompt();
+          return Promise.reject(this.selectFailure);
+        }
         return new Promise((resolve) => {
           if (opts?.signal?.aborted === true) {
+            endPrompt();
             resolve(undefined);
             return;
           }
@@ -194,6 +239,7 @@ export class MissionContext extends FakeContext {
             settled = true;
             opts?.signal?.removeEventListener('abort', onAbort);
             if (this.focusedDialog === component) this.focusedDialog = undefined;
+            endPrompt();
             resolve(value);
           };
           const onAbort = (): void => {
@@ -236,6 +282,37 @@ export class MissionContext extends FakeContext {
 
   get dialogFocused(): boolean {
     return this.focusedDialog !== undefined;
+  }
+
+  openPrompt(kind: UIPromptKind, title?: string): () => void {
+    return this.beginPrompt(kind, title);
+  }
+
+  private beginPrompt(kind: UIPromptKind, title: string | undefined): () => void {
+    if (this.promptDepth++ === 0) {
+      this.outerPrompt = { kind, title };
+      this.queuePrompt({ type: 'ui_prompt_start', reason: 'ui_prompt', kind, ...(title === undefined ? {} : { title }) });
+    }
+    let open = true;
+    return () => {
+      if (!open) return;
+      open = false;
+      if (--this.promptDepth > 0) return;
+      const outer = this.outerPrompt ?? { kind, title };
+      this.outerPrompt = undefined;
+      this.queuePrompt({
+        type: 'ui_prompt_end',
+        reason: 'ui_prompt',
+        kind: outer.kind,
+        ...(outer.title === undefined ? {} : { title: outer.title }),
+      });
+    };
+  }
+
+  private queuePrompt(event: PromptEvent): void {
+    queueMicrotask(() => {
+      this.promptListener?.(event);
+    });
   }
 
   type(data: string): void {
@@ -310,7 +387,7 @@ export interface MissionHarness {
   readonly agentDir: string;
   readonly session: FakeSessionManager;
   readonly ctx: MissionContext;
-  readonly pi: FakePi;
+  readonly pi: FakeMissionPi;
   readonly runtime: FakeRuntime;
   readonly models: TowerModels;
   readonly controller: TowerController;
@@ -331,9 +408,12 @@ export async function missionHarness(cleanups: string[], options: MissionHarness
   const ctx = new MissionContext(repo, session);
   const [provider, id] = options.sessionModel ?? ['prov', 'session-model'];
   ctx.model = ctx.modelRegistry.add(provider, id);
-  const pi = new FakePi();
+  const pi = new FakeMissionPi();
   pi.session = session;
   pi.context = ctx;
+  ctx.promptListener = (event) => {
+    pi.emitPrompt(event, ctx.asContext);
+  };
   const models = new TowerModels({ agentDir, configDirName: '.pi', env: {}, getFlag: (name) => pi.getFlag(name) });
   const runtime = new FakeRuntime();
   const controller = new TowerController({

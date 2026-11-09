@@ -148,6 +148,11 @@ function modelId(role: RoleModel): string {
   return role.model.slice(role.model.indexOf('/') + 1);
 }
 
+function panelModel(role: RoleModel, roles: readonly RoleModel[]): string {
+  const shared = roles.some((other) => modelId(other) === modelId(role) && other.model !== role.model);
+  return shared ? role.model : modelId(role);
+}
+
 function configured(role: MissionRole, model: RoleModel, source: string): MissionModel {
   return { role, model: model.model, ...(model.thinking === undefined ? {} : { thinking: model.thinking }), source };
 }
@@ -155,6 +160,7 @@ function configured(role: MissionRole, model: RoleModel, source: string): Missio
 export function missionSetup(settings: Pick<E2eSettings, 'orchestrator' | 'worker' | 'reviewer' | 'validator'>): MissionSetup {
   const { orchestrator: A, worker: B, reviewer: C, validator: V } = settings;
   const inherited = V.spec === C.spec;
+  const roles = [A, B, C, V];
   return {
     towerConfig: { orchestrator: A.spec, reviewer: C.spec, ...(inherited ? {} : { validator: V.spec }), ...objectiveSettingsConfig(MISSION_LIMITS) },
     extraArgs: ['--tower-worker-model', B.spec],
@@ -164,7 +170,7 @@ export function missionSetup(settings: Pick<E2eSettings, 'orchestrator' | 'worke
       configured('reviewer', C, 'global tower.json'),
       inherited ? { role: 'validator', note: 'same as reviewer' } : configured('validator', V, 'global tower.json'),
     ],
-    panelModels: `models: orchestrator ${modelId(A)} · worker ${modelId(B)} · reviewer ${modelId(C)} · validator ${inherited ? '= reviewer' : modelId(V)}`,
+    panelModels: `models: orchestrator ${panelModel(A, roles)} · worker ${panelModel(B, roles)} · reviewer ${panelModel(C, roles)} · validator ${inherited ? '= reviewer' : panelModel(V, roles)}`,
   };
 }
 
@@ -201,7 +207,14 @@ export function panelRunningFeatures(lines: readonly string[]): { readonly featu
 }
 
 export function panelModelsLine(lines: readonly string[]): string | undefined {
-  return lines.find((line) => line.startsWith('models: '));
+  const start = lines.findIndex((line) => line.startsWith('models: '));
+  if (start === -1) return undefined;
+  const rows = [lines[start] ?? ''];
+  for (const line of lines.slice(start + 1)) {
+    if (!line.startsWith(' ')) break;
+    rows.push(line.trim());
+  }
+  return rows.join(' · ');
 }
 
 export function panelLineMatches(line: string | undefined, expected: string): boolean {

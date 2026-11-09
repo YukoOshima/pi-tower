@@ -1,4 +1,4 @@
-import { decodeKittyPrintable, isKeyRelease } from '@earendil-works/pi-tui';
+import { decodeKittyPrintable, getKeybindings, isKeyRelease } from '@earendil-works/pi-tui';
 
 export interface TypedInput {
   readonly kind: 'text' | 'paste';
@@ -10,6 +10,13 @@ const PASTE_END = '\x1b[201~';
 const MODIFY_OTHER_KEYS = /^\x1b\[27;(\d+);(\d+)~$/;
 const LOCK_BITS = 64 | 128;
 const SHIFT_BIT = 1;
+const SELECTION_KEYBINDINGS = ['tui.select.up', 'tui.select.down', 'tui.select.confirm'] as const;
+
+export function selectionKey(data: string): boolean {
+  if (data === '\n') return true;
+  const keybindings = getKeybindings();
+  return SELECTION_KEYBINDINGS.some((keybinding) => keybindings.matches(data, keybinding));
+}
 
 export function typedInput(data: string): TypedInput | undefined {
   if (data.startsWith(PASTE_START)) {

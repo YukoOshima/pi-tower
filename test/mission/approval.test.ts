@@ -77,11 +77,10 @@ describe('mission approval dialog', () => {
 
     dialog.answer(MISSION_APPROVE_OPTION);
 
-    await vi.waitFor(async () => {
-      expect((await readState(h.repo)).objective).toMatchObject({ status: 'executing', approvedBy: 'human' });
+    await vi.waitFor(() => {
+      expect(h.hooks.ticks).toEqual(['approve']);
     });
-    await settle();
-    expect(h.hooks.ticks).toEqual(['approve']);
+    expect((await readState(h.repo)).objective).toMatchObject({ status: 'executing', approvedBy: 'human' });
     expect(h.ctx.ui.notices.map((notice) => notice.message.split('\n')[0])).toContain('Mission O1 approved — executing');
     expect(h.mission.approvalOpen).toBe(false);
   });
@@ -254,9 +253,10 @@ describe('mission approval dialog', () => {
     expect(dialog.options).toEqual([MISSION_KEEP_PLANNING_OPTION, MISSION_APPROVE_REVISED_OPTION]);
 
     dialog.answer(MISSION_APPROVE_REVISED_OPTION);
-    await vi.waitFor(async () => {
-      expect((await readState(h.repo)).objective).toMatchObject({ status: 'executing', approvedBy: 'human' });
+    await vi.waitFor(() => {
+      expect(h.hooks.ticks).toEqual(['approve']);
     });
+    expect((await readState(h.repo)).objective).toMatchObject({ status: 'executing', approvedBy: 'human' });
   });
 
   it('is not offered for an approval that was already pending when mission mode started, until it is requested again', async () => {
@@ -331,6 +331,93 @@ describe('mission approval dialog', () => {
     expect(agents.notices[0]?.title).toBe('Mission agents');
     expect(h.ctx.selects).toHaveLength(1);
     expect(h.mission.approvalOpen).toBe(true);
+  });
+
+  it('waits while another extension prompt is open and offers once it closes', async () => {
+    const h = await harness();
+    await planningMission(h);
+    const close = h.ctx.openPrompt('confirm', 'Switch the base branch?');
+
+    await requestApproval(h);
+    await vi.waitFor(() => {
+      expect(h.ctx.widget()?.[0]).toContain('awaiting approval');
+    });
+    await settle(10);
+    h.timers.advance(5_000);
+    await settle(10);
+    expect(h.ctx.selects).toEqual([]);
+
+    close();
+
+    await vi.waitFor(() => {
+      expect(h.ctx.selects).toHaveLength(1);
+    });
+    expect(h.ctx.selects[0]?.options).toEqual([MISSION_KEEP_PLANNING_OPTION, MISSION_APPROVE_OPTION]);
+  });
+
+  it('still waits for a quiet keyboard after the other prompt was closed with a key', async () => {
+    const h = await harness();
+    await planningMission(h);
+    const close = h.ctx.openPrompt('select', 'Pick a profile');
+    await requestApproval(h);
+    await vi.waitFor(() => {
+      expect(h.ctx.widget()?.[0]).toContain('awaiting approval');
+    });
+
+    h.ctx.type('\x1b');
+    close();
+    await settle(10);
+    h.mission.refreshSoon();
+    await settle(10);
+    expect(h.ctx.selects).toEqual([]);
+
+    h.timers.advance(5_000);
+    await vi.waitFor(() => {
+      expect(h.ctx.selects).toHaveLength(1);
+    });
+  });
+
+  it('is not held back by the prompt events of its own dialog', async () => {
+    const h = await harness();
+    await planningMission(h);
+    await requestApproval(h);
+    await vi.waitFor(() => {
+      expect(h.ctx.selects).toHaveLength(1);
+    });
+    await settle();
+    expect(h.pi.promptEvents).toEqual([
+      { type: 'ui_prompt_start', reason: 'ui_prompt', kind: 'select', title: h.ctx.selects[0]?.title },
+    ]);
+
+    await h.store.plan([{ title: 'Docs', scope: ['docs/**'], milestone: 'MS1' }]);
+    await requestApproval(h);
+    await vi.waitFor(() => {
+      expect(h.ctx.selects).toHaveLength(2);
+    });
+    expect(h.ctx.selects[0]?.signal?.aborted).toBe(true);
+
+    h.ctx.selects[1]?.answer(MISSION_KEEP_PLANNING_OPTION);
+    await vi.waitFor(() => {
+      expect(h.pi.promptEvents.filter((event) => event.type === 'ui_prompt_end')).toHaveLength(2);
+    });
+    await requestApproval(h);
+    await vi.waitFor(() => {
+      expect(h.ctx.selects).toHaveLength(3);
+    });
+  });
+
+  it('listens to prompt events only in the TUI, so another prompt does not hold the dialog back over RPC', async () => {
+    const h = await harness();
+    h.ctx.mode = 'rpc';
+    await planningMission(h);
+    expect([h.pi.handlerCount('ui_prompt_start'), h.pi.handlerCount('ui_prompt_end')]).toEqual([0, 0]);
+    h.ctx.openPrompt('confirm', 'Switch the base branch?');
+
+    await requestApproval(h);
+
+    await vi.waitFor(() => {
+      expect(h.ctx.selects).toHaveLength(1);
+    });
   });
 
   it('reports a failing dialog without a notice', async () => {

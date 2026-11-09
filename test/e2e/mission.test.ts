@@ -244,16 +244,56 @@ describe('the status line and the panel', () => {
     expect(panelModelsLine(lines)).toBe(setup.panelModels);
     expect(panelLineMatches(panelModelsLine(lines), setup.panelModels)).toBe(true);
     const explicit = missionSetup({ orchestrator: A, worker: B, reviewer: C, validator: V });
-    const clipped = panelModelsLine(renderMissionPanel(panelInput({ models: s18Models(V) })));
-    expect(clipped?.endsWith('…')).toBe(true);
-    expect(panelLineMatches(clipped, explicit.panelModels)).toBe(true);
-    expect(panelLineMatches(clipped, setup.panelModels)).toBe(false);
+    const models = panelModelsLine(renderMissionPanel(panelInput({ models: s18Models(V) })));
+    expect(models).toBe(explicit.panelModels);
+    expect(panelLineMatches(models, explicit.panelModels)).toBe(true);
+    expect(panelLineMatches(models, setup.panelModels)).toBe(false);
     expect(panelLineMatches(undefined, setup.panelModels)).toBe(false);
     expect(panelStatus(renderMissionPanel(panelInput({ objective: objective({ status: 'awaiting-approval', startedAt: undefined }), agents: [], missions: [feature('M1', 'lower', 'planned')] })))).toBe('awaiting approval');
     const done = renderMissionPanel(panelInput({ objective: objective({ status: 'completed', completedAt: '2026-11-10T10:20:00.000Z', milestones: [milestone('MS1', 'passed', 1)] }), agents: [], missions: [feature('M1', 'lower', 'merged'), feature('M2', 'chars', 'merged')] }));
     expect(panelStatus(done)).toBe('completed');
     expect(panelRunningFeatures(done)).toEqual([]);
     expect(panelStatus(['agents: 0 workers'])).toBeUndefined();
+  });
+
+  it('reads a models line the panel splits over two rows, and still reads a single or a clipped row', () => {
+    const explicit = missionSetup({ orchestrator: A, worker: B, reviewer: C, validator: V });
+    const lines = renderMissionPanel(panelInput({ models: s18Models(V) }));
+    expect(lines.filter((line) => line.startsWith('models: ') || line.startsWith(' '))).toEqual([
+      'models: orchestrator claude-sonnet-5-5 · worker claude-haiku-5-5',
+      '        reviewer claude-opus-5-5 · validator claude-sonnet-5-5',
+    ]);
+    expect(panelRunningFeatures(lines)).toEqual([
+      { feature: 'M1', worker: 'ap-w-M1-1' },
+      { feature: 'M2', worker: 'ap-w-M2-1' },
+    ]);
+
+    const clipped = `${explicit.panelModels.slice(0, 119)}…`;
+    expect(panelModelsLine(['🔵 Mission O1 lower and chars commands', clipped, 'next: validation starts'])).toBe(clipped);
+    expect(panelLineMatches(clipped, explicit.panelModels)).toBe(true);
+  });
+
+  it('expects the provider prefix where the panel shows it: the same model id from two providers', () => {
+    const anthropic = parseRoleModel('anthropic/claude-sonnet-5-5:low');
+    const setup = missionSetup({ orchestrator: anthropic, worker: B, reviewer: C, validator: V });
+    const models = resolveTowerModels(
+      {
+        roles: {
+          orchestrator: fromFile(anthropic),
+          worker: { value: spec(B), source: { kind: 'flag', flag: 'tower-worker-model' } },
+          reviewer: fromFile(C),
+          validator: fromFile(V),
+        },
+        models: {},
+        files: [],
+      },
+      SESSION,
+    );
+
+    expect(setup.panelModels).toBe(
+      'models: orchestrator anthropic/claude-sonnet-5-5 · worker claude-haiku-5-5 · reviewer claude-opus-5-5 · validator byteplus-gateway/claude-sonnet-5-5',
+    );
+    expect(panelModelsLine(renderMissionPanel(panelInput({ models })))).toBe(setup.panelModels);
   });
 });
 
