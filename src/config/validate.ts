@@ -96,8 +96,8 @@ function thinkingSuffixHint(modelId: string): string {
 function withDependents(message: string, dependents: readonly TowerRole[]): string {
   if (dependents.length === 0) return message;
   const names =
-    dependents.length === 1
-      ? dependents.join('')
-      : `${dependents.slice(0, -1).join(', ')} and ${dependents.slice(-1).join('')}`;
+    dependents.length < 3
+      ? dependents.join(' and ')
+      : `${dependents.slice(0, -1).join(', ')} and ${dependents.at(-1)!}`;
   return `${message}; ${names} ${dependents.length === 1 ? 'falls' : 'fall'} back to it`;
 }
