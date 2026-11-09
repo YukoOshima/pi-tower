@@ -1,7 +1,7 @@
 import type { ScenarioReport } from './report.ts';
 import { sleep, type PiRpc, type PiToolRun } from './rpc.ts';
-import type { E2eSettings, ScenarioId } from './settings.ts';
-import { agentTranscripts, summarizeTranscript, towerState } from './evidence.ts';
+import { DEFAULT_GLOBAL_TIMEOUT_MS, DEFAULT_SCENARIO_TIMEOUT_MS, type E2eSettings, type ScenarioId } from './settings.ts';
+import { agentTranscripts, summarizeTranscript, towerState, type RosterEntry } from './evidence.ts';
 import { createToyRepo, launchPi, type RunRoot } from './workspace.ts';
 
 export interface ScenarioContext {
@@ -15,7 +15,16 @@ export interface ScenarioDefinition {
   readonly id: ScenarioId;
   readonly title: string;
   readonly mandatory: boolean;
+  readonly timeoutMs?: number;
   readonly run: (ctx: ScenarioContext) => Promise<void>;
+}
+
+export function scenarioTimeoutMs(settings: E2eSettings, definition: ScenarioDefinition): number {
+  return settings.scenarioTimeoutMs ?? definition.timeoutMs ?? DEFAULT_SCENARIO_TIMEOUT_MS;
+}
+
+export function globalTimeoutMs(settings: E2eSettings, selected: readonly ScenarioDefinition[]): number {
+  return settings.globalTimeoutMs ?? DEFAULT_GLOBAL_TIMEOUT_MS + selected.reduce((sum, definition) => sum + (definition.timeoutMs ?? 0), 0);
 }
 
 export const TURN_TIMEOUT_MS = 6 * 60_000;
@@ -30,6 +39,7 @@ export interface StartOptions {
   readonly extraArgs?: readonly string[];
   readonly env?: Readonly<Record<string, string>>;
   readonly label?: string;
+  readonly repo?: string;
 }
 
 export function roleConfig(settings: E2eSettings, extra: Record<string, unknown> = {}): Record<string, unknown> {
@@ -42,7 +52,7 @@ export function roleConfig(settings: E2eSettings, extra: Record<string, unknown>
 }
 
 export async function startSession(ctx: ScenarioContext, options: StartOptions = {}): Promise<TowerSession> {
-  const repo = createToyRepo(ctx.dir);
+  const repo = options.repo ?? createToyRepo(ctx.dir);
   const rpc = launchPi(ctx.settings, ctx.root, {
     label: options.label ?? ctx.report.id,
     dir: ctx.dir,
@@ -84,11 +94,17 @@ export async function recordUsage(ctx: ScenarioContext, session: TowerSession): 
       cost: Number(data.cost ?? 0),
     });
   }
-  const roster = towerState(session.repo)?.roster.agents ?? [];
-  for (const path of agentTranscripts(session.repo)) {
+  recordAgentUsage(ctx, session.repo);
+}
+
+const USAGE_ROLES: Readonly<Record<string, string>> = { worker: 'workers', reviewer: 'reviewers', validator: 'validators' };
+
+export function recordAgentUsage(ctx: ScenarioContext, repo: string, retired: readonly RosterEntry[] = []): void {
+  const roster = [...(towerState(repo)?.roster.agents ?? []), ...retired];
+  for (const path of agentTranscripts(repo)) {
     const id = /_(agent-[0-9a-f]+)\.jsonl$/.exec(path)?.[1];
-    const kind = roster.find((agent) => agent.agentId === id)?.kind;
-    ctx.report.addUsage(kind === 'worker' ? 'workers' : kind === 'reviewer' ? 'reviewers' : 'tower agents', summarizeTranscript(path).usage);
+    const kind = roster.find((agent) => agent.agentId === id)?.kind ?? '';
+    ctx.report.addUsage(USAGE_ROLES[kind] ?? 'tower agents', summarizeTranscript(path).usage);
   }
 }
 

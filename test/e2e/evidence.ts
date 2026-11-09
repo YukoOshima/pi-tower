@@ -16,6 +16,11 @@ export interface RosterEntry {
   readonly cwd?: string;
   readonly spawnedAt?: string;
   readonly deathStatus?: string;
+  readonly diedAt?: string;
+  readonly milestoneId?: string;
+  readonly validationKind?: string;
+  readonly validationRound?: number;
+  readonly validatedCommit?: string;
 }
 
 export interface MissionRecord {
@@ -28,12 +33,56 @@ export interface MissionRecord {
   readonly owner?: string;
   readonly deps?: readonly string[];
   readonly scope?: readonly string[];
+  readonly milestone?: string;
+  readonly origin?: string;
+  readonly attempts?: number;
+}
+
+export interface ValidationRoundRecord {
+  readonly round: number;
+  readonly kind: string;
+  readonly validator: string;
+  readonly validatedCommit: string;
+  readonly verdict: string;
+  readonly failures: readonly string[];
+  readonly file: string;
+  readonly date: string;
+}
+
+export interface MilestoneRecord {
+  readonly id: string;
+  readonly title: string;
+  readonly order: number;
+  readonly status: string;
+  readonly rounds: readonly ValidationRoundRecord[];
+  readonly validationCommit?: string;
+  readonly passedAt?: string;
+}
+
+export interface ObjectiveRecord {
+  readonly id: string;
+  readonly title: string;
+  readonly status: string;
+  readonly definitionOfDone: readonly string[];
+  readonly acceptanceCommands: readonly string[];
+  readonly milestones: readonly MilestoneRecord[];
+  readonly limits: { readonly maxValidationRounds: number; readonly maxFeatureAttempts: number; readonly maxWallTimeMs?: number; readonly maxCostUsd?: number };
+  readonly approvedBy?: string;
+  readonly approvedAt?: string;
+  readonly startedAt?: string;
+  readonly completedAt?: string;
+  readonly blockedReason?: string;
+  readonly pausedReason?: string;
+  readonly usage?: { readonly costUsd: number };
+  readonly notes: readonly string[];
 }
 
 export interface TowerState {
   readonly base: string;
   readonly roster: { readonly agents: readonly RosterEntry[] };
   readonly missions: readonly MissionRecord[];
+  readonly objective?: ObjectiveRecord;
+  readonly objectiveMode?: string;
 }
 
 export function towerState(repo: string): TowerState | undefined {
@@ -49,8 +98,42 @@ export function activityLog(repo: string): string[] {
   return existsSync(path) ? readFileSync(path, 'utf8').split('\n').filter((line) => line.trim().length > 0) : [];
 }
 
+export interface LogEntry {
+  readonly index: number;
+  readonly at: string;
+  readonly actor: string;
+  readonly action: string;
+  readonly fields: Readonly<Record<string, string>>;
+  readonly line: string;
+}
+
+export function parseLogLine(line: string, index: number): LogEntry {
+  const [at = '', actor = '', action = '', ...rest] = line.split(' ');
+  const fields: Record<string, string> = {};
+  let key: string | undefined;
+  for (const token of rest) {
+    const eq = token.indexOf('=');
+    if (eq > 0 && /^[a-z_]+$/.test(token.slice(0, eq))) {
+      key = token.slice(0, eq);
+      fields[key] = token.slice(eq + 1);
+    } else if (key !== undefined) {
+      fields[key] = `${fields[key] ?? ''} ${token}`;
+    }
+  }
+  return { index, at, actor, action, fields, line };
+}
+
+export function logEntries(repo: string): LogEntry[] {
+  return activityLog(repo).map(parseLogLine);
+}
+
 export function reviewFiles(repo: string): { readonly name: string; readonly text: string }[] {
   const dir = join(repo, '.tower', 'comms', 'reviews');
+  return listFiles(dir).map((name) => ({ name, text: readFileSync(join(dir, name), 'utf8') }));
+}
+
+export function validationFiles(repo: string): { readonly name: string; readonly text: string }[] {
+  const dir = join(repo, '.tower', 'comms', 'validations');
   return listFiles(dir).map((name) => ({ name, text: readFileSync(join(dir, name), 'utf8') }));
 }
 

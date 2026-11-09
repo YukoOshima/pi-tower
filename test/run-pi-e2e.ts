@@ -4,6 +4,7 @@ import { join } from 'node:path';
 
 import { renderReport, ScenarioReport } from './e2e/report.ts';
 import { sleep } from './e2e/rpc.ts';
+import { globalTimeoutMs, scenarioTimeoutMs } from './e2e/scenario.ts';
 import { SCENARIOS } from './e2e/scenarios/index.ts';
 import { discriminationNotes, loadSettings } from './e2e/settings.ts';
 import { selfCheckWakeParser } from './e2e/wakes.ts';
@@ -17,6 +18,8 @@ if (!selfCheck.ok || process.argv.includes('--selfcheck')) process.exit(selfChec
 const startedAt = Date.now();
 const root = new RunRoot();
 const reports: ScenarioReport[] = [];
+const selected = SCENARIOS.filter((scenario) => settings.scenarios.includes(scenario.id));
+const runTimeoutMs = globalTimeoutMs(settings, selected);
 const watched = [join(settings.agentDir, 'settings.json'), join(settings.agentDir, 'tower.json')];
 
 function fingerprint(path: string): string {
@@ -33,8 +36,10 @@ const header = [
   `- orchestrator model (A): ${settings.orchestrator.spec}`,
   `- worker model (B): ${settings.worker.spec}`,
   `- reviewer model (C): ${settings.reviewer.spec}`,
+  `- validator model (objective scenarios): ${settings.validator.spec}`,
   `- starting session model: ${settings.session.spec}`,
-  `- scenarios: ${settings.scenarios.join(', ')}`,
+  `- scenarios: ${selected.map((scenario) => `${scenario.id} (timeout ${String(Math.round(scenarioTimeoutMs(settings, scenario) / 60_000))} min)`).join(', ')}`,
+  `- run timeout: ${String(Math.round(runTimeoutMs / 60_000))} min`,
   `- run root: ${root.path}${settings.keep ? ' (kept)' : ' (removed at exit)'}`,
   `- offline wake parser self-check: ok (${selfCheck.lines.join('; ')})`,
   '- role-model discrimination:',
@@ -65,8 +70,8 @@ async function finish(code: number, reason?: string): Promise<never> {
 }
 
 const globalTimer = setTimeout(() => {
-  void finish(2, `GLOBAL TIMEOUT after ${String(settings.globalTimeoutMs)}ms — killing pi processes`);
-}, settings.globalTimeoutMs);
+  void finish(2, `GLOBAL TIMEOUT after ${String(runTimeoutMs)}ms — killing pi processes`);
+}, runTimeoutMs);
 globalTimer.unref();
 process.on('uncaughtException', (error) => {
   void finish(1, `uncaught exception: ${error.stack ?? error.message}`);
@@ -80,12 +85,13 @@ for (const signal of ['SIGINT', 'SIGTERM'] as const) {
   });
 }
 
-for (const definition of SCENARIOS.filter((scenario) => settings.scenarios.includes(scenario.id))) {
+for (const definition of selected) {
   const report = new ScenarioReport(definition.id, definition.title, definition.mandatory);
   reports.push(report);
   console.log(`\n== ${definition.id} ${definition.title}`);
   const begin = Date.now();
   const dir = root.scenarioDir(definition.id);
+  const timeoutMs = scenarioTimeoutMs(settings, definition);
   let timer: NodeJS.Timeout | undefined;
   const running = definition.run({ settings, root, report, dir });
   running.catch(() => undefined);
@@ -94,8 +100,8 @@ for (const definition of SCENARIOS.filter((scenario) => settings.scenarios.inclu
       running,
       new Promise<never>((_, reject) => {
         timer = setTimeout(() => {
-          reject(new Error(`scenario timeout after ${String(settings.scenarioTimeoutMs)}ms`));
-        }, settings.scenarioTimeoutMs);
+          reject(new Error(`scenario timeout after ${String(timeoutMs)}ms`));
+        }, timeoutMs);
       }),
     ]);
     if (report.checks.length === 0 && report.verdict === 'pass') report.fail('the scenario made no assertions');

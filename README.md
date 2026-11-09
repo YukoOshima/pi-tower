@@ -247,7 +247,7 @@ The autopilot:
 - starts a worker for each feature of the current milestone whose dependencies are merged or abandoned, up to `maxRunningAgents`;
 - spawns a reviewer for each review request on the current branch tip;
 - resumes an idle worker that received review findings or has a rebase conflict to resolve;
-- nudges a worker that went idle before finishing its feature (it neither called `TowerComplete` nor reported a blocker) to finish it or say what blocks it, once per branch tip;
+- nudges a worker that went idle before finishing its feature (it neither called `TowerComplete` nor reported a blocker, and is not waiting for the answer to a message it sent) to finish it, report what blocks it, or ask, once per branch tip;
 - replaces a worker that failed or timed out with a fresh one on the same branch, up to `maxFeatureAttempts` workers per feature, and likewise a reviewer or validator that ended without a result; it never replaces an agent you stopped;
 - rebases stale branches and merges the branches that pass the gate;
 - starts validation: it spawns the validators and runs the commands;
@@ -260,7 +260,7 @@ The orchestrator is woken only for judgment, with one of these reasons:
 - `validation-failed`: plan fix features from the failures;
 - `blocker`: a worker reported a blocker or asked a question;
 - `feature-attempts-exhausted`: a feature used up its worker attempts;
-- `worker-idle`: a worker went idle again without finishing after it was nudged;
+- `worker-idle`: a worker went idle again without finishing after it was nudged (in manual mode at once, since nobody nudges it);
 - `worker-stopped`: you stopped the worker of a feature, so the orchestrator asks you how to continue;
 - `merge-blocked`: the merge gate is blocked for a reason that needs judgment, such as files outside the feature's scope;
 - `rebase-conflict`: a conflict that no worker can take over;
@@ -346,14 +346,14 @@ What the run does:
 1. It starts `pi --mode rpc` in the repository, followed by your extra arguments. The checked-out branch becomes the base, so check out a branch first.
 2. It sends `/tower on`, then `/tower objective --headless @<absolute path of the file>`. If the workspace already has an objective that awaits approval or is executing, it follows that one instead and does not send the file again. A paused one ends the run at once with exit code 1: resume it in pi with `/tower resume`, then run `pi-tower run` again to follow it.
 3. It reads `.tower/comms/state.json` every second and prints a line whenever the objective or one of its milestones changes state.
-4. When the objective awaits approval, it prints the plan. With `--auto-approve` it approves and goes on; without it, it exits with 3.
+4. When the objective awaits approval, it prints the plan. With `--auto-approve` it approves and goes on. Without it, it gives the tower two more polls to approve the plan itself (through `objective.autoApprove`), follows the objective if it does, and otherwise exits with 3.
 5. It ends when the objective completes, blocks or pauses, when pi exits, on timeout, or on a signal. pi is always stopped before the run exits.
 
 The run passes your environment to pi, so `PI_TOWER_CONFIG` and the `PI_TOWER_*_MODEL` variables work as usual, for example to give a run its own `tower.json`. Dialogs that nobody can answer are cancelled. The runner writes no files itself: it only reads the state file. Progress goes to stdout, warnings and errors go to stderr.
 
 When you take over a headless objective in pi, a plain `/tower approve` or `/tower resume` switches it back to interactive mode, so the orchestrator asks you again instead of deciding alone.
 
-For unattended runs, set `maxWallTimeMs` and `maxCostUsd` in the [objective settings](#the-objective-section) and use `--timeout` as the outer limit. Approve with `--auto-approve` and leave `objective.autoApprove` off: the flag acts only during this run, and when both are on, they can try to approve the same plan at once, which can fail the run.
+For unattended runs, set `maxWallTimeMs` and `maxCostUsd` in the [objective settings](#the-objective-section) and use `--timeout` as the outer limit. Approve with `--auto-approve` and leave `objective.autoApprove` off: the flag acts only during this run, while the setting approves every plan, in your interactive sessions too (see [Known limitations](#known-limitations)). When both are on, the run follows the objective after whichever approval comes first.
 
 An end-to-end example. Keep the objective file outside the repository, because untracked files in the main checkout can end up in worker branches:
 
@@ -926,13 +926,19 @@ The extension entry point is `src/index.ts`, declared under `pi.extensions` in `
 | S4 | the review rework loop | optional |
 | S7 | a human stop with `/tower stop` | optional |
 | S13 | the `maxRunningAgents=1` concurrency budget | optional |
+| S15 | objective mode end to end: the human approves the plan, two features run in parallel, a failing acceptance check forces a fix feature, the milestone is validated again on the new base tip, and only then does the objective complete | mandatory |
+| S16 | a headless `pi-tower run --auto-approve`: exit code 0, the objective completed, no file in your agent directory changed, no process left behind | mandatory |
+| S17 | restart continuation: pi is killed while a worker runs; after `/tower on` in a new pi, the autopilot gives the feature a fresh worker on its branch and the objective completes | optional |
 
-All seven run by default. The run exits with 1 when a selected scenario fails or your pi settings changed, and with 2 when it hits the global timeout.
+The seven scenarios S1 to S13 run by default. The objective scenarios S15, S16 and S17 run only when you select them, by id or with the `objective` keyword: `--scenarios=objective` runs the three, and `--scenarios=all,objective` runs all ten. The run exits with 1 when a selected scenario fails or your pi settings changed, and with 2 when it hits the global timeout.
+
+The objective scenarios work on a small Node CLI repository and assert only on durable evidence: `state.json`, the activity log, the validation files and the roster. In S15 the acceptance command is a script outside the repository. Its first run in the tower's `commands` validation fails and names a missing deliverable (`docs/USAGE.md`), and later runs pass only once a fix delivered it, so every run goes through the fix loop. All three also check that each milestone validation starts within 15 seconds of the merge that produced its commit, and that the autopilot never launches the same agent twice.
 
 ```sh
 npm run test:e2e:pi -- --selfcheck
 npm run test:e2e:pi
 PI_TOWER_E2E_SCENARIOS=S1,S2,S3,S8 npm run test:e2e:pi -- --report=e2e-report.md
+npm run test:e2e:pi -- --scenarios=objective --report=e2e-objective.md
 ```
 
 `--selfcheck` runs only the offline checks and starts no session. It still calls `pi --version`, so `pi` must be on your `PATH`. It checks the wake parser against this checkout and prints whether each role model can be told apart from pi's default model and from the starting session model.
@@ -944,19 +950,20 @@ PI_TOWER_E2E_SCENARIOS=S1,S2,S3,S8 npm run test:e2e:pi -- --report=e2e-report.md
 | `PI_TOWER_E2E_ORCHESTRATOR_MODEL` | `byteplus-gateway/claude-sonnet-5-5:low` | Orchestrator model |
 | `PI_TOWER_E2E_WORKER_MODEL` | `byteplus-gateway/claude-haiku-5-5:low` | Worker model |
 | `PI_TOWER_E2E_REVIEWER_MODEL` | `byteplus-gateway/claude-opus-5-5:low` | Reviewer model |
+| `PI_TOWER_E2E_VALIDATOR_MODEL` | the reviewer model | Validator model of the objective scenarios |
 | `PI_TOWER_E2E_SESSION_MODEL` | `byteplus-gateway/claude-haiku-5-5:low` | Session model before `/tower on`. It must differ from the orchestrator model, so the switch is observable. |
-| `PI_TOWER_E2E_SCENARIOS` | `all` | Comma-separated scenario ids such as `S1,S3`. `--scenarios=S1,S3` does the same. |
-| `PI_TOWER_E2E_TIMEOUT_MS` | `4500000` (75 minutes) | Timeout for the whole run |
-| `PI_TOWER_E2E_SCENARIO_TIMEOUT_MS` | `1200000` (20 minutes) | Timeout for each scenario |
+| `PI_TOWER_E2E_SCENARIOS` | `all` | Comma-separated scenario ids such as `S1,S3`, or the keywords `all` (S1 to S13) and `objective` (S15 to S17). `--scenarios=S1,S3` does the same. |
+| `PI_TOWER_E2E_TIMEOUT_MS` | `4500000` (75 minutes), plus the timeouts of the selected objective scenarios | Timeout for the whole run |
+| `PI_TOWER_E2E_SCENARIO_TIMEOUT_MS` | `1200000` (20 minutes); 55, 40 and 45 minutes for S15, S16 and S17 | Timeout for each scenario. When set, it applies to every scenario. |
 | `PI_TOWER_E2E_KEEP` | unset | `1` keeps the run directory with its repositories and logs. `--keep` does the same. |
 | `PI_TOWER_E2E_VERBOSE` | unset | `1` echoes the output of the pi processes. `--verbose` does the same. |
 | `PI_TOWER_E2E_REPORT` | unset | Writes the Markdown report to this path. `--report=<path>` does the same. |
 
-Models use the `provider/modelId[:thinking]` form. The orchestrator, worker and reviewer models must be three distinct provider/model ids, or the run refuses to start. The defaults name a `byteplus-gateway` provider, so set the model variables to models that your pi setup can reach. The run uses the providers and credentials of that setup.
+Models use the `provider/modelId[:thinking]` form. The orchestrator, worker and reviewer models must be three distinct provider/model ids, or the run refuses to start; the validator model may repeat one of them. The defaults name a `byteplus-gateway` provider, so set the model variables to models that your pi setup can reach. The run uses the providers and credentials of that setup.
 
-A run spends real tokens. A full run takes about 6 minutes and costs roughly $1.1–1.3 with the default sonnet, haiku and opus models at low thinking.
+A run spends real tokens. A full run takes about 6 minutes and costs roughly $1.1–1.5 with the default sonnet, haiku and opus models at low thinking. The three objective scenarios add about 4–5 minutes and $1.2–1.4. Each caps its objective with `maxCostUsd` and `maxWallTimeMs` in its own `tower.json` (6, 4 and 5 dollars), and the report lists the wall time and cost of every scenario.
 
-The run never modifies your pi settings. Every pi process gets its own `tower.json` (through `PI_TOWER_CONFIG`) and its own session directory inside the run directory. Each one starts with `--no-extensions`, `--no-skills`, `--no-prompt-templates`, `--no-context-files` and `--offline`. The runner fingerprints `settings.json` and `tower.json` in your agent directory (`~/.pi/agent`, or `PI_CODING_AGENT_DIR`) before and after the run, and fails the run if either changed.
+The run never modifies your pi settings. Every pi process gets its own `tower.json` (through `PI_TOWER_CONFIG`) and its own session directory inside the run directory. Each one starts with `--no-extensions`, `--no-skills`, `--no-prompt-templates`, `--no-context-files` and `--offline`. The runner fingerprints `settings.json` and `tower.json` in your agent directory (`~/.pi/agent`, or `PI_CODING_AGENT_DIR`) before and after the run, and fails the run if either changed. S16 goes further around its headless run: it hashes every file in the agent directory before and after, and checks that no process is left with its working directory or command line under the scenario's run directory.
 
 ## License and credits
 
