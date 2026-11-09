@@ -387,6 +387,25 @@ describe('runHeadless', () => {
     ]);
   });
 
+  it('prints info notices of its own commands to stdout and warnings to stderr', async () => {
+    const run = stubRun((pi, state) => {
+      towerOn(pi, state, snapshot(stage('completed', 'passed', 'passed')));
+      pi.reactions['/tower on'] = {
+        notices: [
+          { level: 'info', text: 'Tower mode: ON\nmore detail' },
+          { level: 'warning', text: 'the validator model falls back to the reviewer model' },
+        ],
+        effect: () => state.set(snapshot(stage('executing', 'active', 'pending'))),
+      };
+      state.onRead = (reads) => {
+        if (reads === 2) state.set(snapshot(stage('completed', 'passed', 'passed')));
+      };
+    });
+    expect(await runHeadless(runOptions(), run.deps)).toBe(HEADLESS_EXIT.completed);
+    expect(plain(run.info)).toContain('pi: Tower mode: ON');
+    expect(plain(run.errors)).toEqual(['pi warning: the validator model falls back to the reviewer model']);
+  });
+
   it('exits 1 when the auto-approval is refused', async () => {
     const run = stubRun((pi, state) => {
       towerOn(pi, state);

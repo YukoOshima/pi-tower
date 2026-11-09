@@ -304,7 +304,10 @@ class HeadlessRun {
     }
     const errors = result.notices.filter((notice) => notice.level === 'error');
     if (errors.length > 0) throw this.failure(code, `${text} failed: ${errors.map((notice) => notice.text).join(' | ')}`);
-    for (const notice of result.notices) this.line(`pi: ${notice.text.split('\n')[0] ?? ''}`);
+    for (const notice of result.notices) {
+      if (notice.level === 'info') this.line(`pi: ${notice.text.split('\n')[0] ?? ''}`);
+      else this.fail(`pi ${notice.level}: ${notice.text}`);
+    }
     return result;
   }
 
