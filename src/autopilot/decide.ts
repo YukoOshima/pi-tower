@@ -376,14 +376,7 @@ function planMilestone(draft: Draft): void {
   const kinds = milestoneRequiredKinds(objective, current, snapshot.settings);
   const failures = failingRounds(current, kinds, snapshot.baseTip);
   if (failures.length > 0) {
-    const rounds = failures.map((round) => `${round.kind}-r${String(round.round)}`);
-    wake(
-      draft,
-      'validation-failed',
-      current.id,
-      rounds.join('+'),
-      `milestone ${current.id} failed validation (${rounds.join(', ')}) — plan fix features into ${current.id}`,
-    );
+    wakeValidationFailed(draft, current, failures);
     return;
   }
   if (current.status === 'failed') {
@@ -391,6 +384,21 @@ function planMilestone(draft: Draft): void {
   } else if (current.status !== 'active' && current.status !== 'validating') return;
   if (features.some((feature) => !isClosed(feature))) return;
   planValidation(draft, current, kinds, false);
+}
+
+function wakeValidationFailed(
+  draft: Draft,
+  milestone: AutopilotMilestone,
+  failures: readonly AutopilotRound[],
+): void {
+  const rounds = failures.map((round) => `${round.kind}-r${String(round.round)}`);
+  wake(
+    draft,
+    'validation-failed',
+    milestone.id,
+    rounds.join('+'),
+    `milestone ${milestone.id} failed validation (${rounds.join(', ')}) — plan fix features into ${milestone.id}`,
+  );
 }
 
 function failingRounds(
@@ -444,15 +452,19 @@ function planCompletion(draft: Draft): void {
   const { objective, snapshot } = draft;
   const final = finalMilestone(objective);
   if (final === undefined) return;
+  const kinds = milestoneRequiredKinds(objective, final, snapshot.settings);
+  const failures = failingRounds(final, kinds, snapshot.baseTip);
+  if (failures.length > 0) {
+    wakeValidationFailed(draft, final, failures);
+    return;
+  }
   const ids = new Set(objective.milestones.map((milestone) => milestone.id));
   const open = snapshot.missions.some(
     (mission) => mission.milestone !== undefined && ids.has(mission.milestone) && !isClosed(mission),
   );
   if (open) return;
-  const kinds = milestoneRequiredKinds(objective, final, snapshot.settings);
   const verdicts = kinds.map((kind) => latestRound(final, kind, snapshot.baseTip)?.verdict);
   const stamped = final.validationCommit === snapshot.baseTip;
-  if (stamped && verdicts.includes('fail')) return;
   if (stamped && verdicts.every((verdict) => verdict === 'pass')) {
     draft.transitions.push({ type: 'complete-objective', objective: objective.id });
     return;

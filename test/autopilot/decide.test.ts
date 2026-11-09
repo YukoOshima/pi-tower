@@ -751,6 +751,7 @@ const FINAL_PASSED = milestone('MS2', 2, {
   validationCommit: BASE,
   rounds: [round('scrutiny', 1, BASE, 'pass'), round('user-testing', 1, BASE, 'pass')],
 });
+const FINAL_FAILED_ON_TIP = { ...FINAL_PASSED, rounds: [...FINAL_PASSED.rounds, round('user-testing', 2, BASE, 'fail')] };
 const ZERO_KIND_FINAL = milestone('MS2', 2, { status: 'passed', validation: NO_KINDS, validationCommit: BASE });
 const ALL_MERGED = [merged('M1'), merged('M3', { milestone: 'MS2' })];
 
@@ -805,12 +806,76 @@ table('completion', [
     actions: [validate('MS2', BASE, ['commands'])],
   },
   {
-    name: 'a fail on the tip never completes',
+    name: 'a fail on the tip never completes: the passed final wakes for a fix',
+    snap: snapshot({ objective: { milestones: [PASSED_MS1, FINAL_FAILED_ON_TIP] }, missions: ALL_MERGED }),
+    actions: [wakeOf('validation-failed', 'MS2', 'user-testing-r2')],
+  },
+  {
+    name: 'the final failure wake is sent once',
     snap: snapshot({
-      objective: { milestones: [PASSED_MS1, { ...FINAL_PASSED, rounds: [...FINAL_PASSED.rounds, round('user-testing', 2, BASE, 'fail')] }] },
+      objective: { milestones: [PASSED_MS1, FINAL_FAILED_ON_TIP] },
       missions: ALL_MERGED,
+      memory: { wakeKeys: ['validation-failed:MS2:user-testing-r2'] },
     }),
     actions: [],
+  },
+  {
+    name: 'every failing kind of the passed final is part of the wake revision',
+    snap: snapshot({
+      objective: {
+        milestones: [
+          PASSED_MS1,
+          { ...FINAL_PASSED, rounds: [...FINAL_FAILED_ON_TIP.rounds, round('scrutiny', 2, BASE, 'fail')] },
+        ],
+      },
+      missions: ALL_MERGED,
+    }),
+    actions: [wakeOf('validation-failed', 'MS2', 'scrutiny-r2+user-testing-r2')],
+  },
+  {
+    name: 'a new failing round on the passed final wakes again',
+    snap: snapshot({
+      objective: {
+        milestones: [
+          PASSED_MS1,
+          { ...FINAL_PASSED, rounds: [...FINAL_FAILED_ON_TIP.rounds, round('user-testing', 3, BASE, 'fail')] },
+        ],
+      },
+      missions: ALL_MERGED,
+      memory: { wakeKeys: ['validation-failed:MS2:user-testing-r2'] },
+    }),
+    actions: [wakeOf('validation-failed', 'MS2', 'user-testing-r3')],
+  },
+  {
+    name: 'a fix still open on the failed final does not suppress the wake',
+    snap: snapshot({
+      objective: { milestones: [PASSED_MS1, FINAL_FAILED_ON_TIP] },
+      missions: [...ALL_MERGED, working('M9', { milestone: 'MS2' })],
+    }),
+    actions: [wakeOf('validation-failed', 'MS2', 'user-testing-r2')],
+  },
+  {
+    name: 'a later pass on the tip supersedes the failing final round',
+    snap: snapshot({
+      objective: {
+        milestones: [
+          PASSED_MS1,
+          { ...FINAL_PASSED, rounds: [...FINAL_FAILED_ON_TIP.rounds, round('user-testing', 3, BASE, 'pass')] },
+        ],
+      },
+      missions: ALL_MERGED,
+    }),
+    actions: [{ type: 'complete-objective', objective: 'O1' }],
+  },
+  {
+    name: 'a failing final round on an older commit re-validates on the moved tip instead',
+    snap: snapshot({ baseTip: 'base-1', objective: { milestones: [PASSED_MS1, FINAL_FAILED_ON_TIP] }, missions: ALL_MERGED }),
+    actions: [validate('MS2', 'base-1', ['scrutiny', 'user-testing'])],
+  },
+  {
+    name: 'a failing round of a kind the final no longer requires is ignored',
+    snap: snapshot({ settings: { skipUserTesting: true }, objective: { milestones: [PASSED_MS1, FINAL_FAILED_ON_TIP] }, missions: ALL_MERGED }),
+    actions: [{ type: 'complete-objective', objective: 'O1' }],
   },
   {
     name: 'an open feature holds the completion',
