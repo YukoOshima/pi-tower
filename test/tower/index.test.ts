@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { TOWER_MODEL_FLAGS } from '../../src/config/index.ts';
 import towerExtension from '../../src/index.ts';
+import { MISSION_COMMAND, MISSION_COMMAND_ALIAS } from '../../src/mission/constants.ts';
 import { TOWER_MODE_USER_ENABLED_ONLY, todoToolDenied } from '../../src/prompts/index.ts';
 import { TowerStore } from '../../src/protocol/index.ts';
 import {
@@ -22,6 +23,7 @@ const EVENTS = [
   'session_start',
   'session_shutdown',
   'before_agent_start',
+  'input',
   'tool_call',
   'tool_result',
   'after_provider_response',
@@ -166,7 +168,7 @@ afterEach(async () => {
 });
 
 describe('tower extension factory', () => {
-  it('only registers the tower tools, the model flags, the /tower command and the event handlers', async () => {
+  it('only registers the tower tools, the model flags, the /tower and /mission commands and the event handlers', async () => {
     expect(getAgentDir()).toBe(agentDir);
     const pi = new RecordingPi();
 
@@ -180,7 +182,7 @@ describe('tower extension factory', () => {
     );
     expect(Object.values(TOWER_MODEL_FLAGS).sort()).toEqual([...pi.flags.keys()].sort());
     for (const flag of pi.flags.values()) expect(flag).toMatchObject({ type: 'string' });
-    expect([...pi.commands.keys()]).toEqual([TOWER_COMMAND]);
+    expect([...pi.commands.keys()]).toEqual([TOWER_COMMAND, MISSION_COMMAND, MISSION_COMMAND_ALIAS]);
     expect([...pi.handlers.keys()].sort()).toEqual([...EVENTS].sort());
     for (const handlers of pi.handlers.values()) expect(handlers).toHaveLength(1);
 

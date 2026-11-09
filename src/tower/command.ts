@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 
-import type { ExtensionCommandContext } from '@earendil-works/pi-coding-agent';
+import type { ExtensionCommandContext, ExtensionContext } from '@earendil-works/pi-coding-agent';
 import type { AutocompleteItem } from '@earendil-works/pi-tui';
 
 import { TOWER_OBJECTIVE_DEFAULTS } from '../config/index.ts';
@@ -20,6 +20,8 @@ import {
   type TowerObjectiveLimits,
   type TowerObjectiveLimitsInput,
   type TowerObjectiveMode,
+  type TowerRosterEntry,
+  type TowerState,
   type TowerStore,
   type TowerValidationKind,
 } from '../protocol/index.ts';
@@ -27,6 +29,7 @@ import { knownAgentNames, loadRoster, resolveAgentRef } from '../tools/agents.ts
 import { readTowerStatusSummary } from '../tools/status/statusReader.ts';
 import { renderTowerTasks } from '../tools/tasks/tasksTool.ts';
 import { towerEnterFailureMessage, type TowerController } from './controller.ts';
+import type { TowerAgentInfo } from './runtimeTypes.ts';
 
 export const TOWER_COMMAND_DESCRIPTION =
   'Tower multi-agent mode: /tower on | off | status | teardown | <base-branch> | models [<role|alias> <provider/model[:thinking]>|--clear] [--project] | agents | stop <agent> | objective [--headless] <text | @file> | objective status | approve [--auto] | pause [reason] | resume | help';
@@ -138,7 +141,7 @@ export interface TowerCommandDeps {
   readonly objective?: TowerObjectiveCommandHooks;
 }
 
-export function commandUi(ctx: ExtensionCommandContext): TowerCommandUi {
+export function commandUi(ctx: Pick<ExtensionContext, 'hasUI' | 'mode' | 'ui'>): TowerCommandUi {
   const emit = (text: string, level: 'info' | 'warning' | 'error'): void => {
     if (ctx.hasUI) {
       ctx.ui.notify(text, level);
@@ -327,7 +330,7 @@ async function startTowerWithBase(
   ui.notice(wasActive ? `Tower base: ${base}` : `Tower mode: ON (base: ${base})`);
 }
 
-async function setTowerMode(
+export async function setTowerMode(
   controller: TowerController,
   ui: TowerCommandUi,
   enabled: boolean,
@@ -373,6 +376,26 @@ async function showTowerStatus(controller: TowerController, ui: TowerCommandUi):
   }
 }
 
+export type TowerHumanStopOutcome =
+  | { readonly status: 'stopped'; readonly info: TowerAgentInfo }
+  | { readonly status: 'not-running'; readonly info: TowerAgentInfo }
+  | { readonly status: 'unknown'; readonly refusal: string };
+
+export async function humanStopAgent(controller: TowerController, target: string): Promise<TowerHumanStopOutcome> {
+  const state = await loadRoster(controller);
+  const resolved = resolveAgentRef(state, target);
+  const unknown = (): TowerHumanStopOutcome => ({
+    status: 'unknown',
+    refusal: unknownAgentRefusal(target, knownAgentNames(state, controller.listAgents(false))),
+  });
+  const info = controller.agentInfo(resolved.id);
+  if (info === undefined) return unknown();
+  const result = await controller.humanStop(resolved.id);
+  if (result === 'stopped') return { status: 'stopped', info };
+  if (result === 'idle' || (result === 'missing' && info.status !== 'running')) return { status: 'not-running', info };
+  return unknown();
+}
+
 async function humanStop(controller: TowerController, ui: TowerCommandUi, ref: string): Promise<void> {
   const target = ref.trim();
   if (target.length === 0) {
@@ -380,26 +403,21 @@ async function humanStop(controller: TowerController, ui: TowerCommandUi, ref: s
     return;
   }
   try {
-    const state = await loadRoster(controller);
-    const resolved = resolveAgentRef(state, target);
-    const info = controller.agentInfo(resolved.id);
-    if (info === undefined) {
-      ui.error(unknownAgentRefusal(target, knownAgentNames(state, controller.listAgents(false))));
-      return;
+    const outcome = await humanStopAgent(controller, target);
+    switch (outcome.status) {
+      case 'stopped':
+        ui.notice(
+          `Stopped ${outcome.info.name}`,
+          `${outcome.info.name} (agent_id: ${outcome.info.agentId}) is stopped by you — dead by intent: the tower will not resume, reassign, or replace it unless you say so.`,
+        );
+        return;
+      case 'not-running':
+        ui.status(`${outcome.info.name} is not running — nothing was stopped.`);
+        return;
+      case 'unknown':
+        ui.error(outcome.refusal);
+        return;
     }
-    const result = await controller.humanStop(resolved.id);
-    if (result === 'stopped') {
-      ui.notice(
-        `Stopped ${info.name}`,
-        `${info.name} (agent_id: ${info.agentId}) is stopped by you — dead by intent: the tower will not resume, reassign, or replace it unless you say so.`,
-      );
-      return;
-    }
-    if (result === 'idle' || (result === 'missing' && info.status !== 'running')) {
-      ui.status(`${info.name} is not running — nothing was stopped.`);
-      return;
-    }
-    ui.error(unknownAgentRefusal(target, knownAgentNames(state, controller.listAgents(false))));
   } catch (error) {
     ui.error(`Failed to stop ${target}: ${errorText(error)}`);
   }
@@ -442,30 +460,20 @@ async function objectiveCommand(
     return;
   }
   try {
-    const file = request.file === undefined ? undefined : resolve(ctx.cwd, request.file);
-    const text = file === undefined ? (request.text ?? '') : await readObjectiveFile(file);
-    const workspace = await ensureTowerWorkspace(controller);
-    const current = (await workspace.store.load()).objective;
-    if (current !== undefined && !canPlanObjective(current)) {
-      ui.error(openObjectiveRefusal(current));
+    const send: TowerCommandDeps['sendUserMessage'] = (text, options) => {
+      deps.sendUserMessage(text, options);
+    };
+    const outcome = await handOverObjective(controller, ctx, send, request);
+    if (!outcome.handed) {
+      ui.error(openObjectiveRefusal(outcome.open));
       return;
     }
-    await workspace.store.setObjectiveMode(request.mode);
-    deps.sendUserMessage(
-      buildObjectivePlanningPrompt({
-        mode: request.mode,
-        text,
-        ...(file === undefined ? {} : { file }),
-        ...(current === undefined ? {} : { current: { id: current.id, title: current.title, status: current.status } }),
-      }),
-      idle(ctx) ? undefined : { deliverAs: 'followUp' },
-    );
     ui.notice(
       request.mode === 'headless' ? 'Objective handed to the tower (headless)' : 'Objective handed to the tower',
       [
-        ...(workspace.initializedBase === undefined
+        ...(outcome.initializedBase === undefined
           ? []
-          : [`Initialized the tower workspace on base "${workspace.initializedBase}".`]),
+          : [`Initialized the tower workspace on base "${outcome.initializedBase}".`]),
         request.mode === 'headless'
           ? 'The orchestrator plans it without asking questions, records its assumptions as notes, and requests approval.'
           : 'The orchestrator plans it with you, then asks you to approve the plan with /tower approve.',
@@ -474,6 +482,44 @@ async function objectiveCommand(
   } catch (error) {
     ui.error(`/tower objective failed: ${errorText(error)}`);
   }
+}
+
+export interface ObjectiveHandOverRequest {
+  readonly mode: TowerObjectiveMode;
+  readonly text?: string;
+  readonly file?: string;
+}
+
+export type ObjectiveHandOverOutcome =
+  | { readonly handed: true; readonly current?: TowerObjective; readonly initializedBase?: string }
+  | { readonly handed: false; readonly open: TowerObjective };
+
+export async function handOverObjective(
+  controller: TowerController,
+  ctx: Pick<ExtensionContext, 'cwd' | 'isIdle'>,
+  send: TowerCommandDeps['sendUserMessage'],
+  request: ObjectiveHandOverRequest,
+): Promise<ObjectiveHandOverOutcome> {
+  const file = request.file === undefined ? undefined : resolve(ctx.cwd, request.file);
+  const text = file === undefined ? (request.text ?? '') : await readObjectiveFile(file);
+  const workspace = await ensureTowerWorkspace(controller);
+  const current = (await workspace.store.load()).objective;
+  if (current !== undefined && !canPlanObjective(current)) return { handed: false, open: current };
+  await workspace.store.setObjectiveMode(request.mode);
+  send(
+    buildObjectivePlanningPrompt({
+      mode: request.mode,
+      text,
+      ...(file === undefined ? {} : { file }),
+      ...(current === undefined ? {} : { current: { id: current.id, title: current.title, status: current.status } }),
+    }),
+    idle(ctx) ? undefined : { deliverAs: 'followUp' },
+  );
+  return {
+    handed: true,
+    ...(current === undefined ? {} : { current }),
+    ...(workspace.initializedBase === undefined ? {} : { initializedBase: workspace.initializedBase }),
+  };
 }
 
 async function readObjectiveFile(file: string): Promise<string> {
@@ -487,7 +533,7 @@ async function readObjectiveFile(file: string): Promise<string> {
   return text;
 }
 
-async function ensureTowerWorkspace(
+export async function ensureTowerWorkspace(
   controller: TowerController,
 ): Promise<{ readonly store: TowerStore; readonly initializedBase?: string }> {
   const store = controller.store();
@@ -517,15 +563,36 @@ function openObjectiveRefusal(objective: TowerObjective): string {
   return `Objective ${objective.id} "${objective.title}" is ${objective.status} — /tower objective plans a new objective only when none is open or the open one is still planning. See it with /tower objective status; ${next}.`;
 }
 
-function objectiveSettings(deps: TowerCommandDeps): ObjectiveSettingsValues {
+export function objectiveSettingsOf(deps: Pick<TowerCommandDeps, 'objective'>): ObjectiveSettingsValues {
   return deps.objective?.objectiveSettings() ?? TOWER_OBJECTIVE_DEFAULTS;
 }
 
-function skippedKinds(settings: ObjectiveSettingsValues): TowerValidationKind[] {
+export function skippedKinds(settings: ObjectiveSettingsValues): TowerValidationKind[] {
   return [
     ...(settings.skipScrutiny ? (['scrutiny'] as const) : []),
     ...(settings.skipUserTesting ? (['user-testing'] as const) : []),
   ];
+}
+
+export function liveRosterAgents(controller: TowerController, state: TowerState): TowerRosterEntry[] {
+  const active = controller.activeAgentIds();
+  return state.roster.agents.filter((agent) => agent.diedAt === undefined && active.has(agent.agentId));
+}
+
+export function objectiveStatusMarkdown(
+  controller: TowerController,
+  deps: Pick<TowerCommandDeps, 'objective'>,
+  state: TowerState,
+  objective: TowerObjective,
+  nowMs: number,
+): string {
+  return renderObjectiveStatus({
+    objective,
+    features: objectiveMissions(state),
+    agents: liveRosterAgents(controller, state),
+    nowMs,
+    skipKinds: skippedKinds(objectiveSettingsOf(deps)),
+  });
 }
 
 async function showObjectiveStatus(
@@ -545,18 +612,22 @@ async function showObjectiveStatus(
       ui.status('There is no objective — hand one to the tower with /tower objective <text | @file>.');
       return;
     }
-    const active = controller.activeAgentIds();
-    const [title = '', ...body] = renderObjectiveStatus({
-      objective,
-      features: objectiveMissions(state),
-      agents: state.roster.agents.filter((agent) => agent.diedAt === undefined && active.has(agent.agentId)),
-      nowMs: Date.now(),
-      skipKinds: skippedKinds(objectiveSettings(deps)),
-    }).split('\n');
+    const [title = '', ...body] = objectiveStatusMarkdown(controller, deps, state, objective, Date.now()).split('\n');
     ui.notice(title.replace(/^#\s*/, ''), body.join('\n'));
   } catch (error) {
     ui.error(`Failed to read the objective status: ${errorText(error)}`);
   }
+}
+
+export async function approveTowerObjective(
+  controller: TowerController,
+  by: 'human' | 'auto',
+): Promise<TowerObjective> {
+  return controller.store().approveObjective(by);
+}
+
+export async function pauseTowerObjective(controller: TowerController, reason: string): Promise<TowerObjective> {
+  return controller.store().pauseObjective(reason);
 }
 
 async function approveObjective(
@@ -572,7 +643,7 @@ async function approveObjective(
   }
   let objective: TowerObjective;
   try {
-    objective = await controller.store().approveObjective(auto ? 'auto' : 'human');
+    objective = await approveTowerObjective(controller, auto ? 'auto' : 'human');
   } catch (error) {
     ui.error(`Approval failed — ${errorText(error)}`);
     return;
@@ -591,7 +662,7 @@ async function approveObjective(
 
 async function pauseObjective(controller: TowerController, ui: TowerCommandUi, reason: string): Promise<void> {
   try {
-    const objective = await controller.store().pauseObjective(reason);
+    const objective = await pauseTowerObjective(controller, reason);
     ui.notice(
       `Objective ${objective.id} paused`,
       `Reason: ${objective.pausedReason ?? reason}. Running agents keep their current turn; nothing new starts until /tower resume.`,
@@ -601,6 +672,25 @@ async function pauseObjective(controller: TowerController, ui: TowerCommandUi, r
   }
 }
 
+export type TowerResumeOutcome =
+  | { readonly status: 'resumed'; readonly objective: TowerObjective }
+  | { readonly status: 'missing' }
+  | { readonly status: 'not-resumable'; readonly objective: TowerObjective };
+
+export async function resumeTowerObjective(
+  controller: TowerController,
+  settings: () => ObjectiveSettingsValues,
+): Promise<TowerResumeOutcome> {
+  const store = controller.store();
+  const current = (await store.load()).objective;
+  if (current === undefined) return { status: 'missing' };
+  if (current.status !== 'paused' && current.status !== 'blocked') {
+    return { status: 'not-resumable', objective: current };
+  }
+  await store.updateObjective({ limits: refreshedLimits(settings()) });
+  return { status: 'resumed', objective: await store.resumeObjective() };
+}
+
 async function resumeObjective(
   controller: TowerController,
   deps: TowerCommandDeps,
@@ -608,20 +698,18 @@ async function resumeObjective(
 ): Promise<void> {
   let objective: TowerObjective;
   try {
-    const store = controller.store();
-    const current = (await store.load()).objective;
-    if (current === undefined) {
+    const outcome = await resumeTowerObjective(controller, () => objectiveSettingsOf(deps));
+    if (outcome.status === 'missing') {
       ui.error('There is no objective to resume — hand one to the tower with /tower objective <text | @file>.');
       return;
     }
-    if (current.status !== 'paused' && current.status !== 'blocked') {
+    if (outcome.status === 'not-resumable') {
       ui.error(
-        `Resume failed — objective ${current.id} is ${current.status}; only a paused or blocked objective can be resumed.`,
+        `Resume failed — objective ${outcome.objective.id} is ${outcome.objective.status}; only a paused or blocked objective can be resumed.`,
       );
       return;
     }
-    await store.updateObjective({ limits: refreshedLimits(objectiveSettings(deps)) });
-    objective = await store.resumeObjective();
+    objective = outcome.objective;
   } catch (error) {
     ui.error(`Resume failed — ${errorText(error)}`);
     return;
@@ -648,7 +736,7 @@ function refreshedLimits(settings: ObjectiveSettingsValues): TowerObjectiveLimit
   };
 }
 
-function describeLimits(limits: TowerObjectiveLimits): string {
+export function describeLimits(limits: TowerObjectiveLimits): string {
   return [
     `${String(limits.maxValidationRounds)} failed validation rounds per kind`,
     `${String(limits.maxFeatureAttempts)} attempts per feature`,
@@ -657,7 +745,7 @@ function describeLimits(limits: TowerObjectiveLimits): string {
   ].join(' · ');
 }
 
-function exhaustedBudgets(objective: TowerObjective, nowMs: number): string[] {
+export function exhaustedBudgets(objective: TowerObjective, nowMs: number): string[] {
   const exhausted: string[] = [];
   const { maxWallTimeMs, maxCostUsd } = objective.limits;
   const startedAt = objective.startedAt === undefined ? Number.NaN : Date.parse(objective.startedAt);
@@ -677,24 +765,33 @@ function continueObjective(
   ui: TowerCommandUi,
   reason: 'approve' | 'resume',
 ): void {
-  if (!controller.isActive) {
-    ui.status('Tower mode is off — the objective continues once you turn it on with /tower on.');
-    return;
-  }
-  const hooks = deps.objective;
-  if (hooks === undefined) return;
+  const continued = continueTowerObjective(controller, deps.objective, reason, (message) => {
+    ui.error(`The autopilot tick after /tower ${reason} failed: ${message}`);
+  });
+  if (!continued) ui.status('Tower mode is off — the objective continues once you turn it on with /tower on.');
+}
+
+export function continueTowerObjective(
+  controller: TowerController,
+  hooks: TowerObjectiveCommandHooks | undefined,
+  reason: 'approve' | 'resume',
+  onTickFailure: (message: string) => void,
+): boolean {
+  if (!controller.isActive) return false;
+  if (hooks === undefined) return true;
   void Promise.resolve()
     .then(() => hooks.autopilotTick(reason))
     .catch((error: unknown) => {
       try {
-        ui.error(`The autopilot tick after /tower ${reason} failed: ${errorText(error)}`);
+        onTickFailure(errorText(error));
       } catch {
         return;
       }
     });
+  return true;
 }
 
-function idle(ctx: ExtensionCommandContext): boolean {
+function idle(ctx: Pick<ExtensionContext, 'isIdle'>): boolean {
   try {
     return ctx.isIdle();
   } catch {

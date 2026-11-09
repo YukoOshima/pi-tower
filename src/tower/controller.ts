@@ -141,6 +141,12 @@ export interface TowerLog {
   warn(message: string, payload?: Readonly<Record<string, unknown>>): void;
 }
 
+export type TowerChange =
+  | { readonly kind: 'mode'; readonly active: boolean }
+  | { readonly kind: 'state'; readonly reason: string };
+
+export type TowerChangeListener = (change: TowerChange) => void;
+
 const SILENT_LOG: TowerLog = { info: () => undefined, warn: () => undefined };
 
 const AGENT_SETTLE_POLL_MS = 1_000;
@@ -185,6 +191,7 @@ export class TowerController implements TowerToolHost {
   private readonly pendingWrites = new Set<Promise<unknown>>();
   private readonly deathChains = new Map<string, Promise<void>>();
   private readonly registrations = new Map<string, { readonly promise: Promise<void>; readonly open: () => void }>();
+  private readonly changeListeners = new Set<TowerChangeListener>();
   private ctx: ExtensionContext | undefined;
   private boundSessionId: string | undefined;
   private boundRepoRoot: string | undefined;
@@ -245,6 +252,27 @@ export class TowerController implements TowerToolHost {
 
   store(): TowerStore {
     return new TowerStore(this.repoRoot);
+  }
+
+  onChange(listener: TowerChangeListener): () => void {
+    this.changeListeners.add(listener);
+    return () => {
+      this.changeListeners.delete(listener);
+    };
+  }
+
+  noteStateChange(reason: string): void {
+    this.emitChange({ kind: 'state', reason });
+  }
+
+  private emitChange(change: TowerChange): void {
+    for (const listener of [...this.changeListeners]) {
+      try {
+        listener(change);
+      } catch (error) {
+        this.log.warn('tower: a change listener failed', { change: change.kind, error: errorText(error) });
+      }
+    }
   }
 
   isOwnerLive(owner: TowerOwner): boolean {
@@ -471,6 +499,7 @@ export class TowerController implements TowerToolHost {
       this.log.warn('tower: autopilot tick failed', { reason, error: errorText(error) });
     }
     await this.loadedState();
+    this.noteStateChange(`autopilot ${reason}`);
   }
 
   wakeOrchestrator(text: string): void {
@@ -488,6 +517,7 @@ export class TowerController implements TowerToolHost {
   noteTowerToolResult(toolName: string, isError: boolean): void {
     if (isError || !changesTowerStore(toolName)) return;
     this.requestAutopilotTick(`tool ${toolName}`);
+    this.noteStateChange(`tool ${toolName}`);
   }
 
   private startAutopilot(): void {
@@ -564,6 +594,7 @@ export class TowerController implements TowerToolHost {
     });
     this.renderStatus();
     this.startAutopilot();
+    this.emitChange({ kind: 'mode', active: true });
     return { entered: true };
   }
 
@@ -575,6 +606,7 @@ export class TowerController implements TowerToolHost {
     this.stopAutopilot();
     this.dropInboxWake();
     this.renderStatus();
+    this.emitChange({ kind: 'mode', active: false });
     this.log.info('tower: exit', { reason, sessionId: this.boundSessionId });
     await this.restoreSessionModel(record);
     this.releasing = this.releaseTowerOwnership();
@@ -793,6 +825,7 @@ export class TowerController implements TowerToolHost {
     this.activateTowerTools();
     this.renderStatus();
     this.startAutopilot();
+    this.emitChange({ kind: 'mode', active: true });
   }
 
   private async reconcileForeign(record: TowerModeRecord, reason: string): Promise<void> {
@@ -800,6 +833,7 @@ export class TowerController implements TowerToolHost {
     this.stopAutopilot();
     this.persistMode({ active: false });
     this.renderStatus();
+    this.emitChange({ kind: 'mode', active: false });
     this.notify(`Tower mode: OFF — ${reason}`, 'warning');
     await this.restoreSessionModel(record);
     this.releasing = this.releaseTowerOwnership();
@@ -1040,6 +1074,7 @@ export class TowerController implements TowerToolHost {
       if (event.resumed) {
         this.enqueueDeathWork(event.agentId, () => this.clearTowerAgentDeath(event.agentId));
       }
+      this.noteStateChange('agent started');
       return;
     }
     if (event.type !== 'finished') return;
@@ -1049,6 +1084,7 @@ export class TowerController implements TowerToolHost {
     });
     this.deliverAgentNotification(event);
     this.retireFinishedAgent(event);
+    this.noteStateChange('agent finished');
   }
 
   private enqueueDeathWork(agentId: string, work: () => Promise<void>): void {
