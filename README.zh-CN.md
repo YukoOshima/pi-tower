@@ -1098,9 +1098,10 @@ pi-tower 提供三道防护：
 ### 已知限制
 
 - **自动清理会删除被 git 忽略的文件。** mission 完成后，每个干净的 feature worktree 都会连同其中的所有内容一起被移除，包括被 git 忽略的文件，例如 `node_modules`、构建产物或本地的 `.env`。已提交的工作仍安全地保留在各自的 branch 上。设置 `"objective": { "autoTeardown": false }` 可以保留这些 worktree。
+- **不要在同一个仓库上同时运行 Kimi Code 的 Tower 和 pi-tower。** 两者使用相同的 `.tower/` 工作区格式，但 Kimi Code 不会记录拥有该工作区的会话的进程号，而 pi-tower 会把没有运行中进程的拥有者视为已结束。因此，在 pi-tower 中执行 `/mission` 或 `/tower on` 会接管一个仍在被 Kimi Code 会话使用的工作区，并注销该会话的整个 roster：其中的 Agent 不再是 Tower 的参与者，它们的 Tower 工具会拒绝执行。在同一个仓库上启动其中一个 Tower 之前，请先关闭另一个。
 - **自动批准与被阻塞的 mission。** 设置 `"objective": { "autoApprove": true }` 后，一个 mission 被阻塞之后，orchestrator 可能会起草一个新的 mission，而它会被自动批准。这会在没有你参与的情况下重新开始计算时长和花费预算。交互使用时请保持 `autoApprove` 关闭。无人值守运行器在 mission 被阻塞时会以退出码 1 退出，不会走到这一步。
 - **批准对话框需要 mission 模式。** 它只在开启了 `/mission` 的交互会话中弹出；如果进入 mission 模式时计划已经在等待批准（例如重启之后），对话框也不会再弹出。这样的计划请用 `/mission approve` 批准。
-- **批准对话框可能顶替 pi 自带的选择器。** 计划准备好时，如果你正停留在 pi 自带的某个选择器（例如 `/model`）中，并且已经有 2 秒或更久没有操作，批准对话框会替换掉这个选择器，原本要在该选择器中按下的 ↓ 和 Enter 就会批准计划。pi 1.5.0 不会把自带选择器的状态通知给扩展。在计划可能已经准备好时，确认选择之前请先看清标题。
+- **批准对话框可能顶替 pi 自带的选择器。** pi 1.5.0 不会把自带选择器（例如 `/model`）的任何状态通知给扩展。计划准备好时，如果你正停留在这样的选择器中，并且已经有 2 秒或更久没有操作，批准对话框会替换掉它。此时，原本要在该选择器中按下的 ↓ 和 Enter 就会批准计划。在计划可能已经准备好时，确认选择之前请先看清标题。
 - **验证命令需要自带准备步骤。** 它们在一个全新的 detached checkout 中运行，没有安装好的依赖，也没有构建产物，因此每条命令都必须包含准备步骤，例如 `npm ci && npm test`。
 - **验证失败轮数不会清零。** 无论换了几个 commit、契约是否修改过、是否执行过 `/mission resume`，失败轮次都会计入 `maxValidationRounds`。恢复一个因验证失败而被阻塞的 mission 之前，请先在 `tower.json` 中调高 `maxValidationRounds`，否则同类验证再失败一次，它就会再次被阻塞。
 - **user-testing 没有浏览器。** user-testing validator 没有浏览器或 GUI 工具，行为测试只能依靠 bash 能驱动的东西：CLI、HTTP 请求和脚本。
@@ -1145,7 +1146,7 @@ pi-tower 移植了 Kimi Code 的 Tower：协议存储、13 个 Tower 工具及�
 **重启与所有权**
 
 - **重启后无法恢复 Agent。** 在 `/reload` 或 `pi -c` 之后，roster 仍然保留，但 Agent 的运行不会保留。`TowerResume` 会以 "not running in this process — the tower restarted" 拒绝，Tower 会用新名字派发新的 worker。如果是新会话，则会直接注销旧的 roster 条目。pi-tower 不会重新打开已保存的 Agent 会话记录。
-- **跨进程的单一 Tower。** 所有权会连同拥有者的进程号一起记录。另一个存活的 pi 进程拥有工作区时，`/tower on` 和 `/mission` 都会被拒绝；已结束的拥有者，或者在同一进程中被 pi 替换掉的会话，会被接管。与 Kimi Code 一样，退出时不会释放所有权，下一个会话会接管该工作区。
+- **跨进程的单一 Tower。** 所有权会连同拥有者的进程号一起记录。另一个存活的 pi 进程拥有工作区时，`/tower on` 和 `/mission` 都会被拒绝；已结束的拥有者，或者在同一进程中被 pi 替换掉的会话，会被接管。与 Kimi Code 一样，退出时不会释放所有权，下一个会话会接管该工作区。Kimi Code 不记录拥有者的进程号，所以 pi-tower 无法判断某个 Kimi Code 会话是否仍拥有工作区，见[已知限制](#已知限制)。
 
 **通知与防护**
 
@@ -1181,10 +1182,12 @@ npm test
 | S15 | 端到端的 mission：人工批准计划，两个 feature 并行执行，一条失败的验收检查迫使 orchestrator 规划修复 feature，里程碑在新的 base 最新提交上重新验证，之后 mission 才完成 | mandatory（必选） |
 | S16 | 无人值守的 `pi-tower run --auto-approve`：退出码为 0，mission 已完成，agent 目录中没有任何文件被改动，没有遗留进程 | mandatory（必选） |
 | S17 | 重启后继续执行：worker 运行期间 pi 被强行终止；在新的 pi 中执行 `/tower on` 后，autopilot 在原 branch 上为该 feature 启动新的 worker，mission 最终完成 | optional（可选） |
+| S18 | mission 模式，即 Droid 式流程：`/mission` 列出各角色的模型并询问目标，orchestrator 在请求批准之前先访谈人类，批准对话框的默认选项是继续规划，`/mission approve` 启动 mission，Mission Control 显示两个 feature 同时运行，mission 完成时自动清理删除每个 feature 的 worktree，`/mission exit` 恢复起始模型 | mandatory（必选） |
+| S19 | 无人值守的 `pi-tower exec --mission -f … --auto-approve`，带四个角色模型选项，且 `tower.json` 中不指定任何模型：每个角色的模型行都把对应选项（`--tower-<role>-model`）列为来源，不出现模型警告，mission 最终完成 | mandatory（必选） |
 
-默认运行 S1 到 S13 这七个场景。mission 场景 S15、S16 和 S17 只在被选中时运行，可以按编号选择，也可以用关键字 `objective`：`--scenarios=objective` 运行这三个，`--scenarios=all,objective` 运行全部十个。任一选中的场景失败或你的 pi 设置被改动时，退出码为 1；达到全局超时时退出码为 2。
+默认运行 S1 到 S13 这七个场景。五个 mission 场景 S15 到 S19 只在被选中时运行，可以按编号选择，也可以用关键字 `objective`：`--scenarios=objective` 运行这五个，`--scenarios=all,objective` 运行全部十二个。任一选中的场景失败或你的 pi 设置被改动时，退出码为 1；达到全局超时时退出码为 2。
 
-mission 场景使用一个小型的 Node CLI 仓库。它们依据持久化的记录和确定性的输出做断言，从不依据模型生成的文字：`state.json`、活动日志、验证文件和审查文件、roster、git（`main` 的最新提交、历史及其中的文件）、Agent 会话记录里的时间戳、工作目录和工具调用，以及确定性的命令输出（`pi-tower run` 的进度行、斜杠命令的回复，以及 S15 验收脚本对自身每次运行的记录）。在 S15 中，验收命令是仓库之外的一个脚本：它在 Tower 的 `commands` 验证中第一次运行时失败，并指出缺少的交付物（`docs/USAGE.md`）；之后只有修复交付了它，脚本才会通过。因此每次运行都会走完修复循环。三个场景还会检查：每次里程碑验证都在产生其 commit 的合并之后 15 秒内开始，并且 autopilot 从不重复启动同一个 Agent。
+mission 场景使用一个小型的 Node CLI 仓库。它们依据持久化的记录和确定性的输出做断言，从不依据模型生成的文字：`state.json`、活动日志、验证文件和审查文件、roster、git（`main` 的最新提交、历史及其中的文件）、Agent 会话记录里的时间戳、工作目录和工具调用、会话文件中记录的提示词、pi 通过 RPC 报告的状态行、面板和对话框，以及确定性的命令输出（`pi-tower run` 和 `pi-tower exec --mission` 的进度行、斜杠命令的回复，以及 S15 和 S18 验收脚本对自身每次运行的记录）。在 S15 中，验收命令是仓库之外的一个脚本：它在 Tower 的 `commands` 验证中第一次运行时失败，并指出缺少的交付物（`docs/USAGE.md`）；之后只有修复交付了它，脚本才会通过。因此每次运行都会走完修复循环。在 S18 中，每当 orchestrator 停下却没有请求批准，脚本化的人类就发送固定的回答；它按位置选择对话框的默认选项，从不读取 orchestrator 写的文字。五个场景还会检查：每次里程碑验证都在产生其 commit 的合并之后 15 秒内开始，并且 autopilot 从不重复启动同一个 Agent。
 
 ```sh
 npm run test:e2e:pi -- --selfcheck
@@ -1204,18 +1207,18 @@ npm run test:e2e:pi -- --scenarios=objective --report=e2e-objective.md
 | `PI_TOWER_E2E_REVIEWER_MODEL` | `byteplus-gateway/claude-opus-5-5:low` | reviewer 模型 |
 | `PI_TOWER_E2E_VALIDATOR_MODEL` | reviewer 模型 | mission 场景使用的 validator 模型 |
 | `PI_TOWER_E2E_SESSION_MODEL` | `byteplus-gateway/claude-haiku-5-5:low` | `/tower on` 之前的会话模型。必须与 orchestrator 模型不同，才能观察到模型切换。 |
-| `PI_TOWER_E2E_SCENARIOS` | `all` | 逗号分隔的场景编号，例如 `S1,S3`，或者关键字 `all`（S1 到 S13）和 `objective`（S15 到 S17）。`--scenarios=S1,S3` 的效果相同。 |
+| `PI_TOWER_E2E_SCENARIOS` | `all` | 逗号分隔的场景编号，例如 `S1,S3`，或者关键字 `all`（S1 到 S13）和 `objective`（S15 到 S19）。`--scenarios=S1,S3` 的效果相同。 |
 | `PI_TOWER_E2E_TIMEOUT_MS` | `4500000`（75 分钟），再加上选中的 mission 场景各自的超时时间 | 整次运行的超时时间 |
-| `PI_TOWER_E2E_SCENARIO_TIMEOUT_MS` | `1200000`（20 分钟）；S15、S16 和 S17 分别为 55、40 和 45 分钟 | 每个场景的超时时间。设置后对所有场景生效。 |
+| `PI_TOWER_E2E_SCENARIO_TIMEOUT_MS` | `1200000`（20 分钟）；S15、S16、S17、S18 和 S19 分别为 55、40、45、50 和 40 分钟 | 每个场景的超时时间。设置后对所有场景生效。 |
 | `PI_TOWER_E2E_KEEP` | 未设置 | 设为 `1` 时保留运行目录及其中的仓库和日志。`--keep` 的效果相同。 |
 | `PI_TOWER_E2E_VERBOSE` | 未设置 | 设为 `1` 时回显各 pi 进程的输出。`--verbose` 的效果相同。 |
 | `PI_TOWER_E2E_REPORT` | 未设置 | 把 Markdown 报告写到该路径。`--report=<path>` 的效果相同。 |
 
 模型采用 `provider/modelId[:thinking]` 格式。orchestrator、worker 和 reviewer 的模型必须是三个不同的 provider/model id，否则运行不会开始；validator 模型可以与其中之一相同。默认值使用名为 `byteplus-gateway` 的 provider，请把这些模型变量设成你的 pi 配置能访问的模型；运行时使用该配置中的 provider 和凭据。
 
-每次运行都会消耗真实的 token：使用默认的 sonnet、haiku 和 opus 模型（low thinking）时，一次完整运行约需 6 分钟，花费约 1.1–1.5 美元。三个 mission 场景另需约 4–5 分钟、约 1.2–1.4 美元。每个场景都在自己的 `tower.json` 中用 `maxCostUsd` 和 `maxWallTimeMs` 限制其 mission（分别为 6、4 和 5 美元），报告会列出每个场景的耗时和花费。
+每次运行都会消耗真实的 token：使用默认的 sonnet、haiku 和 opus 模型（low thinking）时，默认运行 S1 到 S13 这七个场景约需 6–7 分钟，花费约 1.1–1.5 美元。五个 mission 场景另需约 6–7 分钟、约 1.8–1.9 美元。每个场景都在自己的 `tower.json` 中用 `maxCostUsd` 和 `maxWallTimeMs` 限制其 mission（S15 到 S19 分别为 6、4、5、5 和 4 美元），报告会列出每个场景的耗时和花费。最近一次使用这些默认值的 `--scenarios=all,objective` 运行通过了全部 12 个场景和全部 160 项检查（S18：21 项全部通过），耗时 778 秒，花费 3.05 美元。
 
-端到端实测不会修改你的 pi 设置。每个 pi 进程都在运行目录中拥有自己的 `tower.json`（通过 `PI_TOWER_CONFIG` 指定）和会话目录，并以 `--no-extensions`、`--no-skills`、`--no-prompt-templates`、`--no-context-files` 和 `--offline` 启动。运行前后，runner 会记录 agent 目录（`~/.pi/agent`，或 `PI_CODING_AGENT_DIR`）中 `settings.json` 和 `tower.json` 的指纹；任一文件发生变化，本次运行即判为失败。S16 在其无人值守运行的前后检查得更严格：它对 agent 目录中的每个文件计算哈希，并检查没有任何进程的工作目录或命令行仍位于该场景的运行目录下。在 Linux 上，这项进程检查读取 `/proc`。在没有 procfs 的系统上（例如 macOS），它从 `ps` 获取命令行；如果安装了 `lsof`，再从 `lsof` 获取工作目录。如果 `ps` 也无法运行，报告会用一条说明把该检查记为不适用，而不是判为通过。
+端到端实测不会修改你的 pi 设置。每个 pi 进程都在运行目录中拥有自己的 `tower.json`（通过 `PI_TOWER_CONFIG` 指定）和会话目录，并以 `--no-extensions`、`--no-skills`、`--no-prompt-templates`、`--no-context-files` 和 `--offline` 启动。运行前后，runner 会记录 agent 目录（`~/.pi/agent`，或 `PI_CODING_AGENT_DIR`）中 `settings.json` 和 `tower.json` 的指纹；任一文件发生变化，本次运行即判为失败。S16 和 S19 在各自无人值守运行的前后检查得更严格：它们对 agent 目录中的每个文件计算哈希，并检查没有任何进程的工作目录或命令行仍位于该场景的运行目录下。在 Linux 上，这项进程检查读取 `/proc`。在没有 procfs 的系统上（例如 macOS），它从 `ps` 获取命令行；如果安装了 `lsof`，再从 `lsof` 获取工作目录。如果 `ps` 也无法运行，报告会用一条说明把该检查记为不适用，而不是判为通过。
 
 ## 许可证与致谢
 
