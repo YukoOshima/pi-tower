@@ -583,6 +583,29 @@ describe('applyObjectiveUpdate', () => {
     expect(() => applyObjectiveUpdate(approved({ status: 'completed' }), { notes: ['x'] })).toThrow(/completed/);
   });
 
+  it('never reuses a removed, archived or roster-referenced milestone id', () => {
+    const s = state(
+      objective({ status: 'planning', milestones: [milestone('MS1', 1), milestone('MS2', 2), milestone('MS3', 3)] }),
+    );
+    const removed = applyObjectiveUpdate(s, { removeMilestones: ['MS3'] });
+    expect(removed.objective.removedMilestones).toEqual(['MS3']);
+    s.objective = removed.objective;
+    const appended = applyObjectiveUpdate(s, { milestones: [{ title: 'Next' }] });
+    expect(appended.objective.milestones.map((m) => m.id)).toEqual(['MS1', 'MS2', 'MS4']);
+    s.roster.agents.push({
+      name: 'val-x',
+      agentId: 'agent-x',
+      kind: 'validator',
+      milestoneId: 'MS7',
+      validationKind: 'scrutiny',
+      spawnedAt: '2026-01-01T00:00:00.000Z',
+    });
+    expect(applyObjectiveUpdate(s, { milestones: [{ title: 'Later' }] }).objective.milestones.at(-1)?.id).toBe('MS8');
+    const archived = state(undefined);
+    archived.objectiveHistory = [objective({ status: 'blocked', milestones: [milestone('MS1', 1)], removedMilestones: ['MS9'] })];
+    expect(buildObjective(archived, { title: 'Again', milestones: [{ title: 'A' }] }, 'now').milestones[0]!.id).toBe('MS10');
+  });
+
   it('allows removing a milestone whose features were all abandoned', () => {
     const s = approved();
     s.missions.push(mission('M2', 'MS2', 'abandoned'));

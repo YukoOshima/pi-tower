@@ -1018,6 +1018,15 @@ describe('MISSIONS.md and mission files', () => {
 });
 
 describe('workspace-unique milestone ids', () => {
+  it('never reuses the id of a removed milestone', async () => {
+    await store.draftObjective({ title: 'Ship', milestones: [{ title: 'A' }, { title: 'B' }, { title: 'C' }] });
+    const removed = await store.updateObjective({ removeMilestones: ['MS3'] });
+    expect(removed.objective.milestones.map((milestone) => milestone.id)).toEqual(['MS1', 'MS2']);
+    const appended = await store.updateObjective({ milestones: [{ title: 'D' }] });
+    expect(appended.objective.milestones.map((milestone) => milestone.id)).toEqual(['MS1', 'MS2', 'MS4']);
+    expect((await readState()).objective?.removedMilestones).toEqual(['MS3']);
+  });
+
   for (const ending of ['blocked', 'completed'] as const) {
     it(`continues numbering after a ${ending} objective and never inherits its features`, async () => {
       await store.draftObjective({

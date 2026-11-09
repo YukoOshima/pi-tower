@@ -64,6 +64,7 @@ export interface TowerObjective {
   acceptanceCommands: string[];
   status: TowerObjectiveStatus;
   milestones: TowerMilestone[];
+  removedMilestones?: string[];
   limits: TowerObjectiveLimits;
   approvedBy?: 'human' | 'auto';
   approvedAt?: string;

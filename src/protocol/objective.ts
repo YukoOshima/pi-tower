@@ -497,12 +497,17 @@ function nextObjectiveNumber(state: TowerState): number {
 }
 
 function nextMilestoneNumber(state: TowerState): number {
+  const objectives = [
+    ...(state.objective === undefined ? [] : [state.objective]),
+    ...(state.objectiveHistory ?? []),
+  ];
   const ids = [
-    ...(state.objective?.milestones ?? []).map((milestone) => milestone.id),
-    ...(state.objectiveHistory ?? []).flatMap((objective) =>
-      objective.milestones.map((milestone) => milestone.id),
-    ),
+    ...objectives.flatMap((objective) => [
+      ...objective.milestones.map((milestone) => milestone.id),
+      ...(objective.removedMilestones ?? []),
+    ]),
     ...state.missions.flatMap((mission) => (mission.milestone === undefined ? [] : [mission.milestone])),
+    ...state.roster.agents.flatMap((agent) => (agent.milestoneId === undefined ? [] : [agent.milestoneId])),
   ];
   return Math.max(0, ...ids.map((id) => idNumber(id, 'MS'))) + 1;
 }
@@ -682,6 +687,7 @@ export function applyObjectiveUpdate(
   }
   if (removed.length > 0) {
     next.milestones = next.milestones.filter((milestone) => !removed.includes(milestone.id));
+    next.removedMilestones = [...(next.removedMilestones ?? []), ...removed];
     changes.push(`removed:${removed.join('+')}`);
     contractChanged = true;
   }
