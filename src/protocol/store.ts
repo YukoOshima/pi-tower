@@ -1534,13 +1534,19 @@ export class TowerStore {
         );
       }
       const resolved = await this.resolveCommit(commit);
+      const baseTip = await branchTip(this.repoRoot, state.base);
+      if (resolved !== baseTip) {
+        throw new TowerProtocolError(
+          `milestone ${milestone.id} is validated on the current base tip ${baseTip.slice(0, 7)} of "${state.base}", not on ${resolved.slice(0, 7)}`,
+        );
+      }
       if (
         milestone.status === 'passed' &&
-        resolved === milestone.validationCommit &&
-        milestonePassesOn(objective, milestone, resolved, settings)
+        milestone.validationCommit === baseTip &&
+        milestonePassesOn(objective, milestone, baseTip, settings)
       ) {
         throw new TowerProtocolError(
-          `final milestone ${milestone.id} already passed on ${resolved.slice(0, 7)} — it is validated again only after the base tip moves`,
+          `final milestone ${milestone.id} already passed on the current base tip ${baseTip.slice(0, 7)} — it is validated again only after the base tip moves`,
         );
       }
       const now = new Date().toISOString();

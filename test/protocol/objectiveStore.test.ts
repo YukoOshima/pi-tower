@@ -300,13 +300,18 @@ describe('milestone progression and bookkeeping', () => {
     await expect(store.startMilestoneValidation('MS9', tip)).rejects.toThrow(/no milestone "MS9"/);
     await expect(store.startMilestoneValidation('MS2', tip)).rejects.toThrow(/MS2 is pending/);
     await expect(store.startMilestoneValidation('MS1', 'no-such-ref')).rejects.toThrow(/does not name a commit/);
-    const started = await store.startMilestoneValidation('MS1', tip.slice(0, 8));
-    expect(started.commit).toBe(tip);
+    await commitFile(repo, 'moved.txt', 'moved\n', 'base moved');
+    const moved = await git(repo, 'rev-parse', 'main');
+    await expect(store.startMilestoneValidation('MS1', tip)).rejects.toThrow(
+      new RegExp(`MS1 is validated on the current base tip ${moved.slice(0, 7)} of "main", not on ${tip.slice(0, 7)}`),
+    );
+    const started = await store.startMilestoneValidation('MS1', moved.slice(0, 8));
+    expect(started.commit).toBe(moved);
     expect(started.requiredKinds).toEqual(['scrutiny', 'user-testing']);
-    expect(started.milestone).toMatchObject({ status: 'validating', validationCommit: tip });
-    expect((await readState()).objective!.milestones[0]).toMatchObject({ status: 'validating', validationCommit: tip });
+    expect(started.milestone).toMatchObject({ status: 'validating', validationCommit: moved });
+    expect((await readState()).objective!.milestones[0]).toMatchObject({ status: 'validating', validationCommit: moved });
     expect(await activityLog()).toContain(
-      `milestone.validate objective=O1 milestone=MS1 commit=${tip.slice(0, 7)} kinds=scrutiny,user-testing status=validating`,
+      `milestone.validate objective=O1 milestone=MS1 commit=${moved.slice(0, 7)} kinds=scrutiny,user-testing status=validating`,
     );
   });
 
@@ -1094,8 +1099,20 @@ describe('re-validating the final milestone', () => {
       /milestone MS1 already passed — only the final milestone is validated again/,
     );
     await expect(store.startMilestoneValidation('MS2', tip, skipAll)).rejects.toThrow(
-      new RegExp(`final milestone MS2 already passed on ${tip.slice(0, 7)}`),
+      new RegExp(`final milestone MS2 already passed on the current base tip ${tip.slice(0, 7)}`),
     );
+    expect((await store.objectiveEvaluation(skipAll)).completion.ready).toBe(true);
+  });
+
+  it('never moves a current final milestone back to validating on an older commit', async () => {
+    await commitFile(repo, 'early.txt', 'early\n', 'an earlier commit');
+    const tip = await passedFinalMilestone();
+    const older = await git(repo, 'rev-parse', 'main~1');
+    const before = await readFile(store.abs(STATE_FILE), 'utf8');
+    await expect(store.startMilestoneValidation('MS2', older)).rejects.toThrow(
+      new RegExp(`validated on the current base tip ${tip.slice(0, 7)} of "main", not on ${older.slice(0, 7)}`),
+    );
+    expect(await readFile(store.abs(STATE_FILE), 'utf8')).toBe(before);
     expect((await store.objectiveEvaluation(skipAll)).completion.ready).toBe(true);
   });
 
