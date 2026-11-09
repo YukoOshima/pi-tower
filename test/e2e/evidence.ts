@@ -113,7 +113,7 @@ export function parseLogLine(line: string, index: number): LogEntry {
   let key: string | undefined;
   for (const token of rest) {
     const eq = token.indexOf('=');
-    if (eq > 0 && /^[a-z_]+$/.test(token.slice(0, eq))) {
+    if (key !== 'detail' && eq > 0 && /^[a-z_]+$/.test(token.slice(0, eq))) {
       key = token.slice(0, eq);
       fields[key] = token.slice(eq + 1);
     } else if (key !== undefined) {

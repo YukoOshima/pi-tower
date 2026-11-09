@@ -1,12 +1,13 @@
+import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, readdirSync, readFileSync, readlinkSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, readlinkSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 
-import { frontmatter, logEntries, readJsonl, summarizeTranscript, towerState, validationFiles, type LogEntry, type ObjectiveRecord, type RosterEntry, type TowerState } from './evidence.ts';
+import { distinct, frontmatter, logEntries, readJsonl, summarizeTranscript, towerState, validationFiles, type LogEntry, type ObjectiveRecord, type RosterEntry, type TowerState } from './evidence.ts';
 import { clip, sleep, type PiRpc } from './rpc.ts';
 import { recordAgentUsage, roleConfig, type ScenarioContext } from './scenario.ts';
 import type { E2eSettings } from './settings.ts';
-import { createRepo, git } from './workspace.ts';
+import { createRepo, git, tryGit } from './workspace.ts';
 
 export const TEXTKIT_FILES: Readonly<Record<string, string>> = {
   'package.json': `${JSON.stringify(
@@ -244,7 +245,14 @@ export interface ValidationStart {
   readonly milestone: string;
   readonly commit: string;
   readonly latencyMs: number | undefined;
+  readonly unmeasured: boolean;
   readonly line: string;
+}
+
+function parentCount(repo: string, commit: string): number | undefined {
+  if (!/^[0-9a-f]{4,64}$/.test(commit)) return undefined;
+  const parents = tryGit(repo, ['rev-list', '--parents', '-n', '1', commit]);
+  return parents === undefined ? undefined : parents.split(' ').length - 1;
 }
 
 export function validationStarts(repo: string): ValidationStart[] {
@@ -252,19 +260,25 @@ export function validationStarts(repo: string): ValidationStart[] {
   return entries
     .filter((entry) => entry.actor === 'autopilot' && entry.action === 'start-validation' && entry.fields.result === 'done')
     .map((start) => {
+      const milestone = start.fields.milestone ?? '?';
       const commit = start.fields.commit ?? '';
       const merge = entries.slice(0, start.index).reverse().find((entry) => entry.actor === 'tower' && entry.action === 'merge' && entry.fields.merge_commit === commit);
-      const latencyMs = merge === undefined ? undefined : Date.parse(start.at) - Date.parse(merge.at);
-      const timing = merge === undefined ? 'no merge produced this commit' : `merge ${merge.at} → start ${start.at} (${((latencyMs ?? 0) / 1000).toFixed(1)}s)`;
-      return { milestone: start.fields.milestone ?? '?', commit, latencyMs, line: `${start.fields.milestone ?? '?'} on ${commit}: ${timing}` };
+      if (merge !== undefined) {
+        const latencyMs = Date.parse(start.at) - Date.parse(merge.at);
+        return { milestone, commit, latencyMs, unmeasured: false, line: `${milestone} on ${commit}: merge ${merge.at} → start ${start.at} (${(latencyMs / 1000).toFixed(1)}s)` };
+      }
+      const parents = parentCount(repo, commit);
+      if (parents !== undefined && parents < 2) return { milestone, commit, latencyMs: undefined, unmeasured: false, line: `${milestone} on ${commit}: no merge produced this commit` };
+      const reason = parents === undefined ? 'the commit does not resolve in the repository' : `it is a merge commit, but no "tower merge ... merge_commit=${commit}" line precedes the start`;
+      return { milestone, commit, latencyMs: undefined, unmeasured: true, line: `${milestone} on ${commit || '(no commit field)'}: UNMEASURED start at ${start.at} — ${reason}` };
     });
 }
 
-export function checkAutopilotPromptness(ctx: ScenarioContext, repo: string): void {
+export function checkAutopilotPromptness(ctx: Pick<ScenarioContext, 'report'>, repo: string): void {
   const starts = validationStarts(repo);
   ctx.report.check(
     `every milestone validation starts within ${String(VALIDATION_START_LATENCY_LIMIT_MS / 1000)}s of the merge that produced its commit`,
-    starts.length > 0 && starts.every((start) => start.latencyMs === undefined || start.latencyMs <= VALIDATION_START_LATENCY_LIMIT_MS),
+    starts.some((start) => start.latencyMs !== undefined) && starts.every((start) => !start.unmeasured && (start.latencyMs === undefined || start.latencyMs <= VALIDATION_START_LATENCY_LIMIT_MS)),
     starts.length === 0 ? '(no autopilot start-validation line)' : starts.map((start) => start.line),
   );
   const unusual = autopilotEntries(repo).filter((entry) => ['refused', 'duplicate', 'skipped'].includes(entry.fields.result ?? ''));
@@ -348,19 +362,93 @@ export interface ProcessInfo {
   readonly command: string;
 }
 
-export function processesUnder(dir: string): ProcessInfo[] {
+export interface ProcessScan {
+  readonly applicable: boolean;
+  readonly method: string;
+  readonly processes: readonly ProcessInfo[];
+}
+
+export interface ProcessScanOptions {
+  readonly procRoot?: string;
+  readonly ps?: string;
+  readonly lsof?: string;
+}
+
+function procfsProcesses(dir: string, procRoot: string): ProcessInfo[] | undefined {
+  let names: string[];
+  try {
+    readlinkSync(`${procRoot}/${String(process.pid)}/cwd`);
+    names = readdirSync(procRoot);
+  } catch {
+    return undefined;
+  }
   const found: ProcessInfo[] = [];
-  for (const name of readdirSync('/proc')) {
+  for (const name of names) {
     if (!/^\d+$/.test(name) || Number(name) === process.pid) continue;
     try {
-      const cwd = readlinkSync(`/proc/${name}/cwd`);
-      const command = readFileSync(`/proc/${name}/cmdline`, 'utf8').replaceAll('\0', ' ').trim();
+      const cwd = readlinkSync(`${procRoot}/${name}/cwd`);
+      const command = readFileSync(`${procRoot}/${name}/cmdline`, 'utf8').replaceAll('\0', ' ').trim();
       if (cwd.startsWith(dir) || command.includes(dir)) found.push({ pid: Number(name), cwd, command });
     } catch {
       continue;
     }
   }
   return found;
+}
+
+function runListing(file: string, args: readonly string[]): { readonly stdout: string; readonly failure: string | undefined } {
+  try {
+    const result = spawnSync(file, [...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 30_000, maxBuffer: 64 * 1024 * 1024 });
+    const failure = result.error?.message ?? (result.status === 0 ? undefined : `exit ${String(result.status ?? result.signal)}`);
+    return { stdout: result.stdout ?? '', failure };
+  } catch (error) {
+    return { stdout: '', failure: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+function lsofCwds(lsof: string): Map<number, string> | undefined {
+  const listing = runListing(lsof, ['-n', '-P', '-w', '-d', 'cwd', '-Fpn']);
+  if (listing.failure !== undefined && listing.stdout.length === 0) return undefined;
+  const cwds = new Map<number, string>();
+  let pid = 0;
+  for (const line of listing.stdout.split('\n')) {
+    if (line.startsWith('p')) pid = Number(line.slice(1));
+    else if (line.startsWith('n')) cwds.set(pid, line.slice(1));
+  }
+  return cwds;
+}
+
+function realpathOr(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    return path;
+  }
+}
+
+export function processesUnder(dir: string, options: ProcessScanOptions = {}): ProcessScan {
+  const procRoot = options.procRoot ?? '/proc';
+  const fromProcfs = procfsProcesses(dir, procRoot);
+  if (fromProcfs !== undefined) return { applicable: true, method: `the working directory and command line of every process in ${procRoot}`, processes: fromProcfs };
+  const ps = options.ps ?? 'ps';
+  const listing = runListing(ps, ['-ww', '-axo', 'pid=,command=']);
+  if (listing.failure !== undefined) return { applicable: false, method: `no usable ${procRoot}, and \`${ps} -ww -axo pid=,command=\` failed (${listing.failure})`, processes: [] };
+  const lsof = options.lsof ?? 'lsof';
+  const cwds = lsofCwds(lsof);
+  const roots = distinct([dir, realpathOr(dir)]);
+  const processes = listing.stdout.split('\n').flatMap((line): ProcessInfo[] => {
+    const match = /^\s*(\d+)\s+(.*)$/.exec(line);
+    if (match === null || Number(match[1]) === process.pid) return [];
+    const pid = Number(match[1]);
+    const command = (match[2] ?? '').trim();
+    const cwd = cwds?.get(pid);
+    return roots.some((root) => (cwd !== undefined && cwd.startsWith(root)) || command.includes(root)) ? [{ pid, cwd: cwd ?? '?', command }] : [];
+  });
+  const method =
+    cwds === undefined
+      ? `the command line of every process (${ps}); ${lsof} is not available, so working directories were not checked`
+      : `the command line of every process (${ps}) and the working directories ${lsof} reported for ${String(cwds.size)} processes`;
+  return { applicable: true, method, processes };
 }
 
 export function killProcesses(processes: readonly ProcessInfo[]): void {
