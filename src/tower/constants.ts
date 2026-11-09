@@ -7,6 +7,7 @@ export const TOWER_MODE_ENTRY = 'tower-mode';
 export const TOWER_REMINDER_MESSAGE = 'tower-mode-reminder';
 export const TOWER_INBOX_WAKE_MESSAGE = 'tower-inbox-wake';
 export const TOWER_AGENT_NOTIFICATION_MESSAGE = 'tower-agent-notification';
+export const TOWER_AUTOPILOT_WAKE_MESSAGE = 'tower-autopilot-wake';
 
 export const TOWER_MODE_TOOLS: readonly TowerToolName[] = [
   'TowerInit',

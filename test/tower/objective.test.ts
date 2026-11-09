@@ -19,8 +19,10 @@ import type { TowerAgentSessionRequest } from '../../src/runtime/index.ts';
 import { createTowerSpawnTool } from '../../src/tools/spawn/spawnTool.ts';
 import { ORCHESTRATOR_CALLER } from '../../src/tools/support.ts';
 import { createTowerAgentRuntime } from '../../src/tower/agentRuntime.ts';
+import { towerAutopilotEffects } from '../../src/tower/autopilotHost.ts';
 import {
   TOWER_AGENT_NOTIFICATION_MESSAGE,
+  TOWER_AUTOPILOT_WAKE_MESSAGE,
   TOWER_MODE_ENTRY,
   TOWER_REVIEWER_BASE_TOOLS,
   TOWER_WORKER_BASE_TOOLS,
@@ -580,5 +582,108 @@ describe('autopilot observations', () => {
     expect(h.controller.orchestratorBusy()).toBe(false);
     h.ctx.idle = false;
     expect(h.controller.orchestratorBusy()).toBe(true);
+  });
+});
+
+describe('autopilot effects', () => {
+  async function effectsHarness(): Promise<Harness & { readonly effects: ReturnType<typeof towerAutopilotEffects> }> {
+    const h = await harness({
+      prepare: async (store) => {
+        await initialized(store);
+        await store.plan([
+          { title: 'Build gemm', scope: ['src/gemm/**'] },
+          { title: 'Build conv', scope: ['src/conv/**'] },
+        ]);
+      },
+    });
+    await h.controller.enter();
+    return { ...h, effects: towerAutopilotEffects(h.controller) };
+  }
+
+  async function mission(h: Harness, id: string) {
+    const found = (await h.store.load()).missions.find((candidate) => candidate.id === id);
+    if (found === undefined) throw new Error(`no mission ${id}`);
+    return found;
+  }
+
+  it('spawns and respawns workers through TowerSpawn, registering them on their mission', async () => {
+    const h = await effectsHarness();
+
+    const spawned = await h.effects.spawnWorker('M1', 'ap-w-M1-1');
+    expect(spawned).toMatchObject({ ok: true });
+    h.runtime.finish('agent-1', 'timed_out', { stopReason: 'timed out after 2h' });
+    const respawned = await h.effects.respawnWorker('M1', 'ap-w-M1-2', 'the previous worker timed out');
+
+    expect(respawned).toMatchObject({ ok: true });
+    const m1 = await mission(h, 'M1');
+    expect(m1.owner).toBe('ap-w-M1-2');
+    expect(h.runtime.specs.map((spec) => [spec.name, spec.kind, spec.cwd])).toEqual([
+      ['ap-w-M1-1', 'worker', h.store.abs(join('.tower', 'worktrees', m1.worktree))],
+      ['ap-w-M1-2', 'worker', h.store.abs(join('.tower', 'worktrees', m1.worktree))],
+    ]);
+    expect(h.runtime.specs[1]?.prompt).toContain('the previous worker timed out');
+    const roster = (await h.store.load()).roster.agents;
+    expect(roster.map((entry) => [entry.name, entry.kind, entry.missionId])).toEqual([
+      ['ap-w-M1-1', 'worker', 'M1'],
+      ['ap-w-M1-2', 'worker', 'M1'],
+    ]);
+  });
+
+  it('reports refusals with the tool error instead of acting', async () => {
+    const h = await effectsHarness();
+
+    expect(await h.effects.spawnWorker('M9', 'ap-w-M9-1')).toEqual({
+      ok: false,
+      error: 'unknown mission "M9" — known missions: M1, M2',
+    });
+    expect(await h.effects.spawnReviewer('M9', 'ap-r-M9-1')).toEqual({ ok: false, error: 'unknown mission "M9"' });
+    await h.effects.spawnWorker('M1', 'ap-w-M1-1');
+    const resumed = await h.effects.resumeWorker('ap-w-M1-1', 'address the review findings');
+    expect(resumed.ok).toBe(false);
+    expect(h.runtime.specs).toHaveLength(1);
+  });
+
+  it('resumes an idle worker with the prompt and spawns a reviewer on the mission branch', async () => {
+    const h = await effectsHarness();
+    await h.effects.spawnWorker('M1', 'ap-w-M1-1');
+    h.runtime.finish('agent-1', 'idle');
+
+    expect(await h.effects.resumeWorker('ap-w-M1-1', 'address the review findings')).toMatchObject({ ok: true });
+    expect(h.runtime.resumes).toEqual([{ id: 'agent-1', prompt: 'address the review findings' }]);
+
+    expect(await h.effects.spawnReviewer('M1', 'ap-r-M1-1')).toMatchObject({ ok: true });
+    const m1 = await mission(h, 'M1');
+    const reviewer = (await h.store.load()).roster.agents.find((entry) => entry.name === 'ap-r-M1-1');
+    expect(reviewer).toMatchObject({ kind: 'reviewer', reviewTarget: m1.branch, reviewMissionId: 'M1' });
+  });
+
+  it('goes through the merge gate and the rebase tool, never around them', async () => {
+    const h = await effectsHarness();
+    await h.effects.spawnWorker('M1', 'ap-w-M1-1');
+
+    expect(await h.effects.merge('M1')).toEqual({
+      ok: false,
+      error: 'merge blocked: mission M1 is active — only a completed mission can merge',
+    });
+    expect((await mission(h, 'M1')).status).toBe('active');
+    const rebased = await h.effects.rebase('M1');
+    expect(rebased.ok === false ? rebased.error : '').toMatch(/^worker\(s\) ap-w-M1-1 are mid-turn — rebasing under a running worker/);
+  });
+
+  it('wakes the orchestrator with a follow-up turn while tower mode is on and notifies the human', async () => {
+    const h = await effectsHarness();
+
+    h.effects.wakeOrchestrator('validation-failed: MS1 scrutiny r1');
+    h.effects.notifyHuman('Objective O1 is blocked: stalled', 'warning');
+    await h.controller.exit();
+    h.effects.wakeOrchestrator('after exit');
+
+    expect(h.pi.sentOfType(TOWER_AUTOPILOT_WAKE_MESSAGE)).toEqual([
+      {
+        message: { customType: TOWER_AUTOPILOT_WAKE_MESSAGE, content: 'validation-failed: MS1 scrutiny r1', display: true },
+        options: { triggerTurn: true, deliverAs: 'followUp' },
+      },
+    ]);
+    expect(h.ctx.ui.notices).toContainEqual({ message: 'Objective O1 is blocked: stalled', level: 'warning' });
   });
 });

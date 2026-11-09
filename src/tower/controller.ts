@@ -55,6 +55,7 @@ import {
   isHumanStopReason,
   isTowerStopReason,
   TOWER_AGENT_NOTIFICATION_MESSAGE,
+  TOWER_AUTOPILOT_WAKE_MESSAGE,
   TOWER_INBOX_WAKE_MESSAGE,
   TOWER_MODE_ENTRY,
   TOWER_MODE_TOOLS,
@@ -469,6 +470,18 @@ export class TowerController implements TowerToolHost {
       await autopilot.tick(reason);
     } catch (error) {
       this.log.warn('tower: autopilot tick failed', { reason, error: errorText(error) });
+    }
+  }
+
+  wakeOrchestrator(text: string): void {
+    if (!this.active || this.shuttingDown) return;
+    try {
+      this.pi.sendMessage(
+        { customType: TOWER_AUTOPILOT_WAKE_MESSAGE, content: text, display: true },
+        { triggerTurn: true, deliverAs: 'followUp' },
+      );
+    } catch (error) {
+      this.log.warn('tower: failed to deliver the autopilot wake', { error: errorText(error) });
     }
   }
 
