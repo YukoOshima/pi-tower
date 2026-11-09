@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
+import type { AutopilotWakeReason } from '../../src/autopilot/index.ts';
 import {
   TOWER_MODE_EXIT_REMINDER,
   TOWER_MODE_FULL_REMINDER,
@@ -17,6 +18,29 @@ const assistant: TowerReminderHistoryEntry = { role: 'assistant' };
 
 function assistants(count: number): TowerReminderHistoryEntry[] {
   return Array.from({ length: count }, () => assistant);
+}
+
+const WAKE_REASONS: Readonly<Record<AutopilotWakeReason, true>> = {
+  'plan-milestone': true,
+  'validation-failed': true,
+  'feature-attempts-exhausted': true,
+  'rebase-conflict': true,
+  blocker: true,
+  'merge-blocked': true,
+  'review-stuck': true,
+  'validation-stuck': true,
+  stalled: true,
+  'worker-idle': true,
+  'worker-stopped': true,
+};
+
+const PLAYBOOKS = [
+  ['interactive', TOWER_OBJECTIVE_PLAYBOOK],
+  ['headless', TOWER_OBJECTIVE_HEADLESS_PLAYBOOK],
+] as const;
+
+function judgmentWakeReasons(playbook: string): string[] {
+  return [...playbook.matchAll(/^ {3}- ([a-z-]+(?:, [a-z-]+)*) → /gm)].flatMap((match) => match[1]!.split(', '));
 }
 
 const CASES: readonly Omit<TowerModeReminderInput, 'objective'>[] = [
@@ -122,6 +146,48 @@ describe('TOWER_OBJECTIVE_HEADLESS_PLAYBOOK', () => {
     ]) {
       expect(TOWER_OBJECTIVE_HEADLESS_PLAYBOOK).toContain(shared);
     }
+  });
+});
+
+describe('objective playbook judgment wakes', () => {
+  it.each(PLAYBOOKS)('the %s playbook has exactly one entry per autopilot wake reason', (_variant, playbook) => {
+    const listed = judgmentWakeReasons(playbook);
+    expect([...listed].sort()).toEqual(Object.keys(WAKE_REASONS).sort());
+    expect(new Set(listed).size).toBe(listed.length);
+  });
+
+  it.each(PLAYBOOKS)(
+    'the %s playbook reads an idle worker, answers and resumes it, or reassigns or blocks its feature',
+    (_variant, playbook) => {
+      for (const sentence of [
+        '   - worker-idle → a worker went idle without `TowerComplete`, a blocker, or a question while its feature is still active — after one autopilot reminder on the same tip, or at once with the autopilot off.',
+        'Read its last message (quoted in the wake, or with `TowerTaskOutput`)',
+        'answer what it waits for with `TowerSend` and wake it with `TowerResume` — an idle worker reads its inbox only when resumed',
+        'reassign the feature of a stuck or circling worker to a fresh worker with `TowerSpawn`, or abandon and re-plan a feature that is ill-posed',
+        'when only the human can unblock it, record a blocker on the mission or block the objective.',
+      ]) {
+        expect(playbook).toContain(sentence);
+      }
+    },
+  );
+
+  it('never replaces a worker the human stopped: the interactive playbook asks the human how to continue', () => {
+    expect(TOWER_OBJECTIVE_PLAYBOOK).toContain(
+      '   - worker-stopped → the human stopped the worker of a feature, and the feature waits: the autopilot never resumes, reassigns, or replaces an agent the human stopped, and you never do so on your own.',
+    );
+    expect(TOWER_OBJECTIVE_PLAYBOOK).toContain(
+      'Ask the human how to continue and act only on the answer: spawn a fresh worker with `TowerSpawn` only when the human wants the feature continued, abandon and re-plan it when they want it changed or dropped, or block the objective when they want to stop.',
+    );
+  });
+
+  it('never replaces a worker the human stopped: the headless playbook blocks the objective', () => {
+    expect(TOWER_OBJECTIVE_HEADLESS_PLAYBOOK).toContain(
+      '   - worker-stopped → the human stopped the worker of a feature, and the feature waits: the autopilot never resumes, reassigns, or replaces an agent the human stopped, and neither do you.',
+    );
+    expect(TOWER_OBJECTIVE_HEADLESS_PLAYBOOK).toContain(
+      'Nobody can answer in a headless run, so block the objective with `TowerObjective(action="block", reason)` and name the stopped worker.',
+    );
+    expect(TOWER_OBJECTIVE_HEADLESS_PLAYBOOK).not.toMatch(/ask the human/i);
   });
 });
 

@@ -45,6 +45,13 @@ const OBJECTIVE_APPROVAL_STEP: Readonly<Record<TowerObjectivePlaybookVariant, st
     '4. **Request approval — never self-approve.** Call `TowerObjective(action="request-approval")` as soon as the plan is complete, then end your turn: the runner approves it or hands it to the human. No tool can approve, and you never state or imply that the plan is approved.',
 };
 
+const OBJECTIVE_WORKER_STOPPED: Readonly<Record<TowerObjectivePlaybookVariant, string>> = {
+  interactive:
+    '   - worker-stopped → the human stopped the worker of a feature, and the feature waits: the autopilot never resumes, reassigns, or replaces an agent the human stopped, and you never do so on your own. Ask the human how to continue and act only on the answer: spawn a fresh worker with `TowerSpawn` only when the human wants the feature continued, abandon and re-plan it when they want it changed or dropped, or block the objective when they want to stop.',
+  headless:
+    '   - worker-stopped → the human stopped the worker of a feature, and the feature waits: the autopilot never resumes, reassigns, or replaces an agent the human stopped, and neither do you. Nobody can answer in a headless run, so block the objective with `TowerObjective(action="block", reason)` and name the stopped worker.',
+};
+
 const OBJECTIVE_ESCALATION: Readonly<Record<TowerObjectivePlaybookVariant, string>> = {
   interactive:
     'Report to the human at milestone boundaries and whenever the objective blocks or pauses; escalate only what you cannot decide from the objective and the human\'s own words.',
@@ -66,6 +73,8 @@ function objectivePlaybook(variant: TowerObjectivePlaybookVariant): string {
       '   - validation-failed → read every failure, then plan fix features into the same milestone with `TowerPlan(milestone, origin="fix")`, one per failure or per tightly related group, quoting the failure in the tasks. Fix causes, not symptoms. If the contract itself is wrong, change it with an update — the human must approve it again.',
       '   - plan-milestone → plan the features of the milestone that just became current.',
       "   - blocker → answer the worker from the objective and the human's words; decide what you can, escalate what you cannot.",
+      "   - worker-idle → a worker went idle without `TowerComplete`, a blocker, or a question while its feature is still active — after one autopilot reminder on the same tip, or at once with the autopilot off. Read its last message (quoted in the wake, or with `TowerTaskOutput`), then decide: answer what it waits for with `TowerSend` and wake it with `TowerResume` — an idle worker reads its inbox only when resumed; reassign the feature of a stuck or circling worker to a fresh worker with `TowerSpawn`, or abandon and re-plan a feature that is ill-posed; when only the human can unblock it, record a blocker on the mission or block the objective.",
+      OBJECTIVE_WORKER_STOPPED[variant],
       '   - rebase-conflict, merge-blocked → route the conflict to the owning worker, or re-plan the scope or deps; never work around a gate.',
       '   - feature-attempts-exhausted, stalled → find out why the work does not converge, then re-plan it smaller, unblock it, or call `TowerObjective(action="block", reason)` with what the human must decide.',
       '   - review-stuck, validation-stuck → reviewers or validators keep ending without a verdict: inspect why (`TowerTasks` with `active_only=false`, `TowerTaskOutput`); for a transient cause spawn a fresh one with `TowerSpawn` under a new name; when the diff or the milestone is too large to judge in one run, simplify or split the work; otherwise block the objective with a reason for the human.',
