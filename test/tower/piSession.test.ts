@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -12,19 +12,21 @@ import {
 import { ModelRegistry, ModelRuntime } from '@earendil-works/pi-coding-agent';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { TOWER_WORKER_ROLE } from '../../src/prompts/index.ts';
-import { TowerStore } from '../../src/protocol/index.ts';
+import { TOWER_VALIDATOR_ROLE, TOWER_WORKER_ROLE } from '../../src/prompts/index.ts';
+import { STATE_FILE, TowerStore, type TowerState } from '../../src/protocol/index.ts';
 import { PiTowerAgentSession, createPiSessionFactory } from '../../src/runtime/index.ts';
 import { createOrchestratorTools, toToolDefinition } from '../../src/tools/index.ts';
 import { createTowerAgentRuntime } from '../../src/tower/agentRuntime.ts';
 import {
   TOWER_AGENT_NOTIFICATION_MESSAGE,
   TOWER_AGENT_TOOLS,
+  TOWER_REVIEWER_BASE_TOOLS,
+  TOWER_VALIDATOR_AGENT_TOOLS,
   TOWER_WORKER_BASE_TOOLS,
 } from '../../src/tower/constants.ts';
 import { TowerController } from '../../src/tower/controller.ts';
 import { TowerModels } from '../../src/tower/models.ts';
-import { FakeContext, FakePi, FakeSessionManager, createRepo, removeDir, sentText } from './fakes.ts';
+import { FakeContext, FakePi, FakeSessionManager, createRepo, git, removeDir, sentText } from './fakes.ts';
 
 const SESSION_ID = 'session-pi';
 const PROVIDER = 'faux-tower';
@@ -207,5 +209,75 @@ describe('a tower worker in a real pi session', () => {
     expect(existsSync(join(comms, 'state.json'))).toBe(true);
     const mission = (await new TowerStore(s.repo).load()).missions.find((candidate) => candidate.id === 'M1');
     expect(existsSync(join(s.repo, '.tower', 'worktrees', mission?.worktree ?? '', 'notes.md'))).toBe(true);
+  });
+});
+
+describe('a tower validator in a real pi session', () => {
+  async function validatingMilestone(s: Sandbox): Promise<TowerStore> {
+    const store = new TowerStore(s.repo);
+    await store.draftObjective({ title: 'Ship', goal: 'ship it', definitionOfDone: ['works'], milestones: [{ title: 'Core' }] });
+    await store.plan([{ title: 'Core feature', scope: ['src/core/**'], milestone: 'MS1' }]);
+    await store.requestObjectiveApproval();
+    await store.approveObjective('human');
+    const file = join(s.repo, STATE_FILE);
+    const state = JSON.parse(readFileSync(file, 'utf8')) as TowerState;
+    for (const mission of state.missions) if (mission.milestone === 'MS1') mission.status = 'merged';
+    writeFileSync(file, `${JSON.stringify(state, null, 2)}\n`);
+    await store.startMilestoneValidation('MS1', await git(s.repo, 'rev-parse', 'main'));
+    return store;
+  }
+
+  it('runs read-only with the validator role and tools, records its verdict and leaves no worktree behind', async () => {
+    const s = await sandbox();
+    const store = await validatingMilestone(s);
+    s.faux.setResponses([
+      fauxAssistantMessage(fauxToolCall('write', { path: 'src/core/hack.ts', content: 'x' })),
+      fauxAssistantMessage(
+        fauxToolCall('TowerValidate', {
+          milestone: 'MS1',
+          kind: 'scrutiny',
+          verdict: 'pass',
+          failures: [],
+          checks: ['read the merged diff'],
+          evidence: 'the core feature matches its tasks',
+        }),
+      ),
+      (context) =>
+        fauxAssistantMessage(
+          `RESULTS ${toolResults(context.messages)
+            .map((result) => `${result.toolName}:${result.isError ? 'error' : 'ok'}`)
+            .join(' | ')}`,
+        ),
+    ]);
+    const spawn = s.pi.registeredTools.get('TowerSpawn') as RegisteredTool;
+
+    const spawned = await spawn.execute(
+      'call_spawn',
+      { name: 'ap-v-MS1-scrutiny-1', kind: 'validator', milestone: 'MS1', validation_kind: 'scrutiny' },
+      undefined,
+      undefined,
+      s.ctx.asContext,
+    );
+    expect(spawned.isError, spawned.content[0]?.text).toBeUndefined();
+    const entry = (await store.load()).roster.agents.find((agent) => agent.name === 'ap-v-MS1-scrutiny-1');
+    const worktree = join(s.repo, '.tower', 'worktrees', entry?.worktree ?? '');
+
+    await vi.waitFor(() => expect(s.pi.sentOfType(TOWER_AGENT_NOTIFICATION_MESSAGE)).toHaveLength(1), {
+      timeout: 10_000,
+    });
+    const summary = sentText(s.pi.sentOfType(TOWER_AGENT_NOTIFICATION_MESSAGE)[0]);
+    expect(summary).toContain('Background validator completed');
+    expect(summary).toContain('RESULTS write:error | TowerValidate:ok');
+    const [validator] = s.sessions;
+    expect(validator?.session.systemPrompt).toContain(TOWER_VALIDATOR_ROLE);
+    expect([...(validator?.session.getActiveToolNames() ?? [])].sort()).toEqual(
+      [...TOWER_REVIEWER_BASE_TOOLS, ...TOWER_VALIDATOR_AGENT_TOOLS].sort(),
+    );
+    expect(existsSync(join(worktree, 'src', 'core', 'hack.ts'))).toBe(false);
+    const milestone = (await store.load()).objective?.milestones.find((candidate) => candidate.id === 'MS1');
+    expect(milestone?.rounds).toContainEqual(
+      expect.objectContaining({ kind: 'scrutiny', verdict: 'pass', validator: 'ap-v-MS1-scrutiny-1' }),
+    );
+    await vi.waitFor(() => expect(existsSync(worktree)).toBe(false), { timeout: 10_000 });
   });
 });

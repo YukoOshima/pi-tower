@@ -5,8 +5,10 @@ import { join } from 'node:path';
 
 import type {
   BeforeAgentStartEvent,
+  ExtensionAPI,
   MessageEndEvent,
   SessionStartEvent,
+  ToolCallEvent,
   ToolDefinition,
   ToolResultEvent,
 } from '@earendil-works/pi-coding-agent';
@@ -15,6 +17,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { FakeSession, assistantMessage } from '../runtime/fakeSession.ts';
 
 import { TOWER_OBJECTIVE_DEFAULTS } from '../../src/config/index.ts';
+import { VALIDATOR_WRITE_VETO } from '../../src/guards/index.ts';
 import {
   TOWER_MODE_FULL_REMINDER,
   TOWER_OBJECTIVE_HEADLESS_PLAYBOOK,
@@ -25,6 +28,7 @@ import {
   ACTIVITY_LOG,
   STATE_FILE,
   TowerStore,
+  WORKTREES_DIR,
   type TowerState,
   type TowerValidationWorktree,
 } from '../../src/protocol/index.ts';
@@ -39,8 +43,10 @@ import {
   TOWER_AUTOPILOT_WAKE_MESSAGE,
   TOWER_MODE_ENTRY,
   TOWER_REVIEWER_BASE_TOOLS,
+  TOWER_VALIDATOR_AGENT_TOOLS,
   TOWER_WORKER_BASE_TOOLS,
 } from '../../src/tower/constants.ts';
+import { TOWER_AGENT_GUARDS_EXTENSION } from '../../src/tower/guards.ts';
 import { TowerController, type TowerAutopilot } from '../../src/tower/controller.ts';
 import type { TowerRuntime } from '../../src/tower/runtimeTypes.ts';
 import { TowerModels } from '../../src/tower/models.ts';
@@ -177,6 +183,21 @@ async function executingObjective(store: TowerStore): Promise<void> {
   await planningObjective(store);
   await store.requestObjectiveApproval();
   await store.approveObjective('human');
+}
+
+async function mutateState(store: TowerStore, mutate: (state: TowerState) => void): Promise<void> {
+  const file = store.abs(STATE_FILE);
+  const state = JSON.parse(await readFile(file, 'utf8')) as TowerState;
+  mutate(state);
+  await writeFile(file, `${JSON.stringify(state, null, 2)}\n`);
+}
+
+async function validatingObjective(store: TowerStore): Promise<void> {
+  await executingObjective(store);
+  await mutateState(store, (state) => {
+    for (const feature of state.missions) feature.status = 'merged';
+  });
+  await store.startMilestoneValidation('MS1', await git(store.repoRoot, 'rev-parse', 'main'));
 }
 
 const ACTIVE_MODE_RECORD = {
@@ -494,14 +515,16 @@ describe('tower agents on the real runtime', () => {
     readonly sessions: FakeSession[];
   }
 
-  async function agentHarness(): Promise<AgentHarness> {
+  async function plannedMission(store: TowerStore): Promise<void> {
+    await initialized(store);
+    await store.plan([{ title: 'Build gemm', scope: ['src/gemm/**'] }]);
+  }
+
+  async function agentHarness(prepare: (store: TowerStore) => Promise<void> = plannedMission): Promise<AgentHarness> {
     const requests: TowerAgentSessionRequest[] = [];
     const sessions: FakeSession[] = [];
     const h = await harness({
-      prepare: async (store) => {
-        await initialized(store);
-        await store.plan([{ title: 'Build gemm', scope: ['src/gemm/**'] }]);
-      },
+      prepare,
       createRuntime: (controller) =>
         createTowerAgentRuntime(controller, {
           maxRunningAgents: () => undefined,
@@ -546,6 +569,70 @@ describe('tower agents on the real runtime', () => {
 
     expect(sent.isError).not.toBe(true);
     expect(autopilot.calls).toEqual(['start', 'tick inbox', 'tick tool TowerSend']);
+  });
+
+  async function toolCallGuard(request: TowerAgentSessionRequest) {
+    const extension = request.spec.extensionFactories?.find(
+      (candidate) => typeof candidate !== 'function' && candidate.name === TOWER_AGENT_GUARDS_EXTENSION,
+    );
+    if (extension === undefined || typeof extension === 'function') throw new Error('no tower guard extension');
+    let handler: ((event: ToolCallEvent, ctx: { readonly cwd: string }) => Promise<unknown>) | undefined;
+    await extension.factory({
+      on: (_event: string, registered: typeof handler) => {
+        handler = registered;
+      },
+    } as unknown as ExtensionAPI);
+    if (handler === undefined) throw new Error('no tool_call handler');
+    return handler;
+  }
+
+  it('runs a spawned validator read-only in its validation worktree and removes the worktree after its verdict', async () => {
+    const h = await agentHarness(validatingObjective);
+    const spawned = await createTowerSpawnTool(h.controller, ORCHESTRATOR_CALLER).run(
+      { name: 'ap-v-MS1-scrutiny-1', kind: 'validator', milestone: 'MS1', validation_kind: 'scrutiny' },
+      { toolCallId: 'call_spawn' },
+    );
+    expect(spawned.isError, spawned.output).toBeUndefined();
+    const [request] = h.requests;
+    if (request === undefined) throw new Error('no validator session');
+    const entry = (await h.store.load()).roster.agents.find((agent) => agent.name === 'ap-v-MS1-scrutiny-1');
+    const worktree = h.store.abs(join(WORKTREES_DIR, entry?.worktree ?? ''));
+    expect(entry).toMatchObject({ kind: 'validator', milestoneId: 'MS1', validationKind: 'scrutiny', cwd: worktree });
+    expect(request.spec).toMatchObject({
+      kind: 'validator',
+      cwd: worktree,
+      appendSystemPrompt: TOWER_VALIDATOR_ROLE,
+      tools: TOWER_REVIEWER_BASE_TOOLS,
+    });
+    expect((request.spec.customTools ?? []).map((tool) => tool.name).sort()).toEqual([...TOWER_VALIDATOR_AGENT_TOOLS].sort());
+    const guard = await toolCallGuard(request);
+    const write = { type: 'tool_call', toolCallId: 'call_write', toolName: 'write', input: { path: 'src/a.ts', content: 'x' } };
+    expect(await guard(write as ToolCallEvent, { cwd: worktree })).toEqual({ block: true, reason: VALIDATOR_WRITE_VETO });
+
+    const context = h.ctx as unknown as Parameters<ToolDefinition['execute']>[4];
+    const validated = await agentTool(h, 0, 'TowerValidate').execute(
+      'call_validate',
+      { milestone: 'MS1', kind: 'scrutiny', verdict: 'pass', failures: [], checks: ['npm test'], evidence: 'all green' },
+      undefined,
+      undefined,
+      context,
+    );
+    expect(validated.isError).not.toBe(true);
+    const milestone = (await h.store.load()).objective?.milestones.find((candidate) => candidate.id === 'MS1');
+    expect(milestone?.rounds).toContainEqual(
+      expect.objectContaining({ kind: 'scrutiny', verdict: 'pass', validator: 'ap-v-MS1-scrutiny-1' }),
+    );
+    expect(h.autopilots[0]?.calls).toContain('tick tool TowerValidate');
+    expect(existsSync(worktree)).toBe(true);
+
+    h.sessions[0]?.reply('Submitted pass for MS1 scrutiny.');
+    h.sessions[0]?.settle();
+
+    await vi.waitFor(() => expect(existsSync(worktree)).toBe(false));
+    expect(h.controller.agentOutput(entry?.agentId ?? '')).toMatchObject({
+      kind: 'validator',
+      lastAssistantText: 'Submitted pass for MS1 scrutiny.',
+    });
   });
 });
 
@@ -727,21 +814,6 @@ describe('autopilot effects', () => {
 
 describe('validation worktrees', () => {
   const DEAD_PID = 434_343;
-
-  async function mutateState(store: TowerStore, mutate: (state: TowerState) => void): Promise<void> {
-    const file = store.abs(STATE_FILE);
-    const state = JSON.parse(await readFile(file, 'utf8')) as TowerState;
-    mutate(state);
-    await writeFile(file, `${JSON.stringify(state, null, 2)}\n`);
-  }
-
-  async function validatingObjective(store: TowerStore): Promise<void> {
-    await executingObjective(store);
-    await mutateState(store, (state) => {
-      for (const feature of state.missions) feature.status = 'merged';
-    });
-    await store.startMilestoneValidation('MS1', await git(store.repoRoot, 'rev-parse', 'main'));
-  }
 
   async function registerValidator(
     store: TowerStore,
