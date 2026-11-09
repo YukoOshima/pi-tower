@@ -13,7 +13,7 @@ import {
   stat,
   writeFile,
 } from 'node:fs/promises';
-import { basename, dirname, join, relative, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 
 import { listBaseDirtyEntries, snapshotBaseWip } from './baseWip.ts';
 import {
@@ -21,6 +21,7 @@ import {
   TOWER_FILE_IO_CONCURRENCY,
   TOWER_GIT_CONCURRENCY,
 } from './concurrency.ts';
+import { TowerProtocolError } from './errors.ts';
 import { parseFrontmatter, readFrontmatterPrefix, renderFrontmatter } from './frontmatter.ts';
 import {
   branchExists,
@@ -41,11 +42,50 @@ import {
   mergeNoFf,
   tryGit,
   worktreeAdd,
+  worktreeAddDetached,
   worktreeAddNewBranch,
   worktreeRemove,
 } from './git.ts';
 import { evaluateMissionGate } from './missionGate.ts';
 import type { TowerMissionGateResult, TowerMissionGitObservations } from './missionGate.ts';
+import {
+  applyAutopilotPatch,
+  applyObjectiveUpdate,
+  applyValidationRound,
+  buildObjective,
+  contractRevisionOf,
+  currentMilestone,
+  estimateObjectiveRuns,
+  evaluateObjective,
+  failedRoundsOn,
+  finalMilestone,
+  finalPassBroken,
+  findMilestone,
+  isObjectiveOpen,
+  isTerminalObjectiveStatus,
+  latestValidationRound,
+  milestoneMissions,
+  milestoneOrderOf,
+  milestonePassesOn,
+  nextValidationRound,
+  objectiveApprovalProblems,
+  planPlacement,
+  requiredValidationKinds,
+  sortedMilestones,
+  TOWER_VALIDATION_KINDS,
+  TowerObjectiveCompletionError,
+  validationResultSubject,
+} from './objective.ts';
+import type {
+  TowerMilestoneOrderOf,
+  TowerObjectiveAutopilotPatch,
+  TowerObjectiveDraftInput,
+  TowerObjectiveEvaluation,
+  TowerObjectiveUpdateInput,
+  TowerObjectiveUpdateResult,
+  TowerValidationOutcome,
+  TowerValidationSettings,
+} from './objective.ts';
 import {
   ACTIVITY_LOG,
   BROADCAST_NAME,
@@ -59,6 +99,8 @@ import {
   STATE_FILE,
   TOWER_NAME,
   TOWER_ROOT,
+  VALIDATION_WORKTREE_PREFIX,
+  VALIDATIONS_DIR,
   WORKTREES_DIR,
   isReservedTowerAgentName,
   dateDash,
@@ -69,25 +111,29 @@ import {
   reviewFileName,
   slugify,
   targetSlug,
+  validationFileName,
+  validationWorktreeName,
 } from './paths.ts';
 import type {
   TowerFindingSeverity,
   TowerFindingType,
   TowerInboxItem,
+  TowerMilestone,
   TowerMission,
   TowerMissionKind,
+  TowerMissionOrigin,
   TowerMissionStatus,
+  TowerObjective,
+  TowerObjectiveAutopilotState,
   TowerReviewInfo,
   TowerRosterEntry,
   TowerState,
+  TowerValidationKind,
+  TowerValidationRound,
+  TowerValidationVerdict,
 } from './types.ts';
 
-export class TowerProtocolError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = 'TowerProtocolError';
-  }
-}
+export { TowerProtocolError } from './errors.ts';
 
 export const MAX_REVIEW_ROUNDS = 5;
 
@@ -124,6 +170,8 @@ export interface TowerPlanInput {
   readonly context?: string;
   readonly deps?: readonly string[];
   readonly kind?: TowerMissionKind;
+  readonly milestone?: string;
+  readonly origin?: TowerMissionOrigin;
 }
 
 export interface TowerSendInput {
@@ -182,6 +230,26 @@ export interface TowerReviewResult {
   readonly activityLogError?: string;
 }
 
+export interface TowerValidationInput {
+  readonly milestone: string;
+  readonly kind: TowerValidationKind;
+  readonly verdict: TowerValidationVerdict;
+  readonly failures?: readonly string[];
+  readonly checks?: readonly string[];
+  readonly evidence?: string;
+  readonly validatedCommit?: string;
+  readonly contractRevision?: number;
+}
+
+export interface TowerValidationResult {
+  readonly round: TowerValidationRound;
+  readonly milestone: TowerMilestone;
+  readonly objective: TowerObjective;
+  readonly message?: TowerSendResult;
+  readonly notificationError?: string;
+  readonly activityLogError?: string;
+}
+
 interface TowerReviewLockedOptions {
   readonly validateOnly?: boolean;
   readonly existing: readonly TowerReviewInfo[];
@@ -206,6 +274,13 @@ export interface TowerMissionPatch {
 export interface TowerAddWorktreeResult {
   readonly rel: string;
   readonly spawnBase?: string;
+}
+
+export interface TowerValidationWorktree {
+  readonly worktree: string;
+  readonly path: string;
+  readonly commit: string;
+  readonly round: number;
 }
 
 export interface TowerStoreOptions {
@@ -317,10 +392,14 @@ function addAutoDeps(
   mission: TowerMission,
   candidates: readonly TowerMission[],
   byId: ReadonlyMap<string, TowerMission>,
+  orderOf: TowerMilestoneOrderOf = () => undefined,
 ): void {
   if (mission.kind === 'survey') return;
+  const own = orderOf(mission);
   for (const other of candidates) {
     if (other.id === mission.id || other.kind === 'survey') continue;
+    const theirs = orderOf(other);
+    if (own !== undefined && theirs !== undefined && theirs > own) continue;
     if (!scopesOverlap(mission.scope, other.scope)) continue;
     if (depPathExists(mission.id, other.id, byId) || depPathExists(other.id, mission.id, byId)) {
       continue;
@@ -1021,8 +1100,9 @@ export class TowerStore {
   async registerAgent(entry: TowerRosterEntry): Promise<void> {
     await this.withStateLock(async () => {
       const state = await this.load();
-      this.registerAgentLocked(entry, state);
+      const attempted = this.registerAgentLocked(await this.resolveValidatorEntry(entry), state);
       await this.save(state);
+      if (attempted !== undefined) await this.renderMissionFile(attempted);
     });
   }
 
@@ -1032,9 +1112,10 @@ export class TowerStore {
   ): Promise<void> {
     await this.withStateLock(async () => {
       const state = await this.load();
-      this.registerAgentLocked(entry, state);
+      const attempted = this.registerAgentLocked(await this.resolveValidatorEntry(entry), state);
       if (mission === undefined) {
         await this.save(state);
+        if (attempted !== undefined) await this.renderMissionFile(attempted);
         return;
       }
       await this.updateMissionLocked(
@@ -1065,7 +1146,7 @@ export class TowerStore {
     });
   }
 
-  private registerAgentLocked(entry: TowerRosterEntry, state: TowerState): void {
+  private registerAgentLocked(entry: TowerRosterEntry, state: TowerState): TowerMission | undefined {
     if (entry.name.trim().length === 0 || entry.name.trim() !== entry.name) {
       throw new TowerProtocolError(
         `tower agent name "${entry.name}" must not be blank or carry surrounding whitespace`,
@@ -1076,6 +1157,12 @@ export class TowerStore {
         `tower agent name "${entry.name}" is reserved by the tower protocol — pick a different name`,
       );
     }
+    if (entry.validationKind === 'commands') {
+      throw new TowerProtocolError(
+        `agent "${entry.name}" cannot register for the commands validation — the tower runs the milestone and acceptance commands mechanically and records them itself`,
+      );
+    }
+    if (entry.kind === 'validator') this.assertValidatorRegistration(entry, state);
     for (let index = state.roster.agents.length - 1; index >= 0; index -= 1) {
       if (state.roster.agents[index]!.agentId === entry.agentId) {
         state.roster.agents.splice(index, 1);
@@ -1084,10 +1171,78 @@ export class TowerStore {
     if (this.findAgent(state, entry.name) !== undefined) {
       throw new TowerProtocolError(`tower agent name "${entry.name}" is already registered`);
     }
-    state.roster.agents.push({
+    const stored: TowerRosterEntry = {
       ...entry,
       lastInboxReadAt: entry.lastInboxReadAt ?? entry.spawnedAt,
-    });
+    };
+    state.roster.agents.push(
+      entry.kind === 'validator' && state.objective !== undefined
+        ? withContractRevision(stored, contractRevisionOf(state.objective))
+        : stored,
+    );
+    if (entry.kind !== 'worker' || state.objective === undefined) return undefined;
+    const mission = state.missions.find((candidate) => candidate.id === entry.missionId);
+    if (mission === undefined) return undefined;
+    mission.attempts = (mission.attempts ?? 0) + 1;
+    return mission;
+  }
+
+  private assertValidatorRegistration(entry: TowerRosterEntry, state: TowerState): void {
+    if (entry.milestoneId === undefined || entry.validationKind === undefined) {
+      throw new TowerProtocolError(
+        `validator "${entry.name}" needs a milestone and a validation kind — a validator checks exactly one (milestone, kind, round)`,
+      );
+    }
+    if (!TOWER_VALIDATION_KINDS.includes(entry.validationKind)) {
+      throw new TowerProtocolError(
+        `validator "${entry.name}" validation kind must be ${TOWER_VALIDATION_KINDS.join(' | ')}, got "${String(entry.validationKind)}"`,
+      );
+    }
+    const objective = state.objective;
+    if (objective === undefined || !isObjectiveOpen(objective)) {
+      throw new TowerProtocolError(
+        `validator "${entry.name}" cannot be registered — there is no open objective${objective === undefined ? '' : ` (objective ${objective.id} is ${objective.status})`}`,
+      );
+    }
+    const milestone = findMilestone(objective, entry.milestoneId);
+    if (milestone === undefined) {
+      throw new TowerProtocolError(
+        `validator "${entry.name}" names milestone "${entry.milestoneId}", which objective ${objective.id} does not have`,
+      );
+    }
+    if (milestone.status !== 'validating') {
+      throw new TowerProtocolError(
+        `validator "${entry.name}" cannot be registered — milestone ${milestone.id} is ${milestone.status}, and validators are registered only while it is validating`,
+      );
+    }
+    if (entry.validatedCommit === undefined) {
+      throw new TowerProtocolError(
+        `validator "${entry.name}" needs a validatedCommit — the commit its validation worktree was checked out at, which stamps its round`,
+      );
+    }
+    if (entry.contractRevision !== undefined && entry.contractRevision !== contractRevisionOf(objective)) {
+      throw new TowerProtocolError(
+        `validator "${entry.name}" was briefed under contract revision ${String(entry.contractRevision)}, but objective ${objective.id} is at revision ${String(contractRevisionOf(objective))} — brief a new validator on the current contract`,
+      );
+    }
+    if (entry.validatedCommit !== milestone.validationCommit) {
+      throw new TowerProtocolError(
+        `validator "${entry.name}" was checked out at ${entry.validatedCommit.slice(0, 7)}, but milestone ${milestone.id} is validating ${milestone.validationCommit?.slice(0, 7) ?? 'no commit'} — prepare a validation worktree for the current validation commit`,
+      );
+    }
+  }
+
+  private async resolveValidatorEntry(entry: TowerRosterEntry): Promise<TowerRosterEntry> {
+    if (entry.kind !== 'validator' || entry.validatedCommit === undefined) return entry;
+    let validatedCommit: string;
+    try {
+      validatedCommit = await this.resolveCommit(entry.validatedCommit);
+    } catch {
+      throw new TowerProtocolError(
+        `validator "${entry.name}" validatedCommit "${entry.validatedCommit}" does not name a commit in this repository — register the commit its validation worktree was checked out at`,
+      );
+    }
+    return { ...entry, validatedCommit };
   }
 
   async markAgentDied(
@@ -1162,7 +1317,398 @@ export class TowerStore {
     });
   }
 
-  async plan(input: readonly TowerPlanInput[]): Promise<readonly TowerMission[]> {
+  async draftObjective(input: TowerObjectiveDraftInput): Promise<TowerObjective> {
+    return this.withStateLock(async () => {
+      const state = await this.load();
+      const previous = state.objective;
+      if (previous !== undefined && !isTerminalObjectiveStatus(previous.status)) {
+        throw new TowerProtocolError(
+          `objective ${previous.id} is still ${previous.status} — update it instead, or block it before drafting a new objective`,
+        );
+      }
+      const objective = buildObjective(state, input, new Date().toISOString());
+      if (previous !== undefined) {
+        state.objectiveHistory = [...(state.objectiveHistory ?? []), previous];
+      }
+      state.objective = objective;
+      await this.saveObjective(state, 'objective.draft', {
+        id: objective.id,
+        milestones:
+          objective.milestones.length > 0
+            ? objective.milestones.map((milestone) => milestone.id).join(',')
+            : undefined,
+        archived: previous?.id,
+      });
+      return objective;
+    });
+  }
+
+  async updateObjective(input: TowerObjectiveUpdateInput): Promise<TowerObjectiveUpdateResult> {
+    return this.withStateLock(async () => {
+      const state = await this.load();
+      const result = applyObjectiveUpdate(state, input);
+      if (result.changes.length === 0) return result;
+      state.objective = result.objective;
+      await this.saveObjective(state, 'objective.update', {
+        id: result.objective.id,
+        changes: result.changes.join(','),
+        status: result.objective.status,
+        reopened: result.reopened.length > 0 ? result.reopened.join(',') : undefined,
+      });
+      return result;
+    });
+  }
+
+  async requestObjectiveApproval(): Promise<{
+    readonly objective: TowerObjective;
+    readonly estimatedRuns: number;
+  }> {
+    return this.withStateLock(async () => {
+      const state = await this.load();
+      const objective = this.requireObjective(state);
+      if (objective.status !== 'planning' && objective.status !== 'awaiting-approval') {
+        throw new TowerProtocolError(
+          `objective ${objective.id} is ${objective.status} — only a planning objective can request approval`,
+        );
+      }
+      this.assertApprovable(state, objective, 'request approval');
+      objective.status = 'awaiting-approval';
+      const estimatedRuns = estimateObjectiveRuns(state);
+      await this.saveObjective(state, 'objective.request-approval', {
+        id: objective.id,
+        estimated_runs: estimatedRuns,
+      });
+      return { objective, estimatedRuns };
+    });
+  }
+
+  async approveObjective(by: 'human' | 'auto'): Promise<TowerObjective> {
+    if (by !== 'human' && by !== 'auto') {
+      throw new TowerProtocolError(`an objective is approved by "human" or "auto", got "${String(by)}"`);
+    }
+    return this.withStateLock(async () => {
+      const state = await this.load();
+      const objective = this.requireObjective(state);
+      if (objective.status !== 'awaiting-approval') {
+        throw new TowerProtocolError(
+          `objective ${objective.id} is ${objective.status} — only an objective awaiting approval can be approved; the orchestrator requests approval first`,
+        );
+      }
+      this.assertApprovable(state, objective, 'be approved');
+      const now = new Date().toISOString();
+      objective.status = 'executing';
+      objective.approvedBy = by;
+      objective.approvedAt = now;
+      objective.startedAt ??= now;
+      delete objective.approvalReason;
+      const activated = this.activateCurrentMilestoneLocked(objective, now);
+      await this.saveObjective(state, 'objective.approve', {
+        id: objective.id,
+        by,
+        activated: activated?.id,
+      });
+      return objective;
+    });
+  }
+
+  async pauseObjective(reason: string): Promise<TowerObjective> {
+    return this.withStateLock(async () => {
+      const state = await this.load();
+      const objective = this.requireObjective(state);
+      if (objective.status !== 'executing') {
+        throw new TowerProtocolError(
+          `objective ${objective.id} is ${objective.status} — only an executing objective can be paused`,
+        );
+      }
+      objective.status = 'paused';
+      objective.pausedReason = reason.trim().length > 0 ? reason.trim() : 'paused on request';
+      await this.saveObjective(state, 'objective.pause', {
+        id: objective.id,
+        reason: objective.pausedReason,
+      });
+      return objective;
+    });
+  }
+
+  async resumeObjective(): Promise<TowerObjective> {
+    return this.withStateLock(async () => {
+      const state = await this.load();
+      const objective = this.requireObjective(state);
+      const from = objective.status;
+      if (from !== 'paused' && from !== 'blocked') {
+        throw new TowerProtocolError(
+          `objective ${objective.id} is ${from} — only a paused or blocked objective can be resumed`,
+        );
+      }
+      objective.status = objective.approvedAt !== undefined ? 'executing' : 'planning';
+      delete objective.pausedReason;
+      delete objective.blockedReason;
+      const reopened: string[] = [];
+      for (const milestone of objective.milestones) {
+        if (milestone.status !== 'blocked') continue;
+        milestone.status = 'failed';
+        reopened.push(milestone.id);
+      }
+      if (objective.autopilot !== undefined) {
+        objective.autopilot.stallWakes = 0;
+        objective.autopilot.progressAt = new Date().toISOString();
+      }
+      await this.saveObjective(state, 'objective.resume', {
+        id: objective.id,
+        from,
+        status: objective.status,
+        reopened: reopened.length > 0 ? reopened.join(',') : undefined,
+      });
+      return objective;
+    });
+  }
+
+  async blockObjective(reason: string): Promise<TowerObjective> {
+    const trimmed = reason.trim();
+    if (trimmed.length === 0) {
+      throw new TowerProtocolError('blocking an objective needs a reason — the human is notified with it');
+    }
+    return this.withStateLock(async () => {
+      const state = await this.load();
+      const objective = this.requireObjective(state);
+      if (objective.status === 'completed' || objective.status === 'blocked') {
+        throw new TowerProtocolError(`objective ${objective.id} is already ${objective.status}`);
+      }
+      objective.status = 'blocked';
+      objective.blockedReason = trimmed;
+      delete objective.pausedReason;
+      await this.saveObjective(state, 'objective.block', { id: objective.id, reason: trimmed });
+      return objective;
+    });
+  }
+
+  /**
+   * Wave 2 must pass the configured objective settings (skipScrutiny, skipUserTesting): they decide
+   * which validation kinds the completion gate requires. The default `{}` requires every kind.
+   */
+  async completeObjective(settings: TowerValidationSettings = {}): Promise<TowerObjective> {
+    return this.withStateLock(async () => {
+      const state = await this.load();
+      const objective = this.requireObjective(state);
+      const baseTip = await branchTip(this.repoRoot, state.base);
+      const evaluation = evaluateObjective(state, baseTip, settings);
+      if (!evaluation.completion.ready) {
+        throw new TowerObjectiveCompletionError(objective.id, evaluation.completion.blocks);
+      }
+      objective.status = 'completed';
+      objective.completedAt = new Date().toISOString();
+      await this.saveObjective(state, 'objective.complete', {
+        id: objective.id,
+        base_tip: baseTip.slice(0, 7),
+      });
+      return objective;
+    });
+  }
+
+  /**
+   * Wave 2 must pass the configured objective settings (skipScrutiny, skipUserTesting): they decide
+   * the required kinds, readiness and the completion gate. The default `{}` requires every kind.
+   */
+  async objectiveEvaluation(settings: TowerValidationSettings = {}): Promise<TowerObjectiveEvaluation> {
+    const state = await this.load();
+    return evaluateObjective(state, await branchTip(this.repoRoot, state.base), settings);
+  }
+
+  async activateNextMilestone(): Promise<TowerMilestone | undefined> {
+    return this.withStateLock(async () => {
+      const state = await this.load();
+      const objective = this.requireExecutingObjective(state, 'activate a milestone');
+      const activated = this.activateCurrentMilestoneLocked(objective, new Date().toISOString());
+      if (activated === undefined) return undefined;
+      await this.saveObjective(state, 'milestone.activate', {
+        objective: objective.id,
+        milestone: activated.id,
+      });
+      return activated;
+    });
+  }
+
+  /**
+   * Wave 2 must pass the configured objective settings (skipScrutiny, skipUserTesting): they decide
+   * the required kinds (none passes the milestone immediately), whether a passed final milestone is
+   * stale, and which failed rounds block a same-tip restart. The default `{}` requires every kind.
+   */
+  async startMilestoneValidation(
+    milestoneId: string,
+    commit: string,
+    settings: TowerValidationSettings = {},
+  ): Promise<{
+    readonly milestone: TowerMilestone;
+    readonly commit: string;
+    readonly requiredKinds: readonly TowerValidationKind[];
+  }> {
+    return this.withStateLock(async () => {
+      const state = await this.load();
+      const objective = this.requireExecutingObjective(state, 'start a validation');
+      const milestone = findMilestone(objective, milestoneId);
+      if (milestone === undefined) {
+        throw new TowerProtocolError(`objective ${objective.id} has no milestone "${milestoneId}"`);
+      }
+      if (milestone.status === 'pending' || milestone.status === 'blocked') {
+        throw new TowerProtocolError(
+          `milestone ${milestone.id} is ${milestone.status} — only an active, validating or failed milestone, or a stale final one, can be validated`,
+        );
+      }
+      if (milestone.status === 'passed' && finalMilestone(objective)?.id !== milestone.id) {
+        throw new TowerProtocolError(
+          `milestone ${milestone.id} already passed — only the final milestone is validated again, when the base tip moved after it passed`,
+        );
+      }
+      const earlier = sortedMilestones(objective).filter(
+        (other) => other.order < milestone.order && other.status !== 'passed',
+      );
+      if (earlier.length > 0) {
+        throw new TowerProtocolError(
+          `milestone ${milestone.id} cannot be validated before ${earlier.map((other) => other.id).join(', ')} passed`,
+        );
+      }
+      const features = milestoneMissions(state, milestone.id);
+      const open = features.filter(isOpenMission);
+      if (features.length === 0 || open.length > 0) {
+        throw new TowerProtocolError(
+          features.length === 0
+            ? `milestone ${milestone.id} has no features — plan them with TowerPlan(milestone=${milestone.id}) before validating it`
+            : `milestone ${milestone.id} still has open features (${open.map((mission) => `${mission.id} ${mission.status}`).join(', ')}) — validation starts once every feature is merged or abandoned`,
+        );
+      }
+      const resolved = await this.resolveCommit(commit);
+      const baseTip = await branchTip(this.repoRoot, state.base);
+      if (resolved !== baseTip) {
+        throw new TowerProtocolError(
+          `milestone ${milestone.id} is validated on the current base tip ${baseTip.slice(0, 7)} of "${state.base}", not on ${resolved.slice(0, 7)}`,
+        );
+      }
+      if (
+        milestone.status === 'passed' &&
+        milestone.validationCommit === baseTip &&
+        milestonePassesOn(objective, milestone, baseTip, settings)
+      ) {
+        throw new TowerProtocolError(
+          `final milestone ${milestone.id} already passed on the current base tip ${baseTip.slice(0, 7)} — it is validated again only after the base tip moves`,
+        );
+      }
+      const failedHere = failedRoundsOn(objective, milestone, baseTip, settings).map(
+        (round) => `${round.kind} r${String(round.round)}`,
+      );
+      if (failedHere.length > 0) {
+        throw new TowerProtocolError(
+          `milestone ${milestone.id} already failed ${failedHere.join(', ')} on the base tip ${baseTip.slice(0, 7)} — a new validation needs a new base tip: merge a fix planned into ${milestone.id} first`,
+        );
+      }
+      const now = new Date().toISOString();
+      milestone.status = 'validating';
+      milestone.validationCommit = resolved;
+      delete milestone.passedAt;
+      const requiredKinds = requiredValidationKinds(objective, milestone, settings);
+      if (requiredKinds.length === 0) {
+        milestone.status = 'passed';
+        milestone.passedAt = now;
+      }
+      await this.saveObjective(state, 'milestone.validate', {
+        objective: objective.id,
+        milestone: milestone.id,
+        commit: resolved.slice(0, 7),
+        kinds: requiredKinds.length > 0 ? requiredKinds.join(',') : 'none',
+        status: milestone.status,
+      });
+      return { milestone, commit: resolved, requiredKinds };
+    });
+  }
+
+  async recordObjectiveUsage(deltaUsd: number): Promise<TowerObjective | undefined> {
+    if (!Number.isFinite(deltaUsd) || deltaUsd < 0) {
+      throw new TowerProtocolError(`objective usage must be a non-negative cost in USD, got ${String(deltaUsd)}`);
+    }
+    return this.withStateLock(async () => {
+      const state = await this.load();
+      const objective = state.objective;
+      if (objective === undefined || deltaUsd === 0 || isTerminalObjectiveStatus(objective.status)) {
+        return objective;
+      }
+      objective.usage = { costUsd: (objective.usage?.costUsd ?? 0) + deltaUsd };
+      await this.save(state);
+      return objective;
+    });
+  }
+
+  async updateObjectiveAutopilot(
+    patch: TowerObjectiveAutopilotPatch,
+  ): Promise<TowerObjectiveAutopilotState> {
+    return this.withStateLock(async () => {
+      const state = await this.load();
+      const autopilot = applyAutopilotPatch(this.requireObjective(state), patch);
+      await this.save(state);
+      return autopilot;
+    });
+  }
+
+  private async resolveCommit(commit: string): Promise<string> {
+    try {
+      return await git(this.repoRoot, ['rev-parse', '--verify', '--quiet', `${commit.trim()}^{commit}`]);
+    } catch {
+      throw new TowerProtocolError(`"${commit}" does not name a commit in this repository`);
+    }
+  }
+
+  private requireExecutingObjective(state: TowerState, action: string): TowerObjective {
+    const objective = this.requireObjective(state);
+    if (objective.status !== 'executing') {
+      throw new TowerProtocolError(
+        `objective ${objective.id} is ${objective.status} — cannot ${action} unless it is executing`,
+      );
+    }
+    return objective;
+  }
+
+  private requireObjective(state: TowerState): TowerObjective {
+    if (state.objective === undefined) {
+      throw new TowerProtocolError('there is no objective — draft one first');
+    }
+    return state.objective;
+  }
+
+  private assertApprovable(state: TowerState, objective: TowerObjective, action: string): void {
+    const problems = objectiveApprovalProblems(state, objective);
+    if (problems.length > 0) {
+      throw new TowerProtocolError(`objective ${objective.id} cannot ${action} — ${problems.join('; ')}`);
+    }
+  }
+
+  private activateCurrentMilestoneLocked(
+    objective: TowerObjective,
+    now: string,
+  ): TowerMilestone | undefined {
+    const milestone = currentMilestone(objective);
+    if (milestone?.status !== 'pending') return undefined;
+    milestone.status = 'active';
+    milestone.startedAt = now;
+    return milestone;
+  }
+
+  private async saveObjective(
+    state: TowerState,
+    action: string,
+    details: Readonly<Record<string, string | number | undefined>>,
+  ): Promise<void> {
+    await this.save(state);
+    await this.renderMissionsIndex(state);
+    await this.appendLog(TOWER_NAME, action, details, MISSIONS_INDEX);
+  }
+
+  /**
+   * Wave 2 must pass the configured objective settings (skipScrutiny, skipUserTesting) whenever an
+   * objective exists: they decide whether a passed final milestone still holds or may take a fix.
+   * The default `{}` requires every kind.
+   */
+  async plan(
+    input: readonly TowerPlanInput[],
+    settings: TowerValidationSettings = {},
+  ): Promise<readonly TowerMission[]> {
     if (input.length === 0) {
       throw new TowerProtocolError('TowerPlan needs at least one mission');
     }
@@ -1177,10 +1723,16 @@ export class TowerStore {
     return this.withStateLock(async () => {
       const state = await this.load();
       const startIndex = state.missions.length;
+      const baseTip =
+        state.objective !== undefined && input.some((item) => item.milestone !== undefined)
+          ? await branchTip(this.repoRoot, state.base)
+          : undefined;
+      const placements = input.map((item) => planPlacement(state, item, { baseTip, settings }));
 
       const missions: TowerMission[] = input.map((item, index) => {
         const n = startIndex + index + 1;
         const slug = slugify(item.title, 40);
+        const placement = placements[index]!;
         return {
           id: `M${n}`,
           title: item.title,
@@ -1196,6 +1748,9 @@ export class TowerStore {
           tasks: (item.tasks ?? []).map((text) => ({ text, done: false })),
           notes: [],
           blockers: [],
+          ...(placement.milestone === undefined
+            ? {}
+            : { milestone: placement.milestone.id, origin: placement.origin }),
         };
       });
 
@@ -1205,6 +1760,20 @@ export class TowerStore {
           if (!knownIds.has(dep)) {
             throw new TowerProtocolError(`mission ${mission.id} depends on unknown mission "${dep}"`);
           }
+        }
+      }
+      const orderOf = milestoneOrderOf(state);
+      const everyMission = new Map([...state.missions, ...missions].map((m): [string, TowerMission] => [m.id, m]));
+      for (const mission of missions) {
+        const own = orderOf(mission);
+        if (own === undefined) continue;
+        for (const dep of mission.deps) {
+          const target = everyMission.get(dep)!;
+          const theirs = orderOf(target);
+          if (theirs === undefined || theirs <= own) continue;
+          throw new TowerProtocolError(
+            `mission ${mission.id} (milestone ${mission.milestone ?? '?'}) cannot depend on ${dep} — ${dep} belongs to the later milestone ${target.milestone ?? '?'}, whose features start only after ${mission.milestone ?? '?'} passes, so the dependency could never be met; drop it, milestone order already runs ${mission.milestone ?? '?'} first`,
+          );
         }
       }
       const takenBranches = new Map(state.missions.map((m): [string, TowerMission] => [m.branch, m]));
@@ -1230,22 +1799,42 @@ export class TowerStore {
           ...openExisting,
           ...missions.filter((m) => missionNumber(m.id) < missionNumber(mission.id)),
         ];
-        addAutoDeps(mission, older, byId);
+        addAutoDeps(mission, older, byId, orderOf);
       }
-      this.assertScopesDisjoint([...openExisting, ...missions]);
+      this.assertScopesDisjoint([...openExisting, ...missions], orderOf);
 
+      const reactivated = new Set<string>();
+      for (const placement of placements) {
+        if (placement.milestone === undefined || !placement.reopens) continue;
+        placement.milestone.status = 'active';
+        delete placement.milestone.passedAt;
+        reactivated.add(placement.milestone.id);
+      }
+      const milestones = new Set(missions.flatMap((m) => (m.milestone === undefined ? [] : [m.milestone])));
       state.missions.push(...missions);
       await this.save(state);
       await this.renderMissionsIndex(state);
       for (const mission of missions) {
         await this.renderMissionFile(mission);
       }
-      await this.appendLog(TOWER_NAME, 'plan', { missions: missions.map((m) => m.id).join(',') }, MISSIONS_INDEX);
+      await this.appendLog(
+        TOWER_NAME,
+        'plan',
+        {
+          missions: missions.map((m) => m.id).join(','),
+          milestones: milestones.size > 0 ? [...milestones].join(',') : undefined,
+          reactivated: reactivated.size > 0 ? [...reactivated].join(',') : undefined,
+        },
+        MISSIONS_INDEX,
+      );
       return missions;
     });
   }
 
-  private assertScopesDisjoint(missions: readonly TowerMission[]): void {
+  private assertScopesDisjoint(
+    missions: readonly TowerMission[],
+    orderOf: TowerMilestoneOrderOf = () => undefined,
+  ): void {
     const scopes: Array<{ readonly id: string; readonly raw: string; readonly stem: string }> = [];
     for (const mission of missions) {
       if (mission.kind === 'survey') continue;
@@ -1265,6 +1854,9 @@ export class TowerStore {
         const a = scopes[i]!;
         const b = scopes[j]!;
         if (a.id === b.id) continue;
+        const orderA = orderOf(byId.get(a.id)!);
+        const orderB = orderOf(byId.get(b.id)!);
+        if (orderA !== undefined && orderB !== undefined && orderA !== orderB) continue;
         if (a.stem === b.stem || a.stem.startsWith(`${b.stem}/`) || b.stem.startsWith(`${a.stem}/`)) {
           if (depPathExists(a.id, b.id, byId) || depPathExists(b.id, a.id, byId)) continue;
           throw new TowerProtocolError(
@@ -1391,8 +1983,9 @@ export class TowerStore {
       const others = state.missions.filter((m) => m.id !== id && isOpenMission(m));
       const byId = new Map(state.missions.map((m) => [m.id, m]));
       byId.set(id, patched);
-      addAutoDeps(patched, others, byId);
-      this.assertScopesDisjoint([...others, patched]);
+      const orderOf = milestoneOrderOf(state);
+      addAutoDeps(patched, others, byId, orderOf);
+      this.assertScopesDisjoint([...others, patched], orderOf);
       mission.scope = [...patch.scope];
       mission.deps = patched.deps;
       mission.notes = patched.notes;
@@ -1542,6 +2135,7 @@ export class TowerStore {
     callerName: string,
     input: TowerSendInput,
     state: TowerState,
+    options: { readonly allowSelf?: boolean } = {},
   ): Promise<TowerSendResult> {
     const to = input.to.trim();
     if (to !== TOWER_NAME && to !== BROADCAST_NAME && this.findAgent(state, to) === undefined) {
@@ -1550,7 +2144,7 @@ export class TowerStore {
         `unknown recipient "${to}" — address a roster agent, ${TOWER_NAME}, or ${BROADCAST_NAME} (known: ${known.join(', ')})`,
       );
     }
-    if (to === callerName) {
+    if (to === callerName && options.allowSelf !== true) {
       throw new TowerProtocolError('cannot send an inbox message to yourself');
     }
 
@@ -2971,6 +3565,293 @@ export class TowerStore {
     return { rel, spawnBase };
   }
 
+  /**
+   * Wave 2 must pass the configured objective settings (skipScrutiny, skipUserTesting): they decide
+   * which kinds the milestone status is derived from. The default `{}` requires every kind.
+   */
+  async submitValidation(
+    callerName: string,
+    input: TowerValidationInput,
+    settings: TowerValidationSettings = {},
+  ): Promise<TowerValidationResult> {
+    if (!TOWER_VALIDATION_KINDS.includes(input.kind)) {
+      throw new TowerProtocolError(
+        `validation kind must be ${TOWER_VALIDATION_KINDS.join(' | ')}, got "${String(input.kind)}"`,
+      );
+    }
+    if (input.verdict !== 'pass' && input.verdict !== 'fail') {
+      throw new TowerProtocolError(`validation verdict must be pass | fail, got "${String(input.verdict)}"`);
+    }
+    const failures = (input.failures ?? []).map((item) => item.trim()).filter((item) => item.length > 0);
+    if (input.verdict === 'fail' && failures.length === 0) {
+      throw new TowerProtocolError(
+        'a fail verdict must list at least one failure — the orchestrator plans fix features from them',
+      );
+    }
+    if (input.verdict === 'pass' && failures.length > 0) {
+      throw new TowerProtocolError(
+        'a pass verdict lists no failures — use verdict fail, or move non-blocking remarks into the evidence',
+      );
+    }
+    return this.withStateLock(async () => {
+      const state = await this.load();
+      const objective = this.requireObjective(state);
+      if (objective.status === 'completed') {
+        throw new TowerProtocolError(`objective ${objective.id} is completed — validations are closed`);
+      }
+      const milestone = findMilestone(objective, input.milestone);
+      if (milestone === undefined) {
+        throw new TowerProtocolError(`objective ${objective.id} has no milestone "${input.milestone}"`);
+      }
+      if (milestone.status === 'pending') {
+        throw new TowerProtocolError(`milestone ${milestone.id} is pending — its validation has not started`);
+      }
+      const stamp = await this.validationStampFor(state, callerName, input, objective, milestone);
+      const validatedCommit = stamp.commit;
+      const baseTip = await branchTip(this.repoRoot, state.base);
+      const round = nextValidationRound(milestone, input.kind);
+      const date = new Date().toISOString();
+      await mkdir(this.abs(VALIDATIONS_DIR), { recursive: true });
+      const frontmatter = renderFrontmatter({
+        milestone: milestone.id,
+        kind: input.kind,
+        validator: callerName,
+        round: String(round),
+        verdict: input.verdict,
+        validatedCommit,
+        date,
+      });
+      const file = await this.writeUnique(
+        join(
+          VALIDATIONS_DIR,
+          validationFileName({ milestone: milestone.id, kind: input.kind, validator: callerName, round }),
+        ),
+        `${frontmatter}\n\n${validationDocumentBody(failures, input.checks ?? [], input.evidence ?? '')}\n`,
+      );
+      const record: TowerValidationRound = {
+        round,
+        kind: input.kind,
+        validator: callerName,
+        validatedCommit,
+        verdict: input.verdict,
+        failures,
+        file,
+        date,
+        ...(stamp.contractRevision > 0 ? { contractRevision: stamp.contractRevision } : {}),
+      };
+      const outcome = applyValidationRound(objective, milestone, record, settings);
+      await this.save(state);
+      await this.renderMissionsIndex(state);
+      let activityLogError: string | undefined;
+      try {
+        await this.appendLog(
+          callerName,
+          'validation.submit',
+          {
+            milestone: milestone.id,
+            kind: input.kind,
+            round,
+            verdict: input.verdict,
+            commit: validatedCommit.slice(0, 7),
+            status: milestone.status,
+            objective: outcome.objectiveBlocked ? objective.status : undefined,
+          },
+          file,
+        );
+      } catch (error) {
+        activityLogError = `validation ${file} was stored, but appending its validation.submit activity log failed: ${error instanceof Error ? error.message : String(error)}`;
+      }
+      let message: TowerSendResult | undefined;
+      let notificationError: string | undefined;
+      try {
+        message = await this.withInboxPublicationLock(() =>
+          this.sendDetailedSnapshot(
+            callerName,
+            {
+              to: TOWER_NAME,
+              subject: validationResultSubject(milestone.id, record),
+              body: validationResultBody(
+                objective,
+                milestone,
+                record,
+                outcome,
+                record.verdict === 'fail' &&
+                  record.validatedCommit === baseTip &&
+                  finalPassBroken(objective, milestone, baseTip, settings) === 'failed',
+              ),
+              scope: milestone.id,
+              action: 'validation-result',
+            },
+            state,
+            { allowSelf: true },
+          ),
+        );
+      } catch (error) {
+        notificationError = `validation ${file} was stored, but storing its validation-result notification failed: ${error instanceof Error ? error.message : String(error)}`;
+      }
+      return {
+        round: record,
+        milestone,
+        objective,
+        message,
+        notificationError,
+        activityLogError: activityLogError ?? message?.activityLogError,
+      };
+    });
+  }
+
+  private async validationStampFor(
+    state: TowerState,
+    callerName: string,
+    input: TowerValidationInput,
+    objective: TowerObjective,
+    milestone: TowerMilestone,
+  ): Promise<{ readonly commit: string; readonly contractRevision: number }> {
+    const current = contractRevisionOf(objective);
+    if (callerName === TOWER_NAME) {
+      if (input.kind !== 'commands') {
+        throw new TowerProtocolError(
+          `the tower records only the mechanical commands validation — ${input.kind} is reported by its validator`,
+        );
+      }
+      if (input.validatedCommit === undefined || input.validatedCommit.trim().length === 0) {
+        throw new TowerProtocolError(
+          'the tower must state the commit it ran the validation commands on (validatedCommit)',
+        );
+      }
+      const given = input.contractRevision;
+      if (given === undefined && current > 0) {
+        throw new TowerProtocolError(
+          `the tower must state the contract revision whose command list it ran (contractRevision) — objective ${objective.id} is at revision ${String(current)}`,
+        );
+      }
+      if (given !== undefined && (!Number.isSafeInteger(given) || given < 0 || given > current)) {
+        throw new TowerProtocolError(
+          `contractRevision ${String(given)} is not a revision of objective ${objective.id} up to its current ${String(current)} — stamp the revision whose command list was run`,
+        );
+      }
+      return { commit: await this.resolveCommit(input.validatedCommit), contractRevision: given ?? 0 };
+    }
+    if (input.kind === 'commands') {
+      throw new TowerProtocolError(
+        `the commands validation is recorded only by the tower — agent "${callerName}" cannot report it`,
+      );
+    }
+    const entry = this.findAgent(state, callerName);
+    if (
+      entry?.kind !== 'validator' ||
+      entry.milestoneId !== milestone.id ||
+      entry.validationKind !== input.kind
+    ) {
+      throw new TowerProtocolError(
+        `agent "${callerName}" is not the validator registered for ${milestone.id} ${input.kind}`,
+      );
+    }
+    if (milestone.rounds.some((round) => round.validator === callerName && round.kind === input.kind)) {
+      throw new TowerProtocolError(
+        `validator "${callerName}" already reported its ${milestone.id} ${input.kind} round — a validator reports exactly once`,
+      );
+    }
+    if (entry.validatedCommit === undefined) {
+      throw new TowerProtocolError(
+        `validator "${callerName}" has no validatedCommit on its roster entry, so its round cannot be stamped — spawn a validator for the current validation commit`,
+      );
+    }
+    const stamped = await this.resolveCommit(entry.validatedCommit);
+    if (
+      input.validatedCommit !== undefined &&
+      (await this.resolveCommit(input.validatedCommit)) !== stamped
+    ) {
+      throw new TowerProtocolError(
+        `validator "${callerName}" was checked out at ${stamped.slice(0, 7)}, not ${input.validatedCommit} — a round is stamped on the commit its worktree validated`,
+      );
+    }
+    const briefed = entry.contractRevision ?? 0;
+    if (input.contractRevision !== undefined && input.contractRevision !== briefed) {
+      throw new TowerProtocolError(
+        `validator "${callerName}" was briefed under contract revision ${String(briefed)}, not ${String(input.contractRevision)} — a round is stamped with the contract its validator checked`,
+      );
+    }
+    return { commit: stamped, contractRevision: briefed };
+  }
+
+  async prepareValidationWorktree(
+    milestoneId: string,
+    kind: TowerValidationKind,
+  ): Promise<TowerValidationWorktree> {
+    if (!TOWER_VALIDATION_KINDS.includes(kind)) {
+      throw new TowerProtocolError(
+        `validation kind must be ${TOWER_VALIDATION_KINDS.join(' | ')}, got "${String(kind)}"`,
+      );
+    }
+    return this.withStateLock(async () => {
+      const state = await this.load();
+      const objective = this.requireObjective(state);
+      const milestone = findMilestone(objective, milestoneId);
+      if (milestone === undefined) {
+        throw new TowerProtocolError(`objective ${objective.id} has no milestone "${milestoneId}"`);
+      }
+      const commit = milestone.validationCommit;
+      if (milestone.status !== 'validating' || commit === undefined) {
+        throw new TowerProtocolError(
+          `milestone ${milestone.id} is ${milestone.status}, not validating — start its validation on the base tip before preparing a validation worktree`,
+        );
+      }
+      let round = nextValidationRound(milestone, kind);
+      let worktree = validationWorktreeName(milestone.id, kind, round);
+      while (existsSync(this.abs(join(WORKTREES_DIR, worktree)))) {
+        round += 1;
+        worktree = validationWorktreeName(milestone.id, kind, round);
+      }
+      const path = this.abs(join(WORKTREES_DIR, worktree));
+      await mkdir(this.abs(WORKTREES_DIR), { recursive: true });
+      await worktreeAddDetached(this.repoRoot, path, commit);
+      await this.appendLog(TOWER_NAME, 'worktree.add', {
+        worktree,
+        milestone: milestone.id,
+        kind,
+        commit: commit.slice(0, 7),
+      });
+      return { worktree, path, commit, round };
+    });
+  }
+
+  async removeValidationWorktree(worktree: string): Promise<boolean> {
+    const trimmed = worktree.trim().replace(/\/+$/, '');
+    const name = isAbsolute(trimmed)
+      ? relative(this.abs(WORKTREES_DIR), trimmed)
+      : trimmed.startsWith(`${WORKTREES_DIR}/`)
+        ? trimmed.slice(WORKTREES_DIR.length + 1)
+        : trimmed;
+    if (!name.startsWith(VALIDATION_WORKTREE_PREFIX) || name.includes('/')) {
+      throw new TowerProtocolError(
+        `"${worktree}" is not a validation worktree — only ${VALIDATION_WORKTREE_PREFIX}* worktrees under ${WORKTREES_DIR} are removed here`,
+      );
+    }
+    const absPath = this.abs(join(WORKTREES_DIR, name));
+    if (!(await isRegisteredWorktree(this.repoRoot, absPath))) return false;
+    await worktreeRemove(this.repoRoot, absPath);
+    await this.appendLog(TOWER_NAME, 'worktree.remove', { worktree: name });
+    return true;
+  }
+
+  private async validationWorktrees(): Promise<string[]> {
+    let entries: string[];
+    try {
+      entries = await readdir(this.abs(WORKTREES_DIR));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+      throw error;
+    }
+    const registered: string[] = [];
+    for (const name of entries.filter((entry) => entry.startsWith(VALIDATION_WORKTREE_PREFIX)).toSorted()) {
+      if (await isRegisteredWorktree(this.repoRoot, this.abs(join(WORKTREES_DIR, name)))) {
+        registered.push(name);
+      }
+    }
+    return registered;
+  }
+
   async teardown(options: TowerTeardownOptions = {}): Promise<readonly string[]> {
     const state = await this.load();
     const dryRun = options.dryRun === true;
@@ -2987,7 +3868,7 @@ export class TowerStore {
     }
     const report: string[] = [];
     const kept = async (
-      mission: TowerMission,
+      worktree: string,
       rel: string,
       reason: string,
       log: Record<string, string | number | undefined>,
@@ -2995,8 +3876,50 @@ export class TowerStore {
       report.push(`${dryRun ? 'would keep' : 'kept'} ${rel} (${reason})`);
       if (!dryRun) {
         await this.appendLog(TOWER_NAME, 'worktree.keep', {
-          worktree: mission.worktree,
+          worktree,
           ...log,
+        });
+      }
+    };
+    const removeRegistered = async (worktree: string, wasExcluded: boolean): Promise<void> => {
+      const rel = join(WORKTREES_DIR, worktree);
+      const absPath = this.abs(rel);
+      if (wasExcluded) {
+        await kept(worktree, rel, 'excluded', { reason: 'excluded' });
+        return;
+      }
+      const liveAgent = state.roster.agents.find(
+        (agent) => agent.worktree === worktree && liveAgentIds.has(agent.agentId),
+      );
+      if (liveAgent !== undefined) {
+        await kept(worktree, rel, `live agent: ${liveAgent.name}`, {
+          reason: 'live-agent',
+          agent: liveAgent.name,
+        });
+        return;
+      }
+      if (!force) {
+        if (await isWorktreeDirty(absPath)) {
+          await kept(worktree, rel, 'uncommitted changes — rerun with force to remove', {
+            reason: 'uncommitted-changes',
+          });
+          return;
+        }
+      }
+      if (dryRun) {
+        report.push(`would remove ${rel}`);
+        return;
+      }
+      try {
+        await worktreeRemove(this.repoRoot, absPath);
+        report.push(`removed ${rel}`);
+        await this.appendLog(TOWER_NAME, 'worktree.remove', { worktree });
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error);
+        report.push(`failed to remove ${rel}: ${reason}`);
+        await this.appendLog(TOWER_NAME, 'worktree.remove.failed', {
+          worktree,
+          reason,
         });
       }
     };
@@ -3014,44 +3937,10 @@ export class TowerStore {
         }
         continue;
       }
-      if (wasExcluded) {
-        await kept(mission, rel, 'excluded', { reason: 'excluded' });
-        continue;
-      }
-      const liveAgent = state.roster.agents.find(
-        (agent) => agent.worktree === mission.worktree && liveAgentIds.has(agent.agentId),
-      );
-      if (liveAgent !== undefined) {
-        await kept(mission, rel, `live agent: ${liveAgent.name}`, {
-          reason: 'live-agent',
-          agent: liveAgent.name,
-        });
-        continue;
-      }
-      if (!force) {
-        if (await isWorktreeDirty(absPath)) {
-          await kept(mission, rel, 'uncommitted changes — rerun with force to remove', {
-            reason: 'uncommitted-changes',
-          });
-          continue;
-        }
-      }
-      if (dryRun) {
-        report.push(`would remove ${rel}`);
-        continue;
-      }
-      try {
-        await worktreeRemove(this.repoRoot, absPath);
-        report.push(`removed ${rel}`);
-        await this.appendLog(TOWER_NAME, 'worktree.remove', { worktree: mission.worktree });
-      } catch (error) {
-        const reason = error instanceof Error ? error.message : String(error);
-        report.push(`failed to remove ${rel}: ${reason}`);
-        await this.appendLog(TOWER_NAME, 'worktree.remove.failed', {
-          worktree: mission.worktree,
-          reason,
-        });
-      }
+      await removeRegistered(mission.worktree, wasExcluded);
+    }
+    for (const worktree of await this.validationWorktrees()) {
+      await removeRegistered(worktree, excluded.delete(worktree));
     }
     for (const original of excluded.values()) {
       report.push(`excluded worktree "${original}" matched no mission worktree`);
@@ -3078,6 +3967,7 @@ export class TowerStore {
       '',
       '<!-- Generated by tower tools from state.json — do not edit by hand. -->',
       '',
+      ...(state.objective === undefined ? [] : objectiveSection(state, state.objective)),
       '| ID | Mission | Branch | Worktree | Status | Owner |',
       '| -- | ------- | ------ | -------- | ------ | ----- |',
       ...rows,
@@ -3097,6 +3987,11 @@ export class TowerStore {
 
   private async renderMissionFile(mission: TowerMission): Promise<void> {
     const rel = join(MISSIONS_DIR, missionFileName(mission.id, mission.slug));
+    const objectiveFields = [
+      ...(mission.milestone === undefined ? [] : [`Milestone: ${mission.milestone}`]),
+      ...(mission.origin === undefined ? [] : [`Origin: ${mission.origin}`]),
+      ...(mission.attempts === undefined ? [] : [`Attempts: ${String(mission.attempts)}`]),
+    ];
     const content = [
       `# Mission ${mission.id}: ${mission.title}${mission.kind === 'survey' ? ' 🔍 (read-only survey)' : ''}`,
       '',
@@ -3106,6 +4001,7 @@ export class TowerStore {
       '| ------ | -------- | ------ | ----- | ----- |',
       `| ${mission.branch} | ${mission.worktree} | ${STATUS_EMOJI[mission.status]} | ${mission.scope.join(', ')} | ${mission.owner ?? '—'} |`,
       '',
+      ...(objectiveFields.length > 0 ? [objectiveFields.join(' · '), ''] : []),
       ...(mission.context !== undefined
         ? ['## Context — the user\'s own words, verbatim', '', mission.context, '']
         : []),
@@ -3184,6 +4080,110 @@ function reviewDocumentBody(input: TowerReviewInput): string {
     '## Decision',
     input.decision.trim(),
   ].join('\n');
+}
+
+function objectiveSection(state: TowerState, objective: TowerObjective): string[] {
+  const status = [
+    objective.status,
+    ...(objective.approvedBy === undefined ? [] : [`approved by ${objective.approvedBy}`]),
+    ...(objective.approvalReason === undefined ? [] : [`approval: ${objective.approvalReason}`]),
+    ...(objective.pausedReason === undefined ? [] : [`paused: ${objective.pausedReason}`]),
+    ...(objective.blockedReason === undefined ? [] : [`blocked: ${objective.blockedReason}`]),
+  ].join(' · ');
+  const rows = sortedMilestones(objective).map((milestone) => {
+    const features = milestoneMissions(state, milestone.id)
+      .map((mission) => `${mission.id} ${STATUS_EMOJI[mission.status]}`)
+      .join(', ');
+    const rounds = TOWER_VALIDATION_KINDS.flatMap((kind) => {
+      const latest = latestValidationRound(milestone, kind);
+      return latest === undefined ? [] : [`${kind} r${String(latest.round)} ${latest.verdict}`];
+    }).join(', ');
+    const commit =
+      milestone.validationCommit === undefined || milestone.status === 'pending' || milestone.status === 'active'
+        ? ''
+        : ` @ ${milestone.validationCommit.slice(0, 7)}`;
+    return `| ${milestone.id} | ${milestone.title} | ${milestone.status}${commit} | ${features.length > 0 ? features : '—'} | ${rounds.length > 0 ? rounds : '—'} |`;
+  });
+  return [
+    `## Objective ${objective.id}: ${objective.title}`,
+    '',
+    `Status: ${status}`,
+    `Goal: ${objective.goal.length > 0 ? objective.goal : '(not set)'}`,
+    '',
+    '### Definition of Done',
+    ...(objective.definitionOfDone.length > 0
+      ? objective.definitionOfDone.map((item) => `- ${item}`)
+      : ['- (none)']),
+    '',
+    ...(objective.acceptanceCommands.length > 0
+      ? ['### Acceptance Commands', ...objective.acceptanceCommands.map((command) => `- \`${command}\``), '']
+      : []),
+    '### Milestones',
+    '',
+    '| ID | Milestone | Status | Features | Latest rounds |',
+    '| -- | --------- | ------ | -------- | ------------- |',
+    ...(rows.length > 0 ? rows : ['| — | (no milestones yet) | — | — | — |']),
+    '',
+  ];
+}
+
+function withContractRevision(entry: TowerRosterEntry, revision: number): TowerRosterEntry {
+  const { contractRevision: _given, ...rest } = entry;
+  return revision > 0 ? { ...rest, contractRevision: revision } : rest;
+}
+
+function validationDocumentBody(
+  failures: readonly string[],
+  checks: readonly string[],
+  evidence: string,
+): string {
+  const checkLines = checks
+    .map((check) => check.trim())
+    .filter((check) => check.length > 0)
+    .map((check) => `- [x] ${check}`);
+  return [
+    '## Failures',
+    '',
+    failures.length > 0 ? failures.map((failure) => `- ${failure}`).join('\n') : '- (none)',
+    '',
+    '## Checks',
+    '',
+    checkLines.length > 0 ? checkLines.join('\n') : '- [x] (validator reported no formal checks)',
+    '',
+    '## Evidence',
+    '',
+    evidence.trim().length > 0 ? evidence.trim() : '(none)',
+  ].join('\n');
+}
+
+function validationResultBody(
+  objective: TowerObjective,
+  milestone: TowerMilestone,
+  round: TowerValidationRound,
+  outcome: TowerValidationOutcome,
+  finalBroken: boolean,
+): string {
+  const lines = [
+    `Validation ${round.kind} round ${String(round.round)} of milestone ${milestone.id} "${milestone.title}" by ${round.validator}: ${round.verdict} on ${round.validatedCommit.slice(0, 7)}.`,
+    `Milestone ${milestone.id} is now ${milestone.status}.`,
+  ];
+  if (finalBroken) {
+    lines.push(
+      `${milestone.id} is the final milestone and no longer passes on this commit — plan a fix into it (TowerPlan milestone=${milestone.id}).`,
+    );
+  } else if (!outcome.counted) {
+    lines.push(
+      `This round was recorded but does not decide the milestone: it was ${outcome.previousStatus}${milestone.validationCommit === undefined ? '' : ` and validates ${milestone.validationCommit.slice(0, 7)}`}.`,
+    );
+  }
+  if (outcome.objectiveBlocked) {
+    lines.push(`Objective ${objective.id} is now blocked: ${objective.blockedReason ?? 'validation rounds exhausted'}.`);
+  }
+  if (round.failures.length > 0) {
+    lines.push('', 'Failures:', ...round.failures.map((failure) => `- ${failure}`));
+  }
+  lines.push('', `Report: ${round.file}`);
+  return lines.join('\n');
 }
 
 function singleLine(value: string): string {

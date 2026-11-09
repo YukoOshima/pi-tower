@@ -1,4 +1,85 @@
-export type TowerAgentKind = 'worker' | 'reviewer';
+export type TowerAgentKind = 'worker' | 'reviewer' | 'validator';
+export type TowerObjectiveStatus =
+  | 'planning'
+  | 'awaiting-approval'
+  | 'executing'
+  | 'paused'
+  | 'completed'
+  | 'blocked';
+export type TowerMilestoneStatus = 'pending' | 'active' | 'validating' | 'passed' | 'failed' | 'blocked';
+export type TowerValidationKind = 'scrutiny' | 'user-testing' | 'commands';
+export type TowerValidationVerdict = 'pass' | 'fail';
+export type TowerMissionOrigin = 'plan' | 'fix';
+
+export interface TowerMilestoneValidationSpec {
+  scrutiny: boolean;
+  userTesting: boolean;
+  commands: string[];
+  qaInstructions?: string;
+}
+
+export interface TowerValidationRound {
+  round: number;
+  kind: TowerValidationKind;
+  validator: string;
+  validatedCommit: string;
+  verdict: TowerValidationVerdict;
+  failures: string[];
+  file: string;
+  date: string;
+  contractRevision?: number;
+}
+
+export interface TowerMilestone {
+  readonly id: string;
+  title: string;
+  description?: string;
+  order: number;
+  validation: TowerMilestoneValidationSpec;
+  status: TowerMilestoneStatus;
+  rounds: TowerValidationRound[];
+  validationCommit?: string;
+  startedAt?: string;
+  passedAt?: string;
+}
+
+export interface TowerObjectiveLimits {
+  maxValidationRounds: number;
+  maxFeatureAttempts: number;
+  maxWallTimeMs?: number;
+  maxCostUsd?: number;
+}
+
+export interface TowerObjectiveAutopilotState {
+  progressKey?: string;
+  progressAt?: string;
+  stallWakes: number;
+  wakeKeys: string[];
+}
+
+export interface TowerObjective {
+  readonly id: string;
+  title: string;
+  goal: string;
+  definitionOfDone: string[];
+  acceptanceCommands: string[];
+  contractRevision?: number;
+  status: TowerObjectiveStatus;
+  milestones: TowerMilestone[];
+  removedMilestones?: string[];
+  limits: TowerObjectiveLimits;
+  approvedBy?: 'human' | 'auto';
+  approvedAt?: string;
+  approvalReason?: string;
+  createdAt: string;
+  startedAt?: string;
+  completedAt?: string;
+  blockedReason?: string;
+  pausedReason?: string;
+  usage?: { costUsd: number };
+  autopilot?: TowerObjectiveAutopilotState;
+  notes: string[];
+}
 
 export interface TowerRosterEntry {
   readonly name: string;
@@ -19,6 +100,11 @@ export interface TowerRosterEntry {
   readonly diedAt?: string;
   readonly deathStatus?: string;
   readonly deathReason?: string;
+  readonly milestoneId?: string;
+  readonly validationKind?: TowerValidationKind;
+  readonly validationRound?: number;
+  readonly validatedCommit?: string;
+  readonly contractRevision?: number;
 }
 
 export interface TowerRoster {
@@ -62,6 +148,9 @@ export interface TowerMission {
   tasks: TowerMissionTask[];
   notes: string[];
   blockers: string[];
+  milestone?: string;
+  origin?: TowerMissionOrigin;
+  attempts?: number;
 }
 
 export interface TowerState {
@@ -75,6 +164,8 @@ export interface TowerState {
   inboxAckIds?: string[];
   roster: TowerRoster;
   missions: TowerMission[];
+  objective?: TowerObjective;
+  objectiveHistory?: TowerObjective[];
 }
 
 export type TowerFindingType = 'bug' | 'improve' | 'vuln' | 'idea';

@@ -154,6 +154,10 @@ export async function worktreeAddNewBranch(
   await git(cwd, ['worktree', 'add', path, '-b', branch, base]);
 }
 
+export async function worktreeAddDetached(cwd: string, path: string, commit: string): Promise<void> {
+  await git(cwd, ['worktree', 'add', '--detach', path, commit]);
+}
+
 export async function worktreeRemove(cwd: string, path: string): Promise<void> {
   await git(cwd, ['worktree', 'remove', '--force', path]);
 }
