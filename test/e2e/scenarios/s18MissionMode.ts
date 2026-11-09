@@ -3,19 +3,32 @@ import { basename, join } from 'node:path';
 import { distinct, logEntries, towerState, userMessages, type MissionRecord, type TowerState, type ValidationRoundRecord } from '../evidence.ts';
 import {
   approvalDialogTitle,
-  describeMissionModel,
+  approvedNoticeStart,
+  checkMissionHeader,
+  checkModelRows,
+  completionNoticeStart,
+  KEEP_PLANNING_NOTICE,
   leftoverWorktrees,
+  MISSION_ALREADY_OFF,
+  MISSION_CONTROL_START,
+  MISSION_HANDED_START,
+  MISSION_HEADER_START,
+  MISSION_KEY,
+  MISSION_LIMITS,
+  MISSION_OFF_START,
+  MISSION_PLANNING_HEADING,
   missionAcceptScript,
-  missionModelRows,
-  modelRowMatches,
+  missionGoal,
+  missionSetup,
+  missionStatusPhase,
+  panelLineMatches,
   panelModelsLine,
   panelRunningFeatures,
   panelStatus,
   teardownSection,
   type LeftoverWorktrees,
   type MissionAcceptRun,
-  type MissionModel,
-  type MissionRole,
+  type MissionSetup,
 } from '../mission.ts';
 import {
   autopilotEntries,
@@ -28,7 +41,6 @@ import {
   featureWorkerWindows,
   humanScript,
   OBJECTIVE_MAX_RUNNING_AGENTS,
-  objectiveSettingsConfig,
   ObjectiveTrace,
   planToApproval,
   recordObjectiveUsage,
@@ -36,30 +48,13 @@ import {
   waitForObjective,
   writeText,
   type HumanScript,
-  type ObjectiveLimits,
 } from '../objective.ts';
 import { chooseOption, clip, sleep, type PiDialog, type PiRpc } from '../rpc.ts';
 import { sessionModel, startSession, type ScenarioContext, type ScenarioDefinition } from '../scenario.ts';
-import type { E2eSettings, RoleModel } from '../settings.ts';
 import { git, readJsonFile, tryGit } from '../workspace.ts';
 
-const LIMITS: ObjectiveLimits = { maxCostUsd: 5, maxWallTimeMs: 30 * 60_000, skipUserTesting: true };
-const MISSION_KEY = 'mission';
-const PLANNING_HEADING = '# New mission — plan it with the human';
 const WORKTREE_WAIT_MS = 3 * 60_000;
 const TOWER_OFF = /^Tower (?:status —|mode:) OFF/m;
-
-export function missionGoal(script: string): string {
-  return [
-    'Add two commands to the textkit CLI in this repository (README.md explains how commands work).',
-    '`lower` prints its arguments joined by single spaces in lower case: `node src/cli.js lower Hello WORLD` prints `hello world`.',
-    '`chars` prints the number of characters of its arguments joined by single spaces: `node src/cli.js chars ab cd` prints `5`.',
-    'The two commands are independent of each other, and each one gets its own node:test test file.',
-    'It is small, so one milestone is enough. Leave src/cli.js, README.md and package.json unchanged.',
-    `The acceptance commands are exactly \`npm test\` and \`node ${script}\`.`,
-    'Ask me your questions first.',
-  ].join(' ');
-}
 
 const PLANNING_REPLY = [
   'My answers: done means both commands print exactly what my examples show and `npm test` passes;',
@@ -71,69 +66,18 @@ const PLANNING_REPLY = [
 
 const EXECUTION_REPLY = 'No more questions from me — decide any open point yourself and keep the mission going on your own.';
 
-export interface MissionSetup {
-  readonly towerConfig: Record<string, unknown>;
-  readonly extraArgs: readonly string[];
-  readonly header: readonly MissionModel[];
-  readonly panelModels: string;
-}
-
-function modelId(role: RoleModel): string {
-  return role.model.slice(role.model.indexOf('/') + 1);
-}
-
-function configured(role: MissionRole, model: RoleModel, source: string): MissionModel {
-  return { role, model: model.model, ...(model.thinking === undefined ? {} : { thinking: model.thinking }), source };
-}
-
-export function missionSetup(settings: E2eSettings): MissionSetup {
-  const { orchestrator: A, worker: B, reviewer: C, validator: V } = settings;
-  const inherited = V.spec === C.spec;
-  return {
-    towerConfig: { orchestrator: A.spec, reviewer: C.spec, ...(inherited ? {} : { validator: V.spec }), ...objectiveSettingsConfig(LIMITS) },
-    extraArgs: ['--tower-worker-model', B.spec],
-    header: [
-      configured('orchestrator', A, 'global tower.json'),
-      configured('worker', B, '--tower-worker-model'),
-      configured('reviewer', C, 'global tower.json'),
-      inherited ? { role: 'validator', note: 'same as reviewer' } : configured('validator', V, 'global tower.json'),
-    ],
-    panelModels: `models: orchestrator ${modelId(A)} · worker ${modelId(B)} · reviewer ${modelId(C)} · validator ${inherited ? '= reviewer' : modelId(V)}`,
-  };
-}
-
-function modelRowsCheck(text: string, expected: readonly MissionModel[]): { readonly ok: boolean; readonly evidence: string[] } {
-  const rows = missionModelRows(text);
-  const lines = expected.map((want) => {
-    const row = rows.find((candidate) => candidate.role === want.role);
-    const ok = modelRowMatches(row, want);
-    return { ok, line: `${row?.line.trim() ?? `(no ${want.role} row)`}${ok ? '' : ` — expected ${describeMissionModel(want)}`}` };
-  });
-  return { ok: lines.every((line) => line.ok), evidence: lines.map((line) => line.line) };
-}
-
 async function enterMissionMode(ctx: ScenarioContext, rpc: PiRpc, setup: MissionSetup): Promise<void> {
   const { report, settings } = ctx;
   const mark = rpc.events.length;
   const entered = await rpc.command('/mission', 1500);
   const modelTurn = rpc.events.slice(mark).some((event) => event.type === 'agent_start');
-  const header = entered.notices.find((notice) => notice.text.startsWith('Mission mode\n'));
-  const lines = (header?.text ?? '').split('\n');
-  const rows = modelRowsCheck(header?.text ?? '', setup.header);
-  const base = lines.find((line) => /^\s+Base branch\s/.test(line))?.trim();
-  const question = lines.at(-1) ?? '';
+  const header = entered.notices.find((notice) => notice.text.startsWith(MISSION_HEADER_START));
+  const checked = checkMissionHeader(header?.text ?? '', setup.header, OBJECTIVE_MAX_RUNNING_AGENTS);
   report.note(`/mission:\n${entered.text}`);
   report.check(
     '/mission enters mission mode without a model turn: its header lists the orchestrator, worker, reviewer and validator models with their sources, the base branch, and asks for the goal',
-    entered.disposition === 'handled' &&
-      !modelTurn &&
-      header !== undefined &&
-      rows.ok &&
-      base !== undefined &&
-      /^Base branch +main\b/.test(base) &&
-      base.endsWith(`features run in parallel (up to ${String(OBJECTIVE_MAX_RUNNING_AGENTS)} agents)`) &&
-      question.startsWith('What do you want to build?'),
-    [`disposition=${String(entered.disposition)} model-turn=${String(modelTurn)}`, ...rows.evidence, base ?? '(no Base branch line)', question],
+    entered.disposition === 'handled' && !modelTurn && header !== undefined && checked.ok,
+    [`disposition=${String(entered.disposition)} model-turn=${String(modelTurn)}`, ...checked.evidence],
   );
   const state = await rpc.send({ type: 'get_state' });
   const model = `${String(state.data?.model?.provider)}/${String(state.data?.model?.id)}`;
@@ -158,10 +102,10 @@ async function handOverGoal(ctx: ScenarioContext, rpc: PiRpc, repo: string, goal
   const response = await rpc.send({ type: 'prompt', message: goal });
   await rpc.waitFor((event) => event.type === 'agent_start', 60_000, 'the orchestrator to start planning', mark).catch(() => undefined);
   const planned = await planToApproval(ctx, rpc, repo, human);
-  const handed = rpc.noticesSince(mark).find((notice) => notice.text.startsWith('Mission goal handed to the orchestrator'));
+  const handed = rpc.noticesSince(mark).find((notice) => notice.text.startsWith(MISSION_HANDED_START));
   const sessionFile = String((await rpc.send({ type: 'get_state' })).data?.sessionFile ?? '');
   const prompts = userMessages(sessionFile);
-  const planning = prompts.find((message) => message.text.startsWith(PLANNING_HEADING));
+  const planning = prompts.find((message) => message.text.startsWith(MISSION_PLANNING_HEADING));
   const raw = prompts.filter((message) => message.text.trim() === goal);
   const entries = logEntries(repo);
   const intakeMode = entries.find((entry) => entry.action === 'objective.mode' && entry.fields.mode === 'interactive');
@@ -178,7 +122,7 @@ async function handOverGoal(ctx: ScenarioContext, rpc: PiRpc, repo: string, goal
       `prompt response: success=${String(response.success)} disposition=${String(response.data?.disposition)}`,
       clip(handed?.text ?? '(no "Mission goal handed to the orchestrator" notice)', 300),
       intakeMode?.line ?? '(no objective.mode mode=interactive line)',
-      planning === undefined ? `(no user message starting with "${PLANNING_HEADING}" in ${sessionFile})` : `planning prompt (${String(planning.text.length)} chars) contains the goal verbatim: ${String(planning.text.includes(goal))}`,
+      planning === undefined ? `(no user message starting with "${MISSION_PLANNING_HEADING}" in ${sessionFile})` : `planning prompt (${String(planning.text.length)} chars) contains the goal verbatim: ${String(planning.text.includes(goal))}`,
       `user messages equal to the raw goal: ${String(raw.length)}`,
     ],
   );
@@ -213,7 +157,7 @@ async function declineApproval(ctx: ScenarioContext, rpc: PiRpc, repo: string, i
     dialog === undefined
       ? undefined
       : await rpc
-          .waitFor((event) => event.type === 'extension_ui_request' && event.method === 'notify' && /^Mission O\d+ still awaits your approval/.test(String(event.message)), 30_000, 'the keep-planning notice', dialog.index)
+          .waitFor((event) => event.type === 'extension_ui_request' && event.method === 'notify' && KEEP_PLANNING_NOTICE.test(String(event.message)), 30_000, 'the keep-planning notice', dialog.index)
           .catch(() => undefined);
   await sleep(6000);
   const after = towerState(repo);
@@ -250,7 +194,7 @@ async function approveMission(ctx: ScenarioContext, rpc: PiRpc, repo: string, di
   const line = logEntries(repo).find((entry) => entry.action === 'objective.approve');
   ctx.report.check(
     '/mission approve starts the mission: approved by the human, executing',
-    approved.notices.some((notice) => notice.text.startsWith(`Mission ${String(objective?.id)} approved — executing\n`)) &&
+    approved.notices.some((notice) => notice.text.startsWith(approvedNoticeStart(String(objective?.id)))) &&
       objective?.status === 'executing' &&
       objective.approvedBy === 'human' &&
       line?.fields.by === 'human' &&
@@ -262,12 +206,12 @@ async function approveMission(ctx: ScenarioContext, rpc: PiRpc, repo: string, di
 async function showMissionControl(ctx: ScenarioContext, rpc: PiRpc, repo: string, setup: MissionSetup): Promise<void> {
   await sleep(3000);
   const control = await rpc.command('/mission', 1500);
-  const view = control.notices.find((notice) => notice.text.startsWith('Mission Control\n'));
-  const rows = modelRowsCheck(view?.text ?? '', setup.header);
+  const view = control.notices.find((notice) => notice.text.startsWith(MISSION_CONTROL_START));
+  const rows = checkModelRows(view?.text ?? '', setup.header);
   const objective = towerState(repo)?.objective;
   ctx.report.check(
     '/mission while the mission runs shows Mission Control: the role models, the mission and the commands of an executing mission',
-    view !== undefined && view.text.startsWith('Mission Control\n## Models\n') && rows.ok && view.text.includes(`# Mission ${String(objective?.id)} — `) && view.text.includes('\n## Commands\n/mission pause [reason]'),
+    view !== undefined && rows.ok && view.text.includes(`# Mission ${String(objective?.id)} — `) && view.text.includes('\n## Commands\n/mission pause [reason]'),
     [...rows.evidence, ...(view?.text ?? control.text).split('\n').filter((line) => line.startsWith('#') || line.startsWith('/mission')).map((line) => clip(line, 200))],
   );
 }
@@ -287,7 +231,7 @@ async function checkCompletion(ctx: ScenarioContext, rpc: PiRpc, repo: string, f
   if (objective === undefined) throw new Error('state.json has no objective');
   const notice = await rpc
     .waitFor(
-      (event) => event.type === 'extension_ui_request' && event.method === 'notify' && String(event.message).startsWith(`Mission ${objective.id} "${objective.title}" is complete:`),
+      (event) => event.type === 'extension_ui_request' && event.method === 'notify' && String(event.message).startsWith(completionNoticeStart(objective)),
       120_000,
       'the completion notice',
       0,
@@ -368,7 +312,7 @@ function checkValidation(ctx: ScenarioContext, repo: string, final: TowerState, 
   const last = milestones.at(-1);
   const lines: string[] = [];
   const passed = milestones.map((milestone) => {
-    const required = requiredValidationKinds(objective, milestone, LIMITS);
+    const required = requiredValidationKinds(objective, milestone, MISSION_LIMITS);
     const latest = latestRounds(milestone.rounds);
     lines.push(
       `${milestone.id} ${milestone.status} validation commit ${milestone.validationCommit?.slice(0, 7) ?? '-'}, required ${required.join(', ') || '(none)'}: ${[...latest.values()].map((round) => `${round.kind} r${String(round.round)} ${round.verdict} by ${round.validator} on ${round.validatedCommit.slice(0, 7)}`).join('; ') || '(no rounds)'}`,
@@ -382,7 +326,7 @@ function checkValidation(ctx: ScenarioContext, repo: string, final: TowerState, 
       passed.every(Boolean) &&
       last !== undefined &&
       last.validationCommit === mainTip &&
-      requiredValidationKinds(objective, last, LIMITS).includes('commands') &&
+      requiredValidationKinds(objective, last, MISSION_LIMITS).includes('commands') &&
       lastRun?.pass === true &&
       lastRun.commit === mainTip &&
       /^val-.*commands/.test(basename(lastRun.cwd)),
@@ -401,9 +345,9 @@ async function exitMissionMode(ctx: ScenarioContext, rpc: PiRpc): Promise<number
   const panel = rpc.widgetUpdates(MISSION_KEY, mark);
   ctx.report.check(
     '/mission exit turns mission mode off: tower mode off, the mission status line and the panel cleared, the starting model restored',
-    exited.notices.some((notice) => notice.text.startsWith('Mission mode: OFF\n')) &&
+    exited.notices.some((notice) => notice.text.startsWith(MISSION_OFF_START)) &&
       TOWER_OFF.test(status.text) &&
-      again.notices.some((notice) => notice.text === 'Mission mode is already off.') &&
+      again.notices.some((notice) => notice.text === MISSION_ALREADY_OFF) &&
       tower.some((update) => update.text === undefined) &&
       mission.length > 0 &&
       mission.at(-1)?.text === undefined &&
@@ -427,13 +371,13 @@ function collapse(values: readonly string[]): string[] {
 
 function checkStatusLine(ctx: ScenarioContext, rpc: PiRpc): void {
   const texts = rpc.statusUpdates(MISSION_KEY).map((update) => update.text);
-  const find = (pattern: RegExp): number => texts.findIndex((text) => text !== undefined && pattern.test(text));
-  const waiting = texts.indexOf('mission: waiting for your goal');
-  const planning = texts.indexOf('mission: planning your goal');
-  const awaiting = find(/^mission O\d+ awaiting approval\b/);
-  const executing = find(/^mission O\d+ executing\b/);
-  const completed = find(/^mission O\d+ completed\b/);
-  const running = distinct(texts.filter((text): text is string => text !== undefined && /^mission O\d+ executing\b/.test(text)));
+  const phases = texts.map(missionStatusPhase);
+  const waiting = phases.indexOf('waiting-for-goal');
+  const planning = phases.indexOf('planning-goal');
+  const awaiting = phases.indexOf('awaiting-approval');
+  const executing = phases.indexOf('executing');
+  const completed = phases.indexOf('completed');
+  const running = distinct(texts.filter((text, index): text is string => text !== undefined && phases[index] === 'executing'));
   ctx.report.check(
     "the mission status line (setStatus 'mission') follows the mission: waiting for the goal → planning → awaiting approval → executing (updating) → completed → cleared on exit",
     waiting >= 0 && waiting < planning && planning < awaiting && awaiting < executing && executing < completed && running.length >= 2 && texts.length > 0 && texts.at(-1) === undefined,
@@ -456,7 +400,7 @@ function checkPanel(ctx: ScenarioContext, rpc: PiRpc, setup: MissionSetup, exitM
       renders.every((render) => render.plain && render.placement === 'aboveEditor') &&
       distinct(executing.map((render) => JSON.stringify(render.lines))).length >= 2 &&
       models.length === 1 &&
-      models[0] === setup.panelModels &&
+      panelLineMatches(models[0], setup.panelModels) &&
       completed !== undefined &&
       last !== undefined &&
       last.lines === undefined &&
@@ -501,7 +445,7 @@ export const s18MissionMode: ScenarioDefinition = {
       await showMissionControl(ctx, rpc, repo, setup);
       const final = await waitForObjective(ctx, repo, (state) => state.objective?.status === 'completed', {
         label: 'the mission to complete',
-        timeoutMs: LIMITS.maxWallTimeMs + 5 * 60_000,
+        timeoutMs: MISSION_LIMITS.maxWallTimeMs + 5 * 60_000,
         rpc,
         human: humanScript(EXECUTION_REPLY),
       });
@@ -511,7 +455,7 @@ export const s18MissionMode: ScenarioDefinition = {
       checkLifecycle(ctx, repo, settled, trace);
       checkFeatures(ctx, repo, settled);
       checkValidation(ctx, repo, settled, readJsonFile<MissionAcceptRun[]>(runsFile) ?? []);
-      checkRosterModels(ctx, settled, { worker: settings.worker, reviewer: settings.reviewer, validator: settings.validator }, (settled.objective?.milestones ?? []).some((milestone) => settled.objective !== undefined && requiredValidationKinds(settled.objective, milestone, LIMITS).includes('scrutiny')));
+      checkRosterModels(ctx, settled, { worker: settings.worker, reviewer: settings.reviewer, validator: settings.validator }, (settled.objective?.milestones ?? []).some((milestone) => settled.objective !== undefined && requiredValidationKinds(settled.objective, milestone, MISSION_LIMITS).includes('scrutiny')));
       checkAutopilotPromptness(ctx, repo);
       const exitMark = await exitMissionMode(ctx, rpc);
       checkStatusLine(ctx, rpc);

@@ -1,11 +1,44 @@
 import { join } from 'node:path';
 
-import { realpathOr } from './objective.ts';
+import { objectiveSettingsConfig, realpathOr, type ObjectiveLimits } from './objective.ts';
+import type { E2eSettings, RoleModel } from './settings.ts';
 import { listFiles, tryGit } from './workspace.ts';
 
 export type MissionRole = 'orchestrator' | 'worker' | 'reviewer' | 'validator';
 
 export const MISSION_ROLES: readonly MissionRole[] = ['orchestrator', 'worker', 'reviewer', 'validator'];
+
+export const MISSION_KEY = 'mission';
+export const MISSION_HEADER_START = 'Mission mode\n';
+export const MISSION_CONTROL_START = 'Mission Control\n## Models\n';
+export const MISSION_GOAL_QUESTION_START = 'What do you want to build?';
+export const MISSION_HANDED_START = 'Mission goal handed to the orchestrator';
+export const MISSION_PLANNING_HEADING = '# New mission — plan it with the human';
+export const MISSION_OFF_START = 'Mission mode: OFF\n';
+export const MISSION_ALREADY_OFF = 'Mission mode is already off.';
+export const MISSION_STATUS_WAITING = 'mission: waiting for your goal';
+export const MISSION_STATUS_PLANNING_GOAL = 'mission: planning your goal';
+export const KEEP_PLANNING_NOTICE = /^Mission O\d+ still awaits your approval/;
+
+export function approvedNoticeStart(objectiveId: string): string {
+  return `Mission ${objectiveId} approved — executing\n`;
+}
+
+export function completionNoticeStart(objective: { readonly id: string; readonly title: string }): string {
+  return `Mission ${objective.id} "${objective.title}" is complete:`;
+}
+
+export type MissionStatusPhase = 'waiting-for-goal' | 'planning-goal' | 'planning' | 'awaiting-approval' | 'executing' | 'paused' | 'blocked' | 'completed' | 'cleared' | 'other';
+
+const STATUS_PHASE = /^mission O\d+ (planning|awaiting approval|executing|paused|blocked|completed)(?: · |$)/;
+
+export function missionStatusPhase(text: string | undefined): MissionStatusPhase {
+  if (text === undefined) return 'cleared';
+  if (text === MISSION_STATUS_WAITING) return 'waiting-for-goal';
+  if (text === MISSION_STATUS_PLANNING_GOAL) return 'planning-goal';
+  const phase = STATUS_PHASE.exec(text)?.[1];
+  return phase === undefined ? 'other' : (phase.replace(' ', '-') as MissionStatusPhase);
+}
 
 const ROLE_BY_LABEL: Readonly<Record<string, MissionRole>> = { Orchestrator: 'orchestrator', Worker: 'worker', Reviewer: 'reviewer', Validator: 'validator' };
 const MODEL_ROW = /^\s*(Orchestrator|Worker|Reviewer|Validator) {2,}(\S.*)$/;
@@ -40,6 +73,18 @@ export function missionModelRows(text: string): MissionModelRow[] {
   return rows;
 }
 
+export interface MissionHeader {
+  readonly rows: readonly MissionModelRow[];
+  readonly base: string | undefined;
+  readonly question: string;
+}
+
+export function missionHeader(text: string): MissionHeader {
+  const lines = text.split('\n');
+  const base = lines.map((line) => /^\s+Base branch +(\S.*)$/.exec(line)?.[1]).find((value) => value !== undefined);
+  return { rows: missionModelRows(text), base, question: lines.at(-1) ?? '' };
+}
+
 export function modelRowMatches(row: MissionModel | undefined, expected: MissionModel): boolean {
   return row !== undefined && row.role === expected.role && row.model === expected.model && row.thinking === expected.thinking && row.source === expected.source && row.note === expected.note;
 }
@@ -47,6 +92,77 @@ export function modelRowMatches(row: MissionModel | undefined, expected: Mission
 export function describeMissionModel(row: MissionModel): string {
   if (row.model === undefined) return `${row.role}: ${row.note ?? '(nothing)'}`;
   return `${row.role}: ${row.model}${row.thinking === undefined ? '' : ` · ${row.thinking}`} (${row.source ?? '?'})`;
+}
+
+export interface TextCheck {
+  readonly ok: boolean;
+  readonly evidence: readonly string[];
+}
+
+export function checkModelRows(text: string, expected: readonly MissionModel[]): TextCheck {
+  const rows = missionModelRows(text);
+  const lines = expected.map((want) => {
+    const row = rows.find((candidate) => candidate.role === want.role);
+    const ok = modelRowMatches(row, want);
+    return { ok, line: `${row?.line.trim() ?? `(no ${want.role} row)`}${ok ? '' : ` — expected ${describeMissionModel(want)}`}` };
+  });
+  return { ok: lines.every((line) => line.ok), evidence: lines.map((line) => line.line) };
+}
+
+export function checkMissionHeader(text: string, expected: readonly MissionModel[], maxRunningAgents: number): TextCheck {
+  const header = missionHeader(text);
+  const rows = checkModelRows(text, expected);
+  const base = header.base;
+  const baseOk = base !== undefined && /^main\b/.test(base) && base.endsWith(`features run in parallel (up to ${String(maxRunningAgents)} agents)`);
+  return {
+    ok: text.startsWith(MISSION_HEADER_START) && rows.ok && baseOk && header.question.startsWith(MISSION_GOAL_QUESTION_START),
+    evidence: [...rows.evidence, `Base branch: ${base ?? '(missing)'}`, header.question],
+  };
+}
+
+export const MISSION_LIMITS: ObjectiveLimits = { maxCostUsd: 5, maxWallTimeMs: 30 * 60_000, skipUserTesting: true };
+
+export function missionGoal(script: string): string {
+  return [
+    'Add two commands to the textkit CLI in this repository (README.md explains how commands work).',
+    '`lower` prints its arguments joined by single spaces in lower case: `node src/cli.js lower Hello WORLD` prints `hello world`.',
+    '`chars` prints the number of characters of its arguments joined by single spaces: `node src/cli.js chars ab cd` prints `5`.',
+    'The two commands are independent of each other, and each one gets its own node:test test file.',
+    'It is small, so one milestone is enough. Leave src/cli.js, README.md and package.json unchanged.',
+    `The acceptance commands are exactly \`npm test\` and \`node ${script}\`.`,
+    'Ask me your questions first.',
+  ].join(' ');
+}
+
+export interface MissionSetup {
+  readonly towerConfig: Record<string, unknown>;
+  readonly extraArgs: readonly string[];
+  readonly header: readonly MissionModel[];
+  readonly panelModels: string;
+}
+
+function modelId(role: RoleModel): string {
+  return role.model.slice(role.model.indexOf('/') + 1);
+}
+
+function configured(role: MissionRole, model: RoleModel, source: string): MissionModel {
+  return { role, model: model.model, ...(model.thinking === undefined ? {} : { thinking: model.thinking }), source };
+}
+
+export function missionSetup(settings: Pick<E2eSettings, 'orchestrator' | 'worker' | 'reviewer' | 'validator'>): MissionSetup {
+  const { orchestrator: A, worker: B, reviewer: C, validator: V } = settings;
+  const inherited = V.spec === C.spec;
+  return {
+    towerConfig: { orchestrator: A.spec, reviewer: C.spec, ...(inherited ? {} : { validator: V.spec }), ...objectiveSettingsConfig(MISSION_LIMITS) },
+    extraArgs: ['--tower-worker-model', B.spec],
+    header: [
+      configured('orchestrator', A, 'global tower.json'),
+      configured('worker', B, '--tower-worker-model'),
+      configured('reviewer', C, 'global tower.json'),
+      inherited ? { role: 'validator', note: 'same as reviewer' } : configured('validator', V, 'global tower.json'),
+    ],
+    panelModels: `models: orchestrator ${modelId(A)} · worker ${modelId(B)} · reviewer ${modelId(C)} · validator ${inherited ? '= reviewer' : modelId(V)}`,
+  };
 }
 
 export interface ApprovalDialogTitle {
@@ -83,6 +199,11 @@ export function panelRunningFeatures(lines: readonly string[]): { readonly featu
 
 export function panelModelsLine(lines: readonly string[]): string | undefined {
   return lines.find((line) => line.startsWith('models: '));
+}
+
+export function panelLineMatches(line: string | undefined, expected: string): boolean {
+  if (line === undefined) return false;
+  return line === expected || (line.endsWith('…') && line.length > 1 && expected.startsWith(line.slice(0, -1)));
 }
 
 export interface TeardownSection {

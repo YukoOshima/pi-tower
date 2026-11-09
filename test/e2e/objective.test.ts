@@ -5,8 +5,20 @@ import { join } from 'node:path';
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { checkAutopilotPromptness, processesUnder, validationStarts } from './objective.ts';
+import type { MilestoneRecord, MissionRecord, ObjectiveRecord, RosterEntry, TowerState } from './evidence.ts';
+import {
+  checkAutopilotPromptness,
+  checkRosterModels,
+  concurrentFeatures,
+  describeWindow,
+  featureWorkerWindows,
+  processesUnder,
+  requiredValidationKinds,
+  validationStarts,
+  type FeatureWindow,
+} from './objective.ts';
 import { ScenarioReport, type CheckResult } from './report.ts';
+import { parseRoleModel } from './settings.ts';
 import { createRepo, git } from './workspace.ts';
 
 const HAS_PS = spawnSync('ps', ['-ww', '-axo', 'pid=,command='], { stdio: 'ignore' }).status === 0;
@@ -258,5 +270,115 @@ describe('processesUnder', () => {
     const scan = processesUnder(dir, { procRoot: join(dir, 'no-proc') });
     expect(scan.method).toMatch(/^the command line of every process \(ps\) and the working directories lsof reported for \d+ processes$/);
     expect(scan.processes.map((info) => info.pid)).toContain(child.pid);
+  });
+});
+
+function window(feature: string, milestone: string, worker: string, from: string, to: string): FeatureWindow {
+  return { feature, milestone, worker, firstAt: Date.parse(from), lastAt: Date.parse(to) };
+}
+
+describe('concurrentFeatures', () => {
+  it('pairs the workers of different features of one milestone whose transcripts overlap, with the overlap', () => {
+    const a = window('M1', 'MS1', 'ap-w-M1-1', '2026-11-10T10:00:00.000Z', '2026-11-10T10:02:00.000Z');
+    const b = window('M2', 'MS1', 'ap-w-M2-1', '2026-11-10T10:00:30.000Z', '2026-11-10T10:03:00.000Z');
+    expect(concurrentFeatures([a, b])).toEqual([{ a, b, overlapMs: 90_000 }]);
+    expect(describeWindow(a)).toBe('ap-w-M1-1 (M1, MS1): 2026-11-10T10:00:00.000Z → 2026-11-10T10:02:00.000Z');
+  });
+
+  it('never pairs two workers of one feature, features of different milestones, or windows that only touch', () => {
+    const first = window('M1', 'MS1', 'ap-w-M1-1', '2026-11-10T10:00:00.000Z', '2026-11-10T10:02:00.000Z');
+    const respawn = window('M1', 'MS1', 'ap-w-M1-2', '2026-11-10T10:01:00.000Z', '2026-11-10T10:04:00.000Z');
+    const otherMilestone = window('M3', 'MS2', 'ap-w-M3-1', '2026-11-10T10:00:10.000Z', '2026-11-10T10:01:00.000Z');
+    const touching = window('M2', 'MS1', 'ap-w-M2-1', '2026-11-10T10:04:00.000Z', '2026-11-10T10:05:00.000Z');
+    expect(concurrentFeatures([first, respawn, otherMilestone, touching])).toEqual([]);
+  });
+});
+
+function transcript(repo: string, agentId: string, timestamps: readonly string[]): void {
+  const dir = join(repo, '.tower', 'agents');
+  mkdirSync(dir, { recursive: true });
+  const lines = timestamps.map((timestamp, index) => JSON.stringify(index === 0 ? { type: 'session', timestamp, cwd: repo } : { type: 'message', timestamp, message: { role: 'assistant', content: [] } }));
+  writeFileSync(join(dir, `${timestamps[0]?.replaceAll(':', '-') ?? 'x'}_${agentId}.jsonl`), `${lines.join('\n')}\n`);
+}
+
+function mission(id: string, milestone: string): MissionRecord {
+  return { id, status: 'merged', branch: `feat/${id}`, worktree: `wt-${id}`, milestone };
+}
+
+function rosterWorker(name: string, missionId: string, model = 'byteplus-gateway/claude-haiku-5-5'): RosterEntry {
+  return { name, agentId: `agent-${name}`, kind: 'worker', missionId, model };
+}
+
+describe('featureWorkerWindows', () => {
+  it('reads the time window of every worker of the given features from its transcript', () => {
+    const repo = tempDir();
+    transcript(repo, 'agent-w1', ['2026-11-10T10:00:00.000Z', '2026-11-10T10:01:00.000Z', '2026-11-10T10:02:00.000Z']);
+    transcript(repo, 'agent-w2', ['2026-11-10T10:00:30.000Z', '2026-11-10T10:03:00.000Z']);
+    transcript(repo, 'agent-w3', ['2026-11-10T10:10:00.000Z', '2026-11-10T10:11:00.000Z']);
+    const state = { base: 'main', roster: { agents: [rosterWorker('w1', 'M1'), rosterWorker('w2', 'M2'), rosterWorker('w3', 'M3'), rosterWorker('w4', 'M1')] }, missions: [] } as TowerState;
+    const windows = featureWorkerWindows(repo, state, [mission('M1', 'MS1'), mission('M2', 'MS1')]);
+    expect(windows).toEqual([
+      { feature: 'M1', milestone: 'MS1', worker: 'w1', firstAt: Date.parse('2026-11-10T10:00:00.000Z'), lastAt: Date.parse('2026-11-10T10:02:00.000Z') },
+      { feature: 'M2', milestone: 'MS1', worker: 'w2', firstAt: Date.parse('2026-11-10T10:00:30.000Z'), lastAt: Date.parse('2026-11-10T10:03:00.000Z') },
+    ]);
+    expect(concurrentFeatures(windows).map((pair) => pair.overlapMs)).toEqual([90_000]);
+  });
+});
+
+function milestoneRecord(id: string, order: number, validation: MilestoneRecord['validation']): MilestoneRecord {
+  return { id, title: id, order, status: 'active', rounds: [], ...(validation === undefined ? {} : { validation }) };
+}
+
+describe('requiredValidationKinds', () => {
+  const objective = (milestones: readonly MilestoneRecord[], acceptanceCommands: readonly string[] = []): ObjectiveRecord => ({
+    id: 'O1',
+    title: 'x',
+    status: 'executing',
+    definitionOfDone: [],
+    acceptanceCommands,
+    milestones,
+    limits: { maxValidationRounds: 3, maxFeatureAttempts: 3 },
+    notes: [],
+  });
+
+  it('adds the acceptance commands to the final milestone only, and drops the kinds the settings skip', () => {
+    const first = milestoneRecord('MS1', 1, { scrutiny: true, userTesting: true, commands: [] });
+    const last = milestoneRecord('MS2', 2, { scrutiny: true, userTesting: false, commands: [] });
+    const both = objective([last, first], ['npm test']);
+    expect(requiredValidationKinds(both, first)).toEqual(['scrutiny', 'user-testing']);
+    expect(requiredValidationKinds(both, first, { skipUserTesting: true })).toEqual(['scrutiny']);
+    expect(requiredValidationKinds(both, last)).toEqual(['scrutiny', 'commands']);
+    expect(requiredValidationKinds(both, last, { skipScrutiny: true })).toEqual(['commands']);
+    expect(requiredValidationKinds(objective([milestoneRecord('MS1', 1, { scrutiny: false, userTesting: false, commands: ['npm run lint'] })]), milestoneRecord('MS1', 1, { scrutiny: false, userTesting: false, commands: ['npm run lint'] }))).toEqual(['commands']);
+  });
+});
+
+describe('checkRosterModels', () => {
+  const expected = {
+    worker: parseRoleModel('byteplus-gateway/claude-haiku-5-5:low'),
+    reviewer: parseRoleModel('byteplus-gateway/claude-opus-5-5:low'),
+    validator: parseRoleModel('byteplus-gateway/claude-opus-5-5:low'),
+  };
+
+  function rosterCheck(agents: readonly RosterEntry[], requireValidator: boolean): CheckResult | undefined {
+    const report = new ScenarioReport('S0', 'unit', false);
+    checkRosterModels({ report }, { base: 'main', roster: { agents }, missions: [] }, expected, requireValidator);
+    return report.checks[0];
+  }
+
+  const reviewer: RosterEntry = { name: 'ap-r-M1-1', agentId: 'agent-r', kind: 'reviewer', model: 'byteplus-gateway/claude-opus-5-5' };
+  const validator: RosterEntry = { name: 'ap-v-MS1-scrutiny-1', agentId: 'agent-v', kind: 'validator', model: 'byteplus-gateway/claude-opus-5-5' };
+
+  it('passes when every worker, reviewer and validator runs on its role model', () => {
+    expect(rosterCheck([rosterWorker('w1', 'M1'), reviewer, validator], true)?.ok).toBe(true);
+    expect(rosterCheck([rosterWorker('w1', 'M1'), reviewer], false)?.ok).toBe(true);
+  });
+
+  it('fails on an agent on another model, a missing role, or a required validator that never ran', () => {
+    const wrong = rosterCheck([rosterWorker('w1', 'M1', 'byteplus-gateway/claude-opus-5-5'), reviewer, validator], true);
+    expect(wrong?.ok).toBe(false);
+    expect(wrong?.evidence[0]).toBe('w1 (worker) model=byteplus-gateway/claude-opus-5-5 — WRONG');
+    expect(rosterCheck([reviewer, validator], true)?.ok).toBe(false);
+    expect(rosterCheck([rosterWorker('w1', 'M1'), reviewer], true)?.ok).toBe(false);
   });
 });
