@@ -394,6 +394,11 @@ table('continue nudge and worker-idle wake', [
     actions: [{ type: 'resume-worker', mission: 'M1', worker: 'w-M1', reason: 'rebase-conflict', key: CONFLICT_RESUME_KEY }],
   },
   {
+    name: 'a feature rebased in this tick waits for the next tick and its new tip',
+    snap: snapshot({ missions: [{ ...STOPPED_SILENTLY, gate: { ready: false, blocks: ['not-completed', 'stale-base'] } }] }),
+    actions: [rebase('M1')],
+  },
+  {
     name: 'a dead worker is respawned, not nudged',
     snap: snapshot({ missions: [{ ...STOPPED_SILENTLY, worker: DEAD }] }),
     actions: [{ type: 'respawn-worker', mission: 'M1', attempt: 2, previousWorker: 'w-M1' }],

@@ -195,7 +195,7 @@ describe('continue nudge invariants over random snapshots', () => {
     }
   });
 
-  it('gives every silent stop its nudge or its wake unless the agent slots are full', () => {
+  it('gives every silent stop its nudge or its wake unless its rebase is planned in the tick or the agent slots are full', () => {
     for (const snap of SNAPSHOTS) {
       const { actions } = decideAutopilot(snap);
       const free = Math.max(0, snap.settings.maxRunningAgents - runningAgents(snap));
@@ -204,8 +204,11 @@ describe('continue nudge invariants over random snapshots', () => {
         const tip = mission.tip ?? '-';
         const nudged = snap.memory.wakeKeys.includes(`resume-continue:${mission.id}:${tip}`);
         const woken = snap.memory.wakeKeys.includes(`worker-idle:${mission.id}:${tip}`);
+        const rebased = actions.some((action) => action.type === 'rebase' && action.mission === mission.id);
         const found = actions.filter((action) => nudgedMission(action) === mission.id);
-        if (snap.settings.autopilot && mission.worker.name !== undefined && !nudged) {
+        if (rebased) {
+          expect(found).toEqual([]);
+        } else if (snap.settings.autopilot && mission.worker.name !== undefined && !nudged) {
           if (found.length === 0) expect(slotted).toBe(free);
           else expect(found).toEqual([expect.objectContaining({ type: 'resume-worker', reason: 'continue' })]);
         } else if (!woken) {

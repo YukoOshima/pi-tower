@@ -315,6 +315,7 @@ function planResume(draft: Draft, feature: AutopilotMission): void {
 
 function planContinue(draft: Draft, feature: AutopilotMission): void {
   if (feature.blockers.length > 0 || feature.worker.awaitingReply) return;
+  if (draft.rebases.some((rebase) => rebase.mission === feature.id)) return;
   const tip = feature.tip ?? '-';
   const key = dedupeKey('resume-continue', feature.id, tip);
   const worker = feature.worker.name;
