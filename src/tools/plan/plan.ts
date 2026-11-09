@@ -13,6 +13,8 @@ export const TowerPlanMissionSchema = Type.Object(
     context: Type.Optional(Type.String({ description: DESCRIPTIONS.context })),
     deps: Type.Optional(Type.Array(Type.String(), { description: DESCRIPTIONS.deps })),
     kind: Type.Optional(stringEnum(['build', 'survey'] as const, DESCRIPTIONS.kind)),
+    milestone: Type.Optional(Type.String({ description: DESCRIPTIONS.milestone })),
+    origin: Type.Optional(stringEnum(['plan', 'fix'] as const, DESCRIPTIONS.origin)),
   },
   { additionalProperties: false },
 );
