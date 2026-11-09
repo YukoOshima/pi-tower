@@ -619,6 +619,26 @@ function reopenChangedMilestones(before: TowerObjective, after: TowerObjective):
   return reopened;
 }
 
+export function forwardDependencies(state: TowerState, objective: TowerObjective): string[] {
+  const orders = new Map(objective.milestones.map((milestone) => [milestone.id, milestone.order]));
+  const byId = new Map(state.missions.map((mission) => [mission.id, mission]));
+  const pairs: string[] = [];
+  for (const mission of state.missions) {
+    if (!isOpenFeature(mission) || mission.milestone === undefined) continue;
+    const own = orders.get(mission.milestone);
+    if (own === undefined) continue;
+    for (const depId of mission.deps) {
+      const dep = byId.get(depId);
+      if (dep === undefined || !isOpenFeature(dep) || dep.milestone === undefined) continue;
+      const theirs = orders.get(dep.milestone);
+      if (theirs !== undefined && theirs > own) {
+        pairs.push(`${mission.id} (${mission.milestone}) → ${dep.id} (${dep.milestone})`);
+      }
+    }
+  }
+  return pairs;
+}
+
 export function applyObjectiveUpdate(
   state: TowerState,
   input: TowerObjectiveUpdateInput,
@@ -759,6 +779,14 @@ export function applyObjectiveUpdate(
     milestone.order = index + 1;
   });
   next.milestones = sequence;
+  if (input.milestoneOrder !== undefined || removed.length > 0) {
+    const forward = forwardDependencies(state, next);
+    if (forward.length > 0) {
+      throw new TowerProtocolError(
+        `this milestone order would make open features wait for open features of a later milestone: ${forward.join(', ')} — a later milestone's features start only after the earlier milestones pass, so those dependencies could never be met; re-plan the affected features first (abandon them and plan them again without the dependency, or into another milestone), then reorder`,
+      );
+    }
+  }
 
   const notes = cleanList(input.notes);
   if (notes.length > 0) {

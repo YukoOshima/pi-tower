@@ -9,6 +9,7 @@ import {
   estimateObjectiveRuns,
   evaluateObjective,
   finalMilestone,
+  forwardDependencies,
   milestoneMissions,
   nextValidationRound,
   objectiveApprovalProblems,
@@ -604,6 +605,20 @@ describe('applyObjectiveUpdate', () => {
     const archived = state(undefined);
     archived.objectiveHistory = [objective({ status: 'blocked', milestones: [milestone('MS1', 1)], removedMilestones: ['MS9'] })];
     expect(buildObjective(archived, { title: 'Again', milestones: [{ title: 'A' }] }, 'now').milestones[0]!.id).toBe('MS10');
+  });
+
+  it('refuses a reorder that would leave an open feature waiting for an open feature of a later milestone', () => {
+    const s = state(objective({ status: 'planning', milestones: [milestone('MS1', 1), milestone('MS2', 2)] }), [
+      mission('M1', 'MS1'),
+      { ...mission('M2', 'MS2'), deps: ['M1'] },
+      { ...mission('M3', 'MS2', 'merged'), deps: ['M1'] },
+    ]);
+    expect(forwardDependencies(s, s.objective!)).toEqual([]);
+    expect(() => applyObjectiveUpdate(s, { milestoneOrder: ['MS2', 'MS1'] })).toThrow(
+      /later milestone: M2 \(MS2\) → M1 \(MS1\) — /,
+    );
+    s.missions[0]!.status = 'abandoned';
+    expect(applyObjectiveUpdate(s, { milestoneOrder: ['MS2', 'MS1'] }).changes).toEqual(['reordered:MS2+MS1']);
   });
 
   it('allows removing a milestone whose features were all abandoned', () => {

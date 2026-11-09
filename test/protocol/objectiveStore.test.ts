@@ -1219,3 +1219,60 @@ describe('dependencies across milestones', () => {
     expect(widened.deps).toEqual([]);
   });
 });
+
+describe('reordering milestones around existing dependencies', () => {
+  async function snapshot(): Promise<string> {
+    return [
+      await readFile(store.abs(STATE_FILE), 'utf8'),
+      await readFile(store.abs('.tower/comms/MISSIONS.md'), 'utf8'),
+      await activityLog(),
+    ].join('\n---\n');
+  }
+
+  async function dependentFeatures(): Promise<void> {
+    await store.draftObjective({
+      title: 'Ship',
+      goal: 'g',
+      definitionOfDone: ['d'],
+      milestones: [{ title: 'A' }, { title: 'B' }, { title: 'C' }],
+    });
+    const planned = await store.plan([
+      { title: 'A feature', scope: ['src/a/**'], milestone: 'MS1' },
+      { title: 'B overlaps a', scope: ['src/a/b.ts'], milestone: 'MS2' },
+      { title: 'B needs a', scope: ['src/b/**'], milestone: 'MS2', deps: ['M1'] },
+    ]);
+    expect(planned.map((mission) => mission.deps)).toEqual([[], ['M1'], ['M1']]);
+  }
+
+  const forwardPairs = 'M2 (MS2) → M1 (MS1), M3 (MS2) → M1 (MS1)';
+
+  it('refuses a reorder that would leave planned features waiting for a later milestone (D8)', async () => {
+    await dependentFeatures();
+    const before = await snapshot();
+    await expect(store.updateObjective({ milestoneOrder: ['MS2', 'MS1', 'MS3'] })).rejects.toThrow(
+      `would make open features wait for open features of a later milestone: ${forwardPairs} — `,
+    );
+    expect(await snapshot()).toBe(before);
+    const allowed = await store.updateObjective({ milestoneOrder: ['MS1', 'MS3', 'MS2'] });
+    expect(allowed.objective.milestones.map((milestone) => [milestone.id, milestone.order])).toEqual([
+      ['MS1', 1],
+      ['MS3', 2],
+      ['MS2', 3],
+    ]);
+  });
+
+  it('refuses the same reorder on an executing objective without asking for re-approval (D9)', async () => {
+    await dependentFeatures();
+    await store.requestObjectiveApproval();
+    await store.approveObjective('human');
+    const before = await snapshot();
+    await expect(store.updateObjective({ milestoneOrder: ['MS2', 'MS1', 'MS3'] })).rejects.toThrow(forwardPairs);
+    expect(await snapshot()).toBe(before);
+    expect((await readState()).objective!.status).toBe('executing');
+    await mutateState((state) => {
+      state.missions[0]!.status = 'merged';
+    });
+    const reordered = await store.updateObjective({ milestoneOrder: ['MS2', 'MS1', 'MS3'] });
+    expect(reordered.objective).toMatchObject({ status: 'awaiting-approval', approvalReason: 'contract-changed' });
+  });
+});
