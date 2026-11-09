@@ -46,6 +46,7 @@ import {
   planToApproval,
   recordObjectiveUsage,
   requiredValidationKinds,
+  waitForAutopilotEntry,
   waitForObjective,
   writeText,
   type HumanScript,
@@ -232,12 +233,12 @@ async function checkCompletion(ctx: ScenarioContext, rpc: PiRpc, repo: string, f
     .catch(() => undefined);
   const text = String(notice?.message ?? '');
   const section = teardownSection(text);
-  const features = objectiveFeatures(final);
+  const delivered = objectiveFeatures(final).filter((feature) => feature.status === 'merged');
   const removed = new Set((section?.items ?? []).filter((item) => item.startsWith('removed ')).map((item) => item.slice('removed '.length)));
   const unexpected = (section?.items ?? []).filter((item) => !item.startsWith('removed ') && !/^kept \S+ \(validator \S+ is finishing/.test(item));
   report.check(
     'the completion notice includes the automatic teardown section, which removed the worktree of every feature',
-    section?.counts !== undefined && section.counts.failed === 0 && features.length > 0 && features.every((feature) => removed.has(`.tower/worktrees/${feature.worktree}`)) && unexpected.length === 0,
+    section?.counts !== undefined && section.counts.failed === 0 && delivered.length > 0 && delivered.every((feature) => removed.has(`.tower/worktrees/${feature.worktree}`)) && unexpected.length === 0,
     [clip(text.split('\n')[0] ?? '(no completion notice)', 300), section?.summary ?? '(no "Automatic teardown" section)', ...(section?.items ?? []).map((item) => `- ${item}`)],
   );
   const left = await waitForWorktreesGone(repo, WORKTREE_WAIT_MS);
@@ -442,6 +443,7 @@ export const s18MissionMode: ScenarioDefinition = {
         rpc,
         human: humanScript(EXECUTION_REPLY),
       });
+      await waitForAutopilotEntry(repo, 'complete-objective', 60_000);
       trace.stop();
       await checkCompletion(ctx, rpc, repo, final);
       const settled = towerState(repo) ?? final;
