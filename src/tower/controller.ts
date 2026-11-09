@@ -11,6 +11,7 @@ import type {
 } from '@earendil-works/pi-coding-agent';
 
 import {
+  TOWER_VALIDATOR_ROLE,
   TOWER_WORKER_ROLE,
   formatGateDigestLine,
   renderAgentNotification,
@@ -128,8 +129,8 @@ export interface TowerLog {
 
 const SILENT_LOG: TowerLog = { info: () => undefined, warn: () => undefined };
 
-const REVIEWER_SETTLE_POLL_MS = 1_000;
-const REVIEWER_SETTLE_POLL_LIMIT = 1_800;
+const AGENT_SETTLE_POLL_MS = 1_000;
+const AGENT_SETTLE_POLL_LIMIT = 1_800;
 const AGENT_REGISTRATION_WAIT_MS = 30_000;
 
 const DEFAULT_RATE_LIMIT_SNAPSHOT: TowerRateLimitSnapshot = {
@@ -333,8 +334,8 @@ export class TowerController implements TowerToolHost {
       description: request.description,
       cwd: request.cwd,
       prompt: request.prompt,
-      appendSystemPrompt: TOWER_WORKER_ROLE,
-      tools: request.kind === 'reviewer' ? TOWER_REVIEWER_BASE_TOOLS : TOWER_WORKER_BASE_TOOLS,
+      appendSystemPrompt: agentRole(request.kind),
+      tools: agentBaseTools(request.kind),
       timeoutMs: this.models?.agentTimeoutMs ?? DEFAULT_AGENT_TIMEOUT_MS,
       ...(request.binding === undefined ? {} : { model: request.binding.model }),
       ...(request.binding?.thinkingLevel === undefined
@@ -858,7 +859,7 @@ export class TowerController implements TowerToolHost {
     if (event.type !== 'finished') return;
     this.enqueueDeathWork(event.agentId, () => this.recordTowerAgentDeath(event));
     this.deliverAgentNotification(event);
-    this.retireFinishedReviewer(event);
+    this.retireFinishedAgent(event);
   }
 
   private enqueueDeathWork(agentId: string, work: () => Promise<void>): void {
@@ -948,7 +949,7 @@ export class TowerController implements TowerToolHost {
   private deliverAgentNotification(event: TowerAgentFinishedEvent): void {
     if (this.shuttingDown || this.abortedSpawns.has(event.agentId)) return;
     const info = this.runtimeInstance?.get(event.agentId);
-    const kind: TowerAgentKind = info?.kind === 'reviewer' ? 'reviewer' : 'worker';
+    const kind = agentKind(info?.kind);
     const status: NotificationEndStatus = event.status === 'idle' ? 'completed' : event.status;
     const text = renderAgentNotification({
       name: info?.name ?? event.name,
@@ -979,32 +980,32 @@ export class TowerController implements TowerToolHost {
     }
   }
 
-  private retireFinishedReviewer(event: TowerAgentFinishedEvent): void {
+  private retireFinishedAgent(event: TowerAgentFinishedEvent): void {
     const runtime = this.runtimeInstance;
     if (runtime === undefined || this.shuttingDown) return;
     const output = runtime.output(event.agentId);
-    if (output?.kind !== 'reviewer') return;
+    if (output === undefined || agentKind(output.kind) === 'worker') return;
     this.retainedOutputs.set(output.agentId, output);
     queueMicrotask(() => {
-      this.disposeSettledReviewer(runtime, event.agentId, 0);
+      this.disposeSettledAgent(runtime, event.agentId, 0);
     });
   }
 
-  private disposeSettledReviewer(runtime: TowerRuntime, agentId: string, attempt: number): void {
+  private disposeSettledAgent(runtime: TowerRuntime, agentId: string, attempt: number): void {
     if (this.shuttingDown) return;
     const info = runtime.get(agentId);
     if (info === undefined || info.status === 'running') return;
     if (info.windingDown) {
-      if (attempt >= REVIEWER_SETTLE_POLL_LIMIT) return;
+      if (attempt >= AGENT_SETTLE_POLL_LIMIT) return;
       const timer = setTimeout(() => {
-        this.disposeSettledReviewer(runtime, agentId, attempt + 1);
-      }, REVIEWER_SETTLE_POLL_MS);
+        this.disposeSettledAgent(runtime, agentId, attempt + 1);
+      }, AGENT_SETTLE_POLL_MS);
       timer.unref();
       return;
     }
     const output = runtime.output(agentId);
     if (output !== undefined) this.retainedOutputs.set(agentId, output);
-    void runtime.dispose(agentId, 'reviewer finished').catch(() => false);
+    void runtime.dispose(agentId, `${agentKind(info.kind)} finished`).catch(() => false);
   }
 
   diagnostic(message: string): void {
@@ -1041,6 +1042,24 @@ async function createBaseBranch(repoRoot: string, base: string): Promise<void> {
       `created and switched to "${base}", but committing the checkout's uncommitted changes onto it failed: ${errorText(error)}. ` +
         `The changes are still uncommitted on "${base}" — commit or move them, then re-run /tower ${base}.`,
     );
+  }
+}
+
+function agentKind(kind: string | undefined): TowerAgentKind {
+  return kind === 'reviewer' || kind === 'validator' ? kind : 'worker';
+}
+
+function agentRole(kind: TowerAgentKind): string {
+  return kind === 'validator' ? TOWER_VALIDATOR_ROLE : TOWER_WORKER_ROLE;
+}
+
+function agentBaseTools(kind: TowerAgentKind): readonly string[] {
+  switch (kind) {
+    case 'worker':
+      return TOWER_WORKER_BASE_TOOLS;
+    case 'reviewer':
+    case 'validator':
+      return TOWER_REVIEWER_BASE_TOOLS;
   }
 }
 

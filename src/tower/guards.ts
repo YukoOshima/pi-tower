@@ -12,6 +12,7 @@ import {
   commandNeedsTowerGuard,
   findWriteEscapes,
   towerWorkspaceOwned,
+  VALIDATOR_WRITE_VETO,
   writeGuardVeto,
 } from '../guards/index.ts';
 import { STATE_FILE, TowerStore, WORKTREES_DIR, resolveTowerRepoRoot } from '../protocol/index.ts';
@@ -43,8 +44,9 @@ export async function towerWriteGuard(
   cwd: string,
   target: TowerAgentGuardTarget,
 ): Promise<ToolCallEventResult | undefined> {
-  if (target.kind !== 'worker') return undefined;
   if (!isToolCallEventType('write', event) && !isToolCallEventType('edit', event)) return undefined;
+  if (target.kind === 'validator') return { block: true, reason: VALIDATOR_WRITE_VETO };
+  if (target.kind !== 'worker') return undefined;
   const path: unknown = event.input.path;
   if (typeof path !== 'string') return undefined;
   const worktree = (await rosterWorktree(target)) ?? target.cwd;

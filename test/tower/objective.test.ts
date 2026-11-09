@@ -6,10 +6,25 @@ import type { SessionStartEvent } from '@earendil-works/pi-coding-agent';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { TOWER_OBJECTIVE_DEFAULTS } from '../../src/config/index.ts';
+import { TOWER_VALIDATOR_ROLE, TOWER_WORKER_ROLE } from '../../src/prompts/index.ts';
+import {
+  TOWER_AGENT_NOTIFICATION_MESSAGE,
+  TOWER_REVIEWER_BASE_TOOLS,
+  TOWER_WORKER_BASE_TOOLS,
+} from '../../src/tower/constants.ts';
 import { TowerController } from '../../src/tower/controller.ts';
 import { TowerModels } from '../../src/tower/models.ts';
 import { objectiveSettingValues, objectiveSettingsView } from '../../src/tower/objectiveSettings.ts';
-import { FakeContext, FakePi, FakeRuntime, FakeSessionManager, createRepo, removeDir } from './fakes.ts';
+import {
+  FakeContext,
+  FakePi,
+  FakeRuntime,
+  FakeSessionManager,
+  createRepo,
+  removeDir,
+  sentText,
+  settle,
+} from './fakes.ts';
 
 const SESSION_ID = 'session-objective';
 const START: SessionStartEvent = { type: 'session_start', reason: 'startup' };
@@ -142,5 +157,64 @@ describe('objective settings', () => {
     const h = await harness({ models: false });
 
     expect(h.controller.objectiveSettings()).toEqual(objectiveSettingsView(TOWER_OBJECTIVE_DEFAULTS));
+  });
+});
+
+describe('validator agents', () => {
+  async function launchValidator(h: Harness): Promise<string> {
+    const launched = await h.controller.launchAgent({
+      name: 'ap-v-MS1-scrutiny-1',
+      kind: 'validator',
+      description: 'validate MS1 (scrutiny)',
+      cwd: h.repo,
+      prompt: 'validate MS1',
+    });
+    if (!launched.ok) throw new Error(launched.reason);
+    return launched.agentId;
+  }
+
+  it('launches with the validator role and the read-only reviewer tools', async () => {
+    const h = await harness();
+
+    await launchValidator(h);
+
+    expect(h.runtime.specs).toEqual([
+      expect.objectContaining({
+        kind: 'validator',
+        appendSystemPrompt: TOWER_VALIDATOR_ROLE,
+        tools: TOWER_REVIEWER_BASE_TOOLS,
+      }),
+    ]);
+    expect(TOWER_REVIEWER_BASE_TOOLS).not.toContain('write');
+    expect(TOWER_REVIEWER_BASE_TOOLS).not.toContain('edit');
+  });
+
+  it('keeps the worker role and tools for workers and the reviewer tools for reviewers', async () => {
+    const h = await harness();
+
+    await h.controller.launchAgent({ name: 'w', kind: 'worker', description: 'w', cwd: h.repo, prompt: 'go' });
+    await h.controller.launchAgent({ name: 'r', kind: 'reviewer', description: 'r', cwd: h.repo, prompt: 'go' });
+
+    expect(h.runtime.specs.map((spec) => [spec.appendSystemPrompt, spec.tools])).toEqual([
+      [TOWER_WORKER_ROLE, TOWER_WORKER_BASE_TOOLS],
+      [TOWER_WORKER_ROLE, TOWER_REVIEWER_BASE_TOOLS],
+    ]);
+  });
+
+  it('announces a finished validator as a validator and retires it with its output retained', async () => {
+    const h = await harness();
+    await h.controller.enter();
+    const agentId = await launchValidator(h);
+
+    h.runtime.finish(agentId, 'idle', { summary: 'Submitted pass for MS1 scrutiny.' });
+    await settle();
+
+    const notification = h.pi.sentOfType(TOWER_AGENT_NOTIFICATION_MESSAGE).at(-1);
+    expect(sentText(notification)).toContain('Title: Background validator completed');
+    expect(h.runtime.disposed).toEqual([agentId]);
+    expect(h.controller.agentOutput(agentId)).toMatchObject({
+      kind: 'validator',
+      lastAssistantText: 'Submitted pass for MS1 scrutiny.',
+    });
   });
 });

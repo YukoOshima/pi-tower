@@ -37,6 +37,14 @@ export const TOWER_AGENT_TOOLS: readonly TowerToolName[] = [
   'TowerStatus',
 ];
 
+export const TOWER_VALIDATOR_AGENT_TOOLS: readonly TowerToolName[] = [
+  'TowerFinding',
+  'TowerInbox',
+  'TowerSend',
+  'TowerStatus',
+  'TowerValidate',
+];
+
 export const TOWER_WORKER_BASE_TOOLS: readonly string[] = [
   'read',
   'bash',
