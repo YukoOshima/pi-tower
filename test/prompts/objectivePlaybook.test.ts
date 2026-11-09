@@ -43,6 +43,12 @@ function judgmentWakeReasons(playbook: string): string[] {
   return [...playbook.matchAll(/^ {3}- ([a-z-]+(?:, [a-z-]+)*) → /gm)].flatMap((match) => match[1]!.split(', '));
 }
 
+function stuckEntry(playbook: string): string {
+  const entry = playbook.split('\n').find((line) => line.startsWith('   - review-stuck, validation-stuck → '));
+  expect(entry).toBeDefined();
+  return entry ?? '';
+}
+
 const CASES: readonly Omit<TowerModeReminderInput, 'objective'>[] = [
   { active: false, history: [] },
   { active: true, history: [] },
@@ -188,6 +194,32 @@ describe('objective playbook judgment wakes', () => {
       'Nobody can answer in a headless run, so block the objective with `TowerObjective(action="block", reason)` and name the stopped worker.',
     );
     expect(TOWER_OBJECTIVE_HEADLESS_PLAYBOOK).not.toMatch(/ask the human/i);
+  });
+
+  it.each(PLAYBOOKS)(
+    'the %s playbook replaces a reviewer or validator that kept ending without a verdict, but not one the human stopped',
+    (_variant, playbook) => {
+      const entry = stuckEntry(playbook);
+      expect(entry).toContain(
+        'for a transient cause spawn a fresh one with `TowerSpawn` under a new name',
+      );
+      expect(entry).toContain(
+        'When the wake says instead that the human stopped the reviewer or validator, that is no transient cause: never replace it',
+      );
+      expect(entry.indexOf('the human stopped')).toBeGreaterThan(entry.indexOf('for a transient cause'));
+    },
+  );
+
+  it('asks the human before replacing a reviewer or validator the human stopped', () => {
+    expect(stuckEntry(TOWER_OBJECTIVE_PLAYBOOK)).toContain(
+      "never replace it on your own — ask the human how to continue and act only on the answer; spawn a fresh one only on the human's direction.",
+    );
+  });
+
+  it('blocks a headless objective whose reviewer or validator the human stopped', () => {
+    expect(stuckEntry(TOWER_OBJECTIVE_HEADLESS_PLAYBOOK)).toContain(
+      'never replace it — nobody can answer in a headless run, so block the objective with a reason that names the stopped agent.',
+    );
   });
 });
 

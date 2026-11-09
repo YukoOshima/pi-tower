@@ -52,6 +52,13 @@ const OBJECTIVE_WORKER_STOPPED: Readonly<Record<TowerObjectivePlaybookVariant, s
     '   - worker-stopped → the human stopped the worker of a feature, and the feature waits: the autopilot never resumes, reassigns, or replaces an agent the human stopped, and neither do you. Nobody can answer in a headless run, so block the objective with `TowerObjective(action="block", reason)` and name the stopped worker.',
 };
 
+const OBJECTIVE_REVIEWER_OR_VALIDATOR_STOPPED: Readonly<Record<TowerObjectivePlaybookVariant, string>> = {
+  interactive:
+    "When the wake says instead that the human stopped the reviewer or validator, that is no transient cause: never replace it on your own — ask the human how to continue and act only on the answer; spawn a fresh one only on the human's direction.",
+  headless:
+    'When the wake says instead that the human stopped the reviewer or validator, that is no transient cause: never replace it — nobody can answer in a headless run, so block the objective with a reason that names the stopped agent.',
+};
+
 const OBJECTIVE_ESCALATION: Readonly<Record<TowerObjectivePlaybookVariant, string>> = {
   interactive:
     'Report to the human at milestone boundaries and whenever the objective blocks or pauses; escalate only what you cannot decide from the objective and the human\'s own words.',
@@ -77,7 +84,10 @@ function objectivePlaybook(variant: TowerObjectivePlaybookVariant): string {
       OBJECTIVE_WORKER_STOPPED[variant],
       '   - rebase-conflict, merge-blocked → route the conflict to the owning worker, or re-plan the scope or deps; never work around a gate.',
       '   - feature-attempts-exhausted, stalled → find out why the work does not converge, then re-plan it smaller, unblock it, or call `TowerObjective(action="block", reason)` with what the human must decide.',
-      '   - review-stuck, validation-stuck → reviewers or validators keep ending without a verdict: inspect why (`TowerTasks` with `active_only=false`, `TowerTaskOutput`); for a transient cause spawn a fresh one with `TowerSpawn` under a new name; when the diff or the milestone is too large to judge in one run, simplify or split the work; otherwise block the objective with a reason for the human.',
+      [
+        '   - review-stuck, validation-stuck → reviewers or validators keep ending without a verdict: inspect why (`TowerTasks` with `active_only=false`, `TowerTaskOutput`); for a transient cause spawn a fresh one with `TowerSpawn` under a new name; when the diff or the milestone is too large to judge in one run, simplify or split the work; otherwise block the objective with a reason for the human.',
+        OBJECTIVE_REVIEWER_OR_VALIDATOR_STOPPED[variant],
+      ].join(' '),
     ].join('\n'),
     OBJECTIVE_ESCALATION[variant],
   ].join('\n\n');
