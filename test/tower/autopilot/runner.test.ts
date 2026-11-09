@@ -123,7 +123,6 @@ describe('AutopilotRunner lifecycle', () => {
 
   it('serializes ticks and coalesces the ones that arrive while a tick runs', async () => {
     await draft();
-    await store.approveObjective('human');
     const { runner, loads } = setup();
     const ticks = [runner.tick('a'), runner.tick('b'), runner.tick('c')];
     await Promise.all(ticks);
@@ -131,17 +130,98 @@ describe('AutopilotRunner lifecycle', () => {
     expect(loads()).toBe(2);
   });
 
-  it('never ticks on its own writes', async () => {
+  it('follows a launch that started its agent with one tick and never ticks on its own writes', async () => {
     await draft();
     await store.approveObjective('human');
     const { runner, tower, loads } = setup();
     await settle(runner);
     expect(tower.calls).toEqual(['spawnWorker M1 ap-w-M1-1']);
+    expect(loads()).toBe(2);
     await runner.whenIdle();
-    expect(loads()).toBe(1);
+    expect(loads()).toBe(2);
     const memory = (await objectiveOf()).autopilot;
     expect(memory).toMatchObject({ stallWakes: 0, progressAt: new Date(T0).toISOString() });
     expect(memory?.progressKey).toMatch(/^[0-9a-f]{16}$/);
+  });
+});
+
+describe('follow-up ticks', () => {
+  const IN_SCOPE: SimScript = {
+    ...QUIET,
+    work: (title) => ({ file: `core/${title.split(' ')[1]!.toLowerCase()}/value.txt`, content: 'value\n' }),
+  };
+
+  async function reviewed(): Promise<ReturnType<typeof setup>> {
+    await draft({ commands: ['true'] });
+    await store.approveObjective('human');
+    const harness = setup({}, true, IN_SCOPE);
+    await settle(harness.runner);
+    await harness.tower.actAll();
+    await settle(harness.runner);
+    await harness.tower.actAll();
+    expect(harness.tower.calls).toEqual(['spawnWorker M1 ap-w-M1-1', 'spawnReviewer M1 ap-r-M1-1']);
+    return harness;
+  }
+
+  function autopilotLines(activity: string): string[] {
+    return activity.split('\n').flatMap((line) => {
+      const match = / autopilot (\S+) .*result=(\S+)/.exec(line);
+      return match === null ? [] : [`${match[1]!} ${match[2]!}`];
+    });
+  }
+
+  it('follows its own merge with the milestone validation and the completion in one settle, without a watchdog tick', async () => {
+    const { runner, tower, timers } = await reviewed();
+    const before = autopilotLines(await readFile(store.abs(ACTIVITY_LOG), 'utf8')).length;
+    await settle(runner, 'agent-end');
+    expect(tower.clock).toBe(T0);
+    expect(timers.intervalMs).toBe(60_000);
+    expect((await objectiveOf()).status).toBe('completed');
+    expect(autopilotLines(await readFile(store.abs(ACTIVITY_LOG), 'utf8')).slice(before)).toEqual([
+      'merge done',
+      'start-validation done',
+      'commands submitted',
+      'complete-objective done',
+    ]);
+    expect(tower.notices.at(-1)!.text).toContain('is complete');
+  });
+
+  it('a tick whose follow-up action was refused does not tick again', async () => {
+    const { runner, tower, loads } = await reviewed();
+    tower.refuse.set('merge', 'merge blocked: the base checkout has uncommitted changes');
+    const before = loads();
+    await settle(runner);
+    expect(loads() - before).toBe(1);
+    await settle(runner);
+    expect(loads() - before).toBe(2);
+    expect(tower.calls.filter((call) => call.startsWith('merge'))).toHaveLength(2);
+  });
+
+  it('a launch refused in the background is retried on the next tick, not by a follow-up', async () => {
+    await draft();
+    await store.approveObjective('human');
+    const { runner, tower, loads } = setup();
+    tower.refuse.set('spawnWorker', 'no slot');
+    await settle(runner);
+    await settle(runner);
+    expect(loads()).toBe(2);
+    expect(tower.calls).toEqual(['spawnWorker M1 ap-w-M1-1', 'spawnWorker M1 ap-w-M1-1']);
+  });
+
+  it('an action that reports done without changing anything is repeated once by its follow-up, never in a loop', async () => {
+    const { runner, tower, loads } = await reviewed();
+    tower.merge = async (missionId) => {
+      tower.calls.push(`merge ${missionId}`);
+      return { ok: true, detail: 'advanced' };
+    };
+    const before = loads();
+    await settle(runner);
+    expect(loads() - before).toBe(2);
+    expect(tower.calls.filter((call) => call.startsWith('merge'))).toHaveLength(2);
+    await settle(runner);
+    expect(loads() - before).toBe(4);
+    expect(tower.calls.filter((call) => call.startsWith('merge'))).toHaveLength(4);
+    expect((await objectiveOf()).status).toBe('executing');
   });
 });
 
@@ -706,7 +786,7 @@ describe('terminal objectives the runner did not end itself', () => {
     expect(activity).toMatch(/ autopilot notify-human objective=O1 reason=blocked\n/);
   });
 
-  it('notifies the human once when a validation round blocks the objective in the store', async () => {
+  it('notifies the human at once, and once, when a validation round blocks the objective in the store', async () => {
     await draft({ commands: ['echo broken; exit 3'], limits: { maxValidationRounds: 1 } });
     await store.approveObjective('human');
     await store.updateMission('tower', 'M1', { status: 'abandoned' });
@@ -714,7 +794,7 @@ describe('terminal objectives the runner did not end itself', () => {
     await settle(runner);
     const blocked = await objectiveOf();
     expect(blocked.status).toBe('blocked');
-    expect(tower.notices).toEqual([]);
+    expect(tower.notices).toHaveLength(1);
     await settle(runner);
     await settle(runner);
     expect(tower.notices).toHaveLength(1);

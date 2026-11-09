@@ -56,7 +56,7 @@ export interface AutopilotExecution {
 }
 
 export type AutopilotActionOutcome =
-  | { readonly status: 'done'; readonly detail?: string; readonly wakeKey?: string }
+  | { readonly status: 'done'; readonly detail?: string; readonly wakeKey?: string; readonly followUp?: boolean }
   | { readonly status: 'launched'; readonly detail: string }
   | { readonly status: 'refused'; readonly error: string };
 
@@ -229,7 +229,7 @@ function launched(execution: AutopilotExecution, launch: AutopilotLaunch): Autop
 
 function effectOutcome(result: EffectResult): AutopilotActionOutcome {
   return result.ok
-    ? { status: 'done', ...(result.detail === undefined ? {} : { detail: result.detail }) }
+    ? { status: 'done', followUp: true, ...(result.detail === undefined ? {} : { detail: result.detail }) }
     : { status: 'refused', error: result.error };
 }
 
@@ -300,7 +300,9 @@ async function execute(execution: AutopilotExecution, action: AutopilotAction): 
       return startValidation(execution, action.milestone, action.commit, action.kinds, identity);
     case 'advance-milestone': {
       const activated = await store.activateNextMilestone();
-      return { status: 'done', detail: activated === undefined ? 'nothing to activate' : `activated=${activated.id}` };
+      return activated === undefined
+        ? { status: 'done', detail: 'nothing to activate' }
+        : { status: 'done', detail: `activated=${activated.id}`, followUp: true };
     }
     case 'complete-objective':
       return completeObjective(execution);
@@ -328,7 +330,7 @@ async function startValidation(
     validationSettings(world.settings),
   );
   const status = started.milestone.status;
-  if (status !== 'validating') return { status: 'done', detail: `status=${status}` };
+  if (status !== 'validating') return { status: 'done', detail: `status=${status}`, followUp: true };
   const milestone = findMilestone(world.state.objective, milestoneId) ?? started.milestone;
   const names = new Set(reserved);
   const launchedKinds: string[] = [];
@@ -368,7 +370,7 @@ async function completeObjective(execution: AutopilotExecution): Promise<Autopil
     completedNoticeText({ objective: completed, state, baseTip: world.baseTip, now: world.now }),
     'info',
   );
-  return { status: 'done', detail: `objective=${completed.id}`, wakeKey: completedNoticeKey(completed) };
+  return { status: 'done', detail: `objective=${completed.id}`, wakeKey: completedNoticeKey(completed), followUp: true };
 }
 
 function blockReason(world: AutopilotWorld, action: AutopilotBlockObjective): string {
