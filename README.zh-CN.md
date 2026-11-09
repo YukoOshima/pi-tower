@@ -248,7 +248,7 @@ autopilot 会：
 - 为 branch 当前最新提交上的每个 review 请求派发 reviewer；
 - 恢复收到 review 意见或需要解决 rebase 冲突的空闲 worker；
 - 当 worker 在完成 feature 之前就空闲下来（既没有调用 `TowerComplete`，也没有报告 blocker）时，提醒它完成任务或说明受阻原因，每个 branch 最新提交只提醒一次；
-- 用同一 branch 上的新 worker 替换失败或超时的 worker，每个 feature 最多 `maxFeatureAttempts` 个 worker，但绝不替换你停止的 worker；
+- 用同一 branch 上的新 worker 替换失败或超时的 worker，每个 feature 最多 `maxFeatureAttempts` 个 worker；没有给出结果就结束的 reviewer 或 validator 也会同样被替换；但绝不替换你停止的 Agent；
 - rebase 落后的 branch，合并通过检查的 branch；
 - 启动验证：派发 validator 并运行命令；
 - 推进到下一个里程碑，并通过完成门槛完成 objective；
@@ -263,12 +263,12 @@ autopilot 会：
 - `worker-idle`：worker 被提醒之后，再次没有完成就空闲下来；
 - `merge-blocked`：合并检查因需要判断的原因而受阻，例如改动了 feature 范围之外的文件；
 - `rebase-conflict`：没有 worker 能接手的冲突；
-- `review-stuck` 和 `validation-stuck`：reviewer 或 validator 一再没有给出结果就结束；
+- `review-stuck` 和 `validation-stuck`：reviewer 或 validator 一再没有给出结果就结束，或者你停止了其中一个；
 - `stalled`：已经有 `stallTimeoutMs` 没有任何进展。
 
 每种情况只唤醒一次。autopilot 驱动执行中的 objective 时，各个 feature 的机械事件只会作为上下文送达 orchestrator，不会触发模型轮次：结束的 Agent、review 请求和 survey 总结、review 结果以及验证结果。只有 autopilot 自己发出的唤醒和需要判断的消息（例如 worker 的提问）才会触发轮次，因此 orchestrator 只为判断消耗 token。如果 autopilot 的同一个动作连续三次被拒绝，orchestrator 会收到确切的错误信息和建议的处理办法。
 
-你始终掌握主动权：照常和 orchestrator 对话，用 `/tower stop <agent>` 永久停止某个 Agent（autopilot 绝不替换你停止的 worker），或者用 `/tower pause` 停止启动任何新工作。
+你始终掌握主动权：照常和 orchestrator 对话，用 `/tower stop <agent>` 永久停止某个 Agent（autopilot 绝不替换你停止的 Agent），或者用 `/tower pause` 停止启动任何新工作。
 
 **手动模式。** 在 `tower.json` 中设置 `"objective": { "autopilot": false }` 后，feature 的执行由 orchestrator 自己驱动，就像普通的 Tower 运行一样：它用 Tower 工具派发 worker 和 reviewer、恢复和替换 worker、rebase 和合并，每个结束的 Agent 和每条 inbox 消息也都会像以前一样触发它的轮次。验证、里程碑推进、完成、看门狗、预算和判断类唤醒仍然自动进行。
 
@@ -476,7 +476,7 @@ Tower 只能合并到本地 branch，不能合并到 remote-tracking ref 或 tag
 - **查看状态面板。** `/tower` 或 `/tower status` 会直接读取当前状态，不会触发模型轮次。可以看到 base、mission、roster（含每个 Agent 的模型）、review 检查、inbox 数量、并发预算和近期活动。存在 objective 时，还会多出一行 objective 摘要。
 - **跟进 objective。** `/tower objective status` 显示 objective 状态面板，同样不触发模型轮次：状态、耗时和花费、每个里程碑及其 feature 和验证轮次、正在运行的 Agent，以及预期的下一步。
 - **调整任务方向。** Tower 开启期间，直接发送普通消息即可补充约束、调整优先级或要求总结。Tower 把消息转给正在运行的 worker 后，worker 会在下一步看到它，正在执行的工具调用不会被打断。
-- **检查或停止 Agent。** `/tower agents` 列出本会话的 worker、reviewer 和 validator，以及它们的状态、模型、思考等级和分工。`/tower stop <agent>` 停止一个正在运行的 Agent。你主动停止的 worker 或 reviewer 视为有意终止：除非你另有指示，Tower 不会恢复、改派或替换它。objective 执行期间，autopilot 也绝不会恢复或替换你停止的 worker；但如果某个 review 或验证仍然缺失，它会启动新的 reviewer 或 validator，最多 `maxFeatureAttempts` 个。如果你不希望启动任何新工作，请暂停 objective。
+- **检查或停止 Agent。** `/tower agents` 列出本会话的 worker、reviewer 和 validator，以及它们的状态、模型、思考等级和分工。`/tower stop <agent>` 停止一个正在运行的 Agent。你主动停止的 worker、reviewer 或 validator 视为有意终止：除非你另有指示，Tower 不会恢复、改派或替换它。执行中 objective 的 autopilot 同样遵守这一点：对于被停止的 reviewer 或 validator，它会改为唤醒 orchestrator（`review-stuck` 或 `validation-stuck`），由 orchestrator 或你决定是否启动新的。失败或超时的 Agent 仍会被替换，最多 `maxFeatureAttempts` 次。
 - **切换 base。** 再次输入 `/tower <base-branch>`。Tower 会按新 base 重新检查现有 mission，只有落后的 branch 需要 rebase。合并之前，主 checkout 必须位于记录的 base 上。
 - **查看诊断日志。** pi-tower 会把自己的诊断信息（例如通知发送失败、Agent 会话中扩展报出的错误）写入 `.tower/pi-tower.log`；在 `.tower/` 创建之前，则写入 pi agent 目录下的 `pi-tower.log`。
 
@@ -738,7 +738,7 @@ Agent 在整个生命周期内都使用同一个模型；恢复后的 worker 会
 | `/tower models <role\|alias> <provider/modelId[:thinking]> [--project]` | 在全局 `tower.json` 中设置角色或模型池模型；加上 `--project` 则写入项目文件 |
 | `/tower models <role\|alias> --clear [--project]` | 移除角色或模型池模型 |
 | `/tower agents` | 列出本会话的 worker、reviewer 和 validator（包括已结束的），以及状态、模型和分工 |
-| `/tower stop <agent>` | 停止一个正在运行的 worker、reviewer 或 validator，可以传入 roster 名称、agent id 或 task id。这是人为停止：除非你另有指示，Tower 不会恢复、改派或替换它。objective 执行期间，如果 review 或验证仍然缺失，autopilot 仍可能启动新的 reviewer 或 validator。 |
+| `/tower stop <agent>` | 停止一个正在运行的 worker、reviewer 或 validator，可以传入 roster 名称、agent id 或 task id。这是人为停止：除非你另有指示，Tower 不会恢复、改派或替换它；objective 的 autopilot 也不会，而是改为唤醒 orchestrator。 |
 | `/tower objective [--headless] <text \| @file>` | 把 objective 交给 orchestrator，可以直接写文本，也可以从文件读取。Tower 模式必须已开启，并且没有其他 objective 处于等待批准、执行中或已暂停状态。`--headless` 表示规划时不提问。见 [Objective 命令与工具](#objective-命令与工具)。 |
 | `/tower objective status` | 显示 objective 状态面板，不触发模型轮次 |
 | `/tower approve [--auto]` | 批准正在等待批准的 objective 的计划。`--auto` 记录为自动批准。 |

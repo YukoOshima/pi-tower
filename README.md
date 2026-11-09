@@ -248,7 +248,7 @@ The autopilot:
 - spawns a reviewer for each review request on the current branch tip;
 - resumes an idle worker that received review findings or has a rebase conflict to resolve;
 - nudges a worker that went idle before finishing its feature (it neither called `TowerComplete` nor reported a blocker) to finish it or say what blocks it, once per branch tip;
-- replaces a worker that failed or timed out with a fresh one on the same branch, up to `maxFeatureAttempts` workers per feature, but never a worker you stopped;
+- replaces a worker that failed or timed out with a fresh one on the same branch, up to `maxFeatureAttempts` workers per feature, and likewise a reviewer or validator that ended without a result; it never replaces an agent you stopped;
 - rebases stale branches and merges the branches that pass the gate;
 - starts validation: it spawns the validators and runs the commands;
 - advances to the next milestone, and completes the objective through the gate;
@@ -263,12 +263,12 @@ The orchestrator is woken only for judgment, with one of these reasons:
 - `worker-idle`: a worker went idle again without finishing after it was nudged;
 - `merge-blocked`: the merge gate is blocked for a reason that needs judgment, such as files outside the feature's scope;
 - `rebase-conflict`: a conflict that no worker can take over;
-- `review-stuck` and `validation-stuck`: reviewers or validators keep ending without a result;
+- `review-stuck` and `validation-stuck`: reviewers or validators keep ending without a result, or you stopped one;
 - `stalled`: nothing has moved for `stallTimeoutMs`.
 
 Each wake is sent once per situation. While the autopilot drives an executing objective, the mechanical events of its features reach the orchestrator as context without starting a model turn: agents that end, review requests and survey summaries, review results, and validation results. Only the autopilot's own wakes and the messages that need judgment, such as a worker's question, start a turn, so the orchestrator spends tokens on judgment only. When the same autopilot action is refused on three ticks in a row, the orchestrator gets the exact error and a suggested remedy.
 
-You stay in charge. Talk to the orchestrator as usual, stop an agent for good with `/tower stop <agent>` (the autopilot never replaces a worker you stopped), or stop all new work with `/tower pause`.
+You stay in charge. Talk to the orchestrator as usual, stop an agent for good with `/tower stop <agent>` (the autopilot never replaces an agent you stopped), or stop all new work with `/tower pause`.
 
 **Manual mode.** With `"objective": { "autopilot": false }` in `tower.json`, the orchestrator drives feature execution itself, as in a plain tower run: it spawns workers and reviewers, resumes and replaces workers, rebases and merges with the tower tools, and every agent end and inbox message starts its turn as before. Validation, milestone advancement, completion, the watchdog, the budgets and the judgment wakes stay automatic.
 
@@ -476,7 +476,7 @@ You do not need to know the worker protocol to watch and steer Tower.
 - **Read the dashboard.** `/tower` or `/tower status` reads the current state directly and does not start a model turn. It shows the base, missions, the roster (with each agent's model), the review gate, the inbox count, the concurrency budget, and recent activity. While there is an objective, it adds a one-line summary of it.
 - **Follow an objective.** `/tower objective status` shows the objective dashboard, also without a model turn: the status, elapsed time and cost, every milestone with its features and validation rounds, the live agents, and the next expected step.
 - **Redirect work.** While Tower is on, send a normal message to add constraints, change priorities, or ask for a summary. When the tower relays a message to a running worker, the worker sees it at its next step boundary. The tool call in flight is never interrupted.
-- **Inspect or stop an agent.** `/tower agents` lists the workers, reviewers and validators of this session with their status, model, thinking level and assignment. `/tower stop <agent>` stops a running one. A worker or reviewer you stop is *dead by intent*: the tower does not resume, reassign, or replace it unless you say so. During an executing objective, the autopilot never resumes or replaces a worker you stopped. It does start a fresh reviewer or validator when a review or validation is still missing, up to `maxFeatureAttempts`; pause the objective if you want nothing new to start.
+- **Inspect or stop an agent.** `/tower agents` lists the workers, reviewers and validators of this session with their status, model, thinking level and assignment. `/tower stop <agent>` stops a running one. A worker, reviewer or validator you stop is *dead by intent*: the tower does not resume, reassign, or replace it unless you say so. The autopilot of an executing objective respects this too. For a stopped reviewer or validator it wakes the orchestrator instead (`review-stuck` or `validation-stuck`), and the orchestrator or you decide whether to start a fresh one. Agents that fail or time out are still replaced, up to `maxFeatureAttempts`.
 - **Change the base.** Run `/tower <base-branch>` again. Tower re-checks the open missions against the new base, and only stale branches need a rebase. The main checkout must be on the recorded base before anything is merged.
 - **Read the diagnostics.** pi-tower writes its own diagnostics, such as failed notifications and errors from extensions inside agent sessions, to `.tower/pi-tower.log`. Before `.tower/` exists they go to `pi-tower.log` in the pi agent directory.
 
@@ -738,7 +738,7 @@ With Kimi Code, you cannot give reviewers a model different from the tower's wit
 | `/tower models <role\|alias> <provider/modelId[:thinking]> [--project]` | Sets a role or pool model in the global `tower.json`, or in the project file with `--project` |
 | `/tower models <role\|alias> --clear [--project]` | Removes a role or pool model |
 | `/tower agents` | Lists this session's workers, reviewers and validators, including finished ones, with status, model and assignment |
-| `/tower stop <agent>` | Stops a running worker, reviewer or validator, given its roster name, agent id or task id. This is a human stop: the tower never resumes, reassigns or replaces it unless you say so. During an objective, the autopilot may still start a fresh reviewer or validator for a missing review or validation. |
+| `/tower stop <agent>` | Stops a running worker, reviewer or validator, given its roster name, agent id or task id. This is a human stop: the tower never resumes, reassigns or replaces it unless you say so, and neither does the autopilot of an objective, which wakes the orchestrator instead. |
 | `/tower objective [--headless] <text \| @file>` | Hands an objective to the orchestrator, inline or from a file. Tower mode must be on, and no other objective may be awaiting approval, executing or paused. `--headless` plans without questions. See [Objective commands and tools](#objective-commands-and-tools). |
 | `/tower objective status` | Shows the objective dashboard without a model turn |
 | `/tower approve [--auto]` | Approves the plan of the objective awaiting approval. `--auto` records an automatic approval. |
